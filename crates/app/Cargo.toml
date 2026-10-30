@@ -1,0 +1,28 @@
+[package]
+name = "macaroni"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+macaroni-core.workspace = true
+macaroni-term.workspace = true
+macaroni-config.workspace = true
+iced.workspace = true
+macaroni-browser.workspace = true
+notify-rust.workspace = true
+macaroni-ipc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rfd.workspace = true
+image.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+embed-resource = "3"
+
+[lints]
+workspace = true

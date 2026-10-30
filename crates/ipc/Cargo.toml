@@ -1,0 +1,17 @@
+[package]
+name = "macaroni-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+interprocess.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+widestring = "1"
+
+[lints]
+workspace = true

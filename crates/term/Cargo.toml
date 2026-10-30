@@ -1,0 +1,21 @@
+[package]
+name = "macaroni-term"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+alacritty_terminal.workspace = true
+portable-pty.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "emulator"
+harness = false
+
+[lints]
+workspace = true

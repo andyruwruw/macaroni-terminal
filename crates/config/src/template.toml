@@ -1,0 +1,270 @@
+# macaroni settings. Changes apply as soon as you save.
+# Every setting below shows its default; uncomment a line to change it.
+
+# Color theme: a built-in theme (macaroni-dark, macaroni-light) or the name of a file in the
+# "themes" folder next to this file, e.g. themes/mytheme.toml -> theme = "mytheme".
+# theme = "macaroni-dark"
+
+# How the app around the terminals looks: "glass" (translucent sheets with lit edges over a
+# deep gradient) or "solid" (flat greys).
+# ui_theme = "glass"
+
+[font]
+# Any installed monospace font. Leave unset to use the bundled JetBrains Mono.
+# family = "JetBrains Mono"
+# size = 14
+# ligatures = false
+# A row's height as a multiple of the size, from 1 to 2.5.
+# line_height = 1.3
+
+[shell]
+# Program for new terminals. Leave unset for the default: your login shell on macOS and Linux;
+# on Windows, Git Bash when Git for Windows is installed, else PowerShell 7, else Windows
+# PowerShell. Right-click a pane's + button to open a tab with any installed shell.
+# program = "powershell.exe"
+# args = ["-NoLogo"]
+
+[terminal]
+# Lines of history kept per terminal. Applies to terminals opened after the change.
+# scrollback = 10000
+# The cursor's shape until a program asks for another: "block", "underline" or "beam".
+# cursor_style = "block"
+# Lines one notch of the mouse wheel scrolls, from 1 to 20.
+# scroll_lines = 3
+# Copy text to the clipboard as soon as it's selected.
+# copy_on_select = false
+
+[notifications]
+# Programs can ask for attention (OSC 9, OSC 777, OSC 99): the tab, pane and workspace are
+# marked until you type or click in that tab. Show an OS notification too when that tab isn't
+# in view or the window isn't focused.
+# os = true
+# Treat the terminal bell as a request for attention.
+# bell = false
+# What the bell sounds like: "off", "system" (the system's alert sound), or the path of a sound
+# file (.wav on Windows; anything afplay plays on macOS).
+# bell_sound = "off"
+
+[session]
+# Reopen the last layout (workspaces, splits, tabs and their directories) when macaroni starts.
+# restore = true
+# In restored tabs that were running Claude Code, resume that session (claude --resume <id>).
+# resume_agents = true
+
+[agents]
+# Coding agents report what they're doing once their hooks are installed
+# (macaroni-cli setup claude, or the settings' Agents section).
+# Mark the tab and notify when an agent finishes responding, or when it needs your input.
+# notify_finished = true
+# notify_input = true
+# Show an agent's state and status line (model, context, cost) at the right of its pane's
+# tabs. Off by default: the workspace's detail line already shows what the agent is doing.
+# tab_status = false
+# Give a tab running an agent the sparkles icon.
+# tab_icon = true
+
+[browser]
+# The page a new browser tab opens.
+# home = "https://www.google.com/"
+# Where links you Ctrl+click (Cmd+click on macOS) in a terminal open: "panel" for a browser
+# split next to the terminal, "system" for your default browser.
+# open_links = "panel"
+
+[workspace_items]
+# What each workspace's row in the sidebar shows. Text settings are templates: placeholders in
+# braces are filled in, anything else shows as written, and a line that comes out empty is
+# hidden (so "" hides it). Placeholders:
+#   {name}      the workspace's name         {index}     its position, from 1
+#   {shortcut}  its 1-9 shortcut number      {title}     the focused tab's title
+#   {tabs}      how many tabs it has         {panes}     how many panes
+#   {summary}   "2 panes, 5 tabs"            {dir}       the focused tab's folder name
+#   {path}      the focused tab's directory  {notice}    the latest notification
+#   {agent}     what its coding agent is doing
+#   {activity}  the notification, else the agent, else nothing
+#   {status}    the notification, else the agent, else the summary
+# icon = true
+# The tile behind the icon; false shows the icon on its own.
+# icon_background = true  (solid: false)
+# title = "{name}"
+# detail = "{activity}"
+# badge = "{shortcut}"
+# Show the muted and pinned marks.
+# status_icons = true
+# close_button = true
+# The search bar at the top of the sidebar.
+# search = true  (solid: false)
+
+[tab_items]
+# What each tab shows, the same way. Pinned tabs always show just their icon. Placeholders:
+#   {title}   the tab's name, else the program's or page's title   {name}  the name you gave it
+#   {index}   its position in the pane, from 1                       {kind}  Terminal or Browser
+#   {dir}     its folder name     {path}  its directory     {url}  a browser tab's address
+#   {notice}  its latest notification     {agent}  what its coding agent is doing
+# icon = true
+# title = "{title}"
+# badge = ""
+# Show the muted mark.
+# status_icons = true
+# close_button = true
+
+# The look of the app around the terminals: sizes, spacing, corner radii, border widths and text
+# sizes, by part of the window. Everything here is also in the settings dialog (Layout and
+# Effects), and every value below is the default.
+
+[style.window]
+# sidebar_width = 236
+# title_bar_height = 36
+# title_bar_border_width = 1
+# title_bar_gap = 12  (solid: 0)
+# caption_button_width = 42
+# caption_icon_size = 14
+# logo_size = 13
+# logo_padding = 12
+# app_name_size = 14
+# workspace_name_size = 14
+# workspace_icon_size = 16
+# resize_border = 5
+
+[style.sidebar]
+# top_padding = 12
+# padding = 12  (solid: 8)
+# bottom_padding = 8
+# search_height = 36
+# search_padding = 10
+# search_gap = 10
+# spacing = 6
+# new_workspace_gap = 8
+# panes_gap = 4  (solid: 0)
+# border_width = 1
+
+[style.workspaces]
+# padding = 8  (solid: 4)
+# radius = 8  (solid: 10)
+# add_radius = 8  (solid: 2)
+# spacing = 8  (solid: 0)
+# line_spacing = 2
+# tile_size = 32  (solid: 27)
+# tile_radius = 8
+# icon_size = 16
+# title_size = 13
+# detail_size = 11
+# badge_size = 11
+# mark_size = 12
+# max_detail_chars = 30
+
+[style.groups]
+# indent = 12
+# padding = 6
+# spacing = 8
+# name_size = 12
+# count_size = 11
+# chevron_size = 14
+
+[style.tabs]
+# height = 36
+# padding_left = 10
+# padding_right = 6
+# radius = 8  (solid: 0)
+# add_radius = 8  (solid: 0)
+# accent_width = 2
+# spacing = 6  (solid: 0)
+# gap = 10  (solid: 0)
+# part_spacing = 8
+# min_width = 110
+# max_title_chars = 28
+# icon_size = 16
+# title_size = 12.5
+# badge_size = 11
+# status_size = 11
+# scrollbar_width = 3
+
+[style.panes]
+# gap = 8  (solid: 0)
+# margin = 8  (solid: 0)
+# radius = 16  (solid: 0)
+# padding = 6
+# terminal_padding = 6
+# border_width = 1
+# focus_border_width = 1
+# attention_border_width = 1.5
+# address_size = 12
+
+[style.menus]
+# width = 210
+# item_height = 30
+# padding = 5
+# item_padding = 10
+# spacing = 10
+# radius = 10  (solid: 4)
+# border_width = 1
+# text_size = 13
+# icon_size = 15
+# header_size = 11
+# header_height = 24
+# separator_height = 9
+# grid_cell = 30
+# picker_icon_size = 16
+# margin = 8
+# submenu_gap = 4
+# shadow_offset = 6
+# shadow_blur = 18
+
+[style.controls]
+# radius = 8  (solid: 3)
+# border_width = 1
+# highlight_width = 1.5
+# insertion_line_width = 2
+# icon_button_size = 14
+# field_text_size = 12
+
+[style.effects]
+# dim = 0.55
+# hover = 0.5
+# dragged = 0.35
+# drag_preview = 0.92
+# drop_tint = 0.12
+# shadow = 1
+# glass_idle = 0.45
+# blur = 40
+# shine = 0.6
+# lift = 1
+# lift_clear = 0.45
+# refraction = 1
+
+# Colors, for each interface: "#rrggbb", or "#rrggbbaa" with alpha. Unset ones keep the
+# interface's own (the settings dialog's Colors section shows them). The glass interface also
+# reads the glass_* and backdrop colors.
+#
+# Theme colors are shared: accent, success, error, foreground, lines and shade. Colors that
+# follow one change with it until they're set themselves. Any color can also be set to a theme
+# color's name to follow it, e.g. insertion = "success".
+[colors.solid]
+# Solid also has its own: border, search, title_bar_border, sidebar_border, workspace, workspace_active, workspace_hover, workspace_border,
+#   workspace_border_active, workspace_border_hover, tab_strip, tab, tab_active, tab_hover, tab_border,
+#   tab_border_active, tab_border_hover, tab_accent, add_workspace, add_workspace_border, add_tab,
+#   add_tab_border (the settings dialog's Solid Theme page lists them).
+# accent = "#009ced"
+# text = "#ffffff"
+
+[colors.glass]
+# Names: background, title_bar, sidebar, close_hover, logo, separator, outline, text, label, muted, faint, attention, working, danger,
+#   insertion, surface, item, raised, hover, item_edge, sunken, workspace_icon, shadow, card, card_border, popup, menu_shadow, overlay, knob,
+#   glass_light, glass_dark, glass_rim, backdrop_top, backdrop_bottom, glow_1, glow_2, glow_3, glow_4, glow_5.
+# attention = "#0aa6ff"
+
+[keybindings]
+# Add or override shortcuts as "chord" = "action". Use "none" to remove a default shortcut so
+# the key reaches the shell instead.
+#
+# Modifiers: ctrl, shift, alt (option), cmd (the Windows key on Windows).
+# Keys: a-z, 0-9, , . / ; ' [ ] \ - = `, tab, enter, escape, space, backspace, delete, insert,
+#       home, end, pageup, pagedown, left, right, up, down, f1-f12.
+#
+# Actions: new_tab, close_tab, next_tab, previous_tab, split_right, split_down, split_left,
+#          split_up, close_pane, focus_left, focus_right, focus_up, focus_down, new_workspace,
+#          close_workspace, next_workspace, previous_workspace, workspace_1 ... workspace_9,
+#          copy, paste, find, zoom_in, zoom_out, reset_zoom, open_settings, open_config,
+#          toggle_sidebar.
+#
+# "ctrl+shift+t" = "none"
+# "alt+t" = "new_tab"

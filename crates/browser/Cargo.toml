@@ -1,0 +1,15 @@
+[package]
+name = "macaroni-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+cef.workspace = true
+# Direct dependency so build.rs receives the CEF distribution directory (DEP_CEF_DLL_WRAPPER_CEF_DIR).
+cef-dll-sys.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
+
+[lints]
+workspace = true

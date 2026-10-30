@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.1.0-alpha.1"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+macaroni-core = { path = "crates/core" }
+macaroni-term = { path = "crates/term" }
+macaroni-config = { path = "crates/config" }
+iced = { version = "0.14", features = ["advanced", "svg", "image"] }
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
+insta = "1"
+criterion = { version = "0.8", default-features = false }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+toml_edit = "0.25"
+notify = "8"
+notify-rust = "4"
+interprocess = "2"
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+macaroni-ipc = { path = "crates/ipc" }
+macaroni-browser = { path = "crates/browser" }
+cef = { version = "=156.1.0", default-features = false }
+cef-dll-sys = { version = "=156.1.0", default-features = false }
+windows-sys = "0.61"
+rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+missing_docs_in_private_items = "warn"
+missing_panics_doc = "warn"
+undocumented_unsafe_blocks = "warn"

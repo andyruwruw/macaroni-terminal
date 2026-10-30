@@ -1,0 +1,14 @@
+[package]
+name = "macaroni-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+macaroni-ipc.workspace = true
+clap.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+
+[lints]
+workspace = true

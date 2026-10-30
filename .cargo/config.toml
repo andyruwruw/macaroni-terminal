@@ -1,0 +1,6 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+[env]
+# The CEF (Chromium) distribution is downloaded once into target/cef and reused by every build.
+CEF_PATH = { value = "target/cef", relative = true }
