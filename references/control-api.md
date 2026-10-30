@@ -20,7 +20,7 @@ client ── JSON line ──► socket ──► ipc-read thread ──► Mes
 ## Endpoint and access
 
 - `MACARONI_SOCKET` if set, else `macaroni-<user>`: a named pipe on Windows, a `.sock` in the runtime or temp dir elsewhere.
-- Current user only: a protected owner-only DACL on Windows, mode `0600` on Unix.
+- Current user only: a protected owner-only DACL on Windows, mode `0600` on Unix. macOS can't set a socket's mode before `bind` (`interprocess` returns `Unsupported`), so `transport::listen` falls back to chmodding the file right after; the default endpoint is in the per-user `$TMPDIR`, so the gap isn't reachable by other users.
 - `listen` refuses if another instance answers on the endpoint and replaces a stale socket file. If it fails, the app runs without the API and shows why in the banner.
 - Every terminal gets `MACARONI_SOCKET` and `MACARONI_TAB_ID`. Methods take an optional `tab` defaulting to the focused tab; the CLI fills `--tab` from `MACARONI_TAB_ID`, so a command run in a tab acts on that tab.
 

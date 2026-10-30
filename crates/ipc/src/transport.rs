@@ -73,9 +73,8 @@ pub fn listen(endpoint: &str) -> io::Result<Listener> {
             format!("another macaroni is already listening on {endpoint}"),
         ));
     }
-    let options = ListenerOptions::new().name(name(endpoint)?);
     #[cfg(windows)]
-    let options = {
+    {
         use interprocess::os::windows::local_socket::ListenerOptionsExt;
         use interprocess::os::windows::security_descriptor::SecurityDescriptor;
         // Protected DACL with a single entry: generic all for the owner (the user running us).
@@ -83,15 +82,34 @@ pub fn listen(endpoint: &str) -> io::Result<Listener> {
         // get a default DACL that also lets other local accounts read.
         let sddl = widestring::U16CString::from_str("D:P(A;;GA;;;OW)")
             .map_err(|e| io::Error::other(e.to_string()))?;
-        options.security_descriptor(SecurityDescriptor::deserialize(&sddl)?)
-    };
+        ListenerOptions::new()
+            .name(name(endpoint)?)
+            .security_descriptor(SecurityDescriptor::deserialize(&sddl)?)
+            .create_sync()
+    }
     #[cfg(unix)]
-    let options = {
+    {
+        use std::os::unix::fs::PermissionsExt;
+
         use interprocess::os::unix::local_socket::ListenerOptionsExt;
         // Overwriting is safe here: the trial connect above already showed nobody answers.
-        options.mode(0o600).try_overwrite(true)
-    };
-    options.create_sync()
+        let options = || -> io::Result<ListenerOptions<'_>> {
+            Ok(ListenerOptions::new()
+                .name(name(endpoint)?)
+                .try_overwrite(true))
+        };
+        match options()?.mode(0o600).create_sync() {
+            // macOS can't set a socket's mode before binding it, so there it's set on the file
+            // right after. The default endpoint is in the per-user `$TMPDIR` (a 0700 folder on
+            // macOS), so nobody else can reach the socket in between.
+            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                let listener = options()?.create_sync()?;
+                std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))?;
+                Ok(listener)
+            }
+            result => result,
+        }
+    }
 }
 
 /// Waits for the next client on `listener` (blocking).
