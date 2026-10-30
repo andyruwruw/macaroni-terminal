@@ -165,8 +165,15 @@ mod tests {
         );
 
         let server = std::thread::spawn(move || {
-            let stream = listener.accept().expect("accept");
-            let request: Request = read_line(&mut BufReader::new(&stream)).unwrap().unwrap();
+            // On Unix the second `listen`'s trial connect waits in the backlog and closes without
+            // a request, so skip connections that end before sending one, as the app's server does.
+            let (stream, request) = loop {
+                let stream = listener.accept().expect("accept");
+                let line: Option<Request> = read_line(&mut BufReader::new(&stream)).unwrap();
+                if let Some(request) = line {
+                    break (stream, request);
+                }
+            };
             assert_eq!(request.call, Call::List);
             write_line(
                 &mut &stream,
