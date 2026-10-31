@@ -117,7 +117,7 @@ pub enum Icon {
     FolderPen,
     /// Combine Workspaces, in menus.
     Combine,
-    /// The settings dialog's Solid Theme page.
+    /// The settings dialog's Theme page.
     SwatchBook,
     /// Remove from group, in menus.
     FolderMinus,
@@ -129,12 +129,20 @@ pub enum Icon {
     Keyboard,
     /// The settings dialog's General section.
     Sliders,
-    /// The settings dialog's Sidebar & Tabs section, and the button that folds the sidebar.
+    /// The settings dialog's Sidebar page, and the button that folds the sidebar.
     PanelLeft,
     /// Open config.toml, in the settings dialog.
     ExternalLink,
     /// The settings dialog's Agents section.
     Bot,
+    /// The settings dialog's Window page.
+    AppWindow,
+    /// The settings dialog's Tabs page.
+    PanelTop,
+    /// The settings dialog's Panes page.
+    Columns,
+    /// The settings dialog's Menus & Controls page.
+    Menu,
 }
 
 /// Defines `handle`, mapping each [`Icon`] to its file in `assets/icons/`: one lazily decoded
@@ -217,6 +225,10 @@ handles! {
     Sliders => "sliders-horizontal.svg",
     PanelLeft => "panel-left.svg",
     ExternalLink => "external-link.svg",
+    AppWindow => "app-window.svg",
+    PanelTop => "panel-top.svg",
+    Columns => "columns-2.svg",
+    Menu => "menu.svg",
 }
 
 /// The icons a workspace can have, by the names saved with it.

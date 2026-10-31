@@ -22,6 +22,8 @@
 - Every table is `deny_unknown_fields`, so typos are errors.
 - `[colors.*]` are maps, so serde can't catch typos; `Colors::check` rejects unknown names, references to missing theme colors, and a theme color pointing at another (theme colors end the chain).
 - Errors vs warnings: a parse or check error keeps the last good config and shows a banner. An unknown action (skipped by `Keymap::new`) or an uninstalled `font.family` (`fonts::resolve` falls back) is a warning; the rest applies.
+- `[tab_items] new_buttons` turns the tab strip's new tab buttons on and off; it's an `item_rows` key placed on the Tabs page's "What tabs show" card.
+- `[[ssh]]` is an array of tables (`SshProfile`); each needs a `host`. The dialog edits it with `write_ssh`, which replaces the whole array, since `write_setting` only sets dotted keys.
 - Font, theme and ligature changes apply live (new `Metrics` resize every view's grid); `shell` and `scrollback` apply to new terminals only.
 - Themes color the terminal only. UI colors come from `ui_theme` (`Chrome`), except pane cards take the terminal background.
 
@@ -42,8 +44,8 @@ Matching is exact on modifiers. Digits match the physical key, named keys the lo
 ## How to extend
 
 - **Setting**: add the field to its `*Settings` struct with a serde default (and to `File`/`Config` for a new table), add a range check in `Config::parse` if needed, and add the commented line to `template.toml`. `template_parses_to_defaults` fails if the template and `Default` disagree.
-- **`[style.*]` number**: add a row to the table's `numbers!` (default, min, max, step, `Unit`, label, description). That generates the field, default, range check, `Style::get` and the dialog row. Add `# key = default` to the template's `[style.<table>]` (with `  (solid: N)` if you also add it to `SOLID_DEFAULTS`); `template_lists_every_style_setting` enforces it. A new table also needs a `styles!` entry.
-- **Color**: add a `colors!` row, a field on `Chrome` with its base value in `Chrome::glass`/`Chrome::solid`, an arm in `Chrome::color_mut`, and mention the name in the template (the same test checks `COLORS`). A new shared color goes in `theme_colors!` and `ThemeColors::base`.
+- **`[style.*]` number**: add a row to the table's `numbers!` (default, min, max, step, `Unit`, label, description). That generates the field, default, range check, `Style::get` and the dialog row; place its key on a card in the app's `LOOK` table (`view/settings/list.rs`). Add `# key = default` to the template's `[style.<table>]` (with `  (solid: N)` if you also add it to `SOLID_DEFAULTS`); `template_lists_every_style_setting` enforces it. A new table also needs a `styles!` entry.
+- **Color**: add a `colors!` row, a field on `Chrome` with its base value in `Chrome::glass`/`Chrome::solid`, an arm in `Chrome::color_mut`, mention the name in the template (the same test checks `COLORS`), and place it on a card in the app's `LOOK` table. A new shared color goes in `theme_colors!` and `ThemeColors::base`.
 - **Built-in theme**: add `src/themes/<name>.toml` and a `BUILTIN_THEMES` entry (bump its array length).
 - **Keybinding action**: add a name in `keymap::action`, a default in both `DEFAULTS_*` lists if wanted, and list it under `# Actions:` in the template; `every_documented_action_exists` checks each listed name resolves.
 

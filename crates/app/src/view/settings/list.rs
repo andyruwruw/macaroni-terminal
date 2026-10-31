@@ -1,16 +1,16 @@
 //! Every row the settings dialog shows, built from the current config.
 //!
 //! [`App::settings_list`] is rebuilt on every draw of the dialog, so each row's value is what's
-//! in effect. To add a setting, add a row here (and read it somewhere). The look's rows come
-//! from config metadata instead: `macaroni_config::COLORS`, `THEME_COLORS` and
-//! `Style::settings`, so a new color or `[style.*]` number shows up without touching this file.
-//! Appearance holds everything visual, each part's sizes next to its colors; a few colors are
-//! repeated, as copies left out of search, on the functional pages that use them.
+//! in effect. The functional pages (General through Keyboard Shortcuts) are written out here.
+//! The Appearance pages come from [`LOOK`], which places every color (`macaroni_config::COLORS`,
+//! `THEME_COLORS`), every `[style.*]` number and the item toggles and templates on exactly one
+//! card, each part's colors beside its sizes. A test checks nothing is left out or listed twice,
+//! so a new color or number fails it until it's given a card.
 
 use iced::Color;
 use macaroni_config::{
-    COLORS, Chord, ChordKey, ColorValue, Config, CursorStyle, NamedKey, NumberSetting, OpenLinks,
-    Rgba, Style, THEME_COLORS, Theme, UiTheme, Unit, Value,
+    COLORS, Chord, ChordKey, ColorSetting, ColorValue, Config, CursorStyle, NamedKey,
+    NumberSetting, OpenLinks, Rgba, Style, THEME_COLORS, Theme, ThemeColor, UiTheme, Unit, Value,
 };
 
 use super::{Control, Section, Setting, SettingsMessage};
@@ -20,7 +20,7 @@ use crate::{App, MAX_FONT_SIZE, MIN_FONT_SIZE, Message, keymap};
 /// `[font] size`, as a number row.
 static FONT_SIZE: NumberSetting = NumberSetting {
     key: "font.size",
-    group: "Terminal font",
+    group: "Font",
     label: "Font size",
     description: "Zoom (Ctrl+= and Ctrl+-) adds to it for the session.",
     default: 14.0,
@@ -33,7 +33,7 @@ static FONT_SIZE: NumberSetting = NumberSetting {
 /// `[font] line_height`.
 static LINE_HEIGHT: NumberSetting = NumberSetting {
     key: "font.line_height",
-    group: "Terminal font",
+    group: "Font",
     label: "Line height",
     description: "Each row's height as a multiple of the font size.",
     default: 1.3,
@@ -66,16 +66,371 @@ pub(super) fn number_setting(key: &str) -> Option<&'static NumberSetting> {
         .find(|s| s.key == key)
 }
 
-/// Where the colors of each `COLORS` group are repeated besides Appearance: its `group`, then
-/// the section and card title it's repeated under.
-const COLOR_REPEATS: &[(&str, Section, &str)] = &[
-    ("Accents", Section::Notifications, "Colors"),
-    ("Workspaces and tabs", Section::Items, "Colors"),
+/// The `COLORS` group of the colors only the solid interface draws, left off the pages in glass.
+const SOLID_GROUP: &str = "Solid theme";
+
+/// The `[style.effects]` numbers only the glass interface uses, left off the pages in solid.
+const GLASS_NUMBERS: &[&str] = &[
+    "style.effects.glass_idle",
+    "style.effects.blur",
+    "style.effects.shine",
+    "style.effects.lift",
+    "style.effects.lift_clear",
+    "style.effects.refraction",
 ];
 
-/// The `COLORS` group of the colors only the solid interface has, listed only on the Solid
-/// Theme page.
-const SOLID_GROUP: &str = "Solid theme";
+/// A card on an Appearance page: its title, then its rows' keys (see [`LOOK`]).
+type Card = (&'static str, &'static [&'static str]);
+
+/// The Appearance pages: each page's cards in order, and each card's rows by key: a [`COLORS`]
+/// or [`THEME_COLORS`] name, a `[style.*]` number's dotted key, or the key of one of
+/// [`item_rows`]. A row the interface in use doesn't draw ([`SOLID_GROUP`], [`GLASS_NUMBERS`],
+/// glass-only colors) is left out, and a card left with no rows isn't shown.
+const LOOK: &[(Section, &[Card])] = &[
+    (
+        Section::Theme,
+        &[
+            ("Themes", &["ui_theme", "theme"]),
+            (
+                "Theme colors",
+                &["accent", "success", "error", "foreground", "lines", "shade"],
+            ),
+            ("Text", &["text", "label", "muted", "faint"]),
+            ("Accents", &["attention", "working", "danger"]),
+            ("Surfaces", &["surface", "item"]),
+        ],
+    ),
+    (
+        Section::Window,
+        &[
+            (
+                "Window",
+                &[
+                    "background",
+                    "border",
+                    "separator",
+                    "style.window.resize_border",
+                ],
+            ),
+            (
+                "Title bar",
+                &[
+                    "title_bar",
+                    "title_bar_border",
+                    "style.window.title_bar_height",
+                    "style.window.title_bar_border_width",
+                    "style.window.title_bar_gap",
+                ],
+            ),
+            (
+                "Window buttons",
+                &[
+                    "close_hover",
+                    "style.window.caption_button_width",
+                    "style.window.caption_icon_size",
+                ],
+            ),
+            (
+                "Logo and names",
+                &[
+                    "logo",
+                    "style.window.logo_size",
+                    "style.window.logo_padding",
+                    "style.window.app_name_size",
+                    "style.window.workspace_name_size",
+                    "style.window.workspace_icon_size",
+                ],
+            ),
+        ],
+    ),
+    (
+        Section::Sidebar,
+        &[
+            (
+                "Sidebar",
+                &[
+                    "sidebar",
+                    "sidebar_border",
+                    "style.window.sidebar_width",
+                    "style.sidebar.border_width",
+                    "style.sidebar.top_padding",
+                    "style.sidebar.padding",
+                    "style.sidebar.bottom_padding",
+                    "style.sidebar.spacing",
+                    "style.sidebar.panes_gap",
+                ],
+            ),
+            (
+                "Search bar",
+                &[
+                    "workspace_items.search",
+                    "search",
+                    "style.sidebar.search_height",
+                    "style.sidebar.search_padding",
+                    "style.sidebar.search_gap",
+                ],
+            ),
+            (
+                "What workspaces show",
+                &[
+                    "workspace_items.title",
+                    "workspace_items.detail",
+                    "workspace_items.badge",
+                    "workspace_items.status_icons",
+                    "workspace_items.close_button",
+                ],
+            ),
+            (
+                "Workspaces",
+                &[
+                    "workspace",
+                    "workspace_active",
+                    "workspace_hover",
+                    "workspace_border",
+                    "workspace_border_active",
+                    "workspace_border_hover",
+                    "style.workspaces.padding",
+                    "style.workspaces.radius",
+                    "style.workspaces.spacing",
+                    "style.workspaces.line_spacing",
+                ],
+            ),
+            (
+                "Workspace icon",
+                &[
+                    "workspace_items.icon",
+                    "workspace_items.icon_background",
+                    "workspace_icon",
+                    "style.workspaces.tile_size",
+                    "style.workspaces.tile_radius",
+                    "style.workspaces.icon_size",
+                ],
+            ),
+            (
+                "Workspace text",
+                &[
+                    "style.workspaces.title_size",
+                    "style.workspaces.detail_size",
+                    "style.workspaces.badge_size",
+                    "style.workspaces.mark_size",
+                    "style.workspaces.max_detail_chars",
+                ],
+            ),
+            (
+                "Groups",
+                &[
+                    "style.groups.indent",
+                    "style.groups.padding",
+                    "style.groups.spacing",
+                    "style.groups.name_size",
+                    "style.groups.count_size",
+                    "style.groups.chevron_size",
+                ],
+            ),
+            (
+                "New workspace button",
+                &[
+                    "add_workspace",
+                    "add_workspace_border",
+                    "style.workspaces.add_radius",
+                    "style.sidebar.new_workspace_gap",
+                ],
+            ),
+        ],
+    ),
+    (
+        Section::Tabs,
+        &[
+            (
+                "What tabs show",
+                &[
+                    "tab_items.icon",
+                    "tab_items.title",
+                    "tab_items.badge",
+                    "tab_items.status_icons",
+                    "tab_items.close_button",
+                    "tab_items.new_buttons",
+                ],
+            ),
+            (
+                "Tabs",
+                &[
+                    "tab",
+                    "tab_active",
+                    "tab_hover",
+                    "tab_border",
+                    "tab_border_active",
+                    "tab_border_hover",
+                    "style.tabs.height",
+                    "style.tabs.min_width",
+                    "style.tabs.radius",
+                    "style.tabs.padding_left",
+                    "style.tabs.padding_right",
+                    "style.tabs.spacing",
+                    "style.tabs.part_spacing",
+                ],
+            ),
+            ("Open tab line", &["tab_accent", "style.tabs.accent_width"]),
+            (
+                "Tab text and icons",
+                &[
+                    "style.tabs.icon_size",
+                    "style.tabs.title_size",
+                    "style.tabs.badge_size",
+                    "style.tabs.max_title_chars",
+                ],
+            ),
+            (
+                "Tab strip",
+                &[
+                    "tab_strip",
+                    "style.tabs.gap",
+                    "style.tabs.scrollbar_width",
+                    "style.tabs.status_size",
+                ],
+            ),
+            (
+                "New tab button",
+                &["add_tab", "add_tab_border", "style.tabs.add_radius"],
+            ),
+        ],
+    ),
+    (
+        Section::Panes,
+        &[
+            (
+                "Panes",
+                &[
+                    "card",
+                    "card_border",
+                    "shadow",
+                    "style.panes.border_width",
+                    "style.panes.radius",
+                    "style.panes.gap",
+                    "style.panes.margin",
+                ],
+            ),
+            (
+                "Inside panes",
+                &[
+                    "style.panes.padding",
+                    "style.panes.terminal_padding",
+                    "style.panes.address_size",
+                ],
+            ),
+            (
+                "Outlines",
+                &[
+                    "outline",
+                    "style.panes.focus_border_width",
+                    "style.panes.attention_border_width",
+                ],
+            ),
+        ],
+    ),
+    (
+        Section::Menus,
+        &[
+            (
+                "Menus",
+                &[
+                    "popup",
+                    "item_edge",
+                    "menu_shadow",
+                    "style.menus.width",
+                    "style.menus.radius",
+                    "style.menus.border_width",
+                    "style.menus.padding",
+                    "style.menus.margin",
+                    "style.menus.submenu_gap",
+                    "style.menus.shadow_offset",
+                    "style.menus.shadow_blur",
+                ],
+            ),
+            (
+                "Menu entries",
+                &[
+                    "hover",
+                    "style.menus.item_height",
+                    "style.menus.item_padding",
+                    "style.menus.spacing",
+                    "style.menus.text_size",
+                    "style.menus.icon_size",
+                    "style.menus.header_size",
+                    "style.menus.header_height",
+                    "style.menus.separator_height",
+                ],
+            ),
+            (
+                "Icon and color pickers",
+                &["style.menus.grid_cell", "style.menus.picker_icon_size"],
+            ),
+            (
+                "Buttons and fields",
+                &[
+                    "raised",
+                    "sunken",
+                    "knob",
+                    "style.controls.radius",
+                    "style.controls.border_width",
+                    "style.controls.icon_button_size",
+                    "style.controls.field_text_size",
+                ],
+            ),
+            ("Dialogs", &["overlay"]),
+        ],
+    ),
+    (
+        Section::Effects,
+        &[
+            (
+                "Items",
+                &[
+                    "style.effects.dim",
+                    "style.effects.hover",
+                    "style.effects.shadow",
+                ],
+            ),
+            (
+                "Dragging",
+                &[
+                    "insertion",
+                    "style.controls.insertion_line_width",
+                    "style.controls.highlight_width",
+                    "style.effects.dragged",
+                    "style.effects.drag_preview",
+                    "style.effects.drop_tint",
+                ],
+            ),
+            (
+                "Glass",
+                &[
+                    "glass_light",
+                    "glass_dark",
+                    "glass_rim",
+                    "style.effects.glass_idle",
+                    "style.effects.blur",
+                    "style.effects.shine",
+                    "style.effects.lift",
+                    "style.effects.lift_clear",
+                    "style.effects.refraction",
+                ],
+            ),
+            (
+                "Backdrop",
+                &[
+                    "backdrop_top",
+                    "backdrop_bottom",
+                    "glow_1",
+                    "glow_2",
+                    "glow_3",
+                    "glow_4",
+                    "glow_5",
+                ],
+            ),
+        ],
+    ),
+];
 
 /// The Quick Theme page's one card: its title, then its colors by name.
 const QUICK_CARD: (&str, &[&str]) = (
@@ -95,100 +450,15 @@ const QUICK_CARD: (&str, &[&str]) = (
     ],
 );
 
-/// The Solid Theme page's cards: each title, then its colors by name and numbers by dotted key
-/// (a key [`number_setting`] knows is a number), in order.
-const THEME_CARDS: &[(&str, &[&str])] = &[
-    (
-        "Window",
-        &[
-            "background",
-            "title_bar",
-            "border",
-            "title_bar_border",
-            "style.window.title_bar_border_width",
-            "style.window.title_bar_gap",
-        ],
-    ),
-    (
-        "Sidebar",
-        &[
-            "sidebar",
-            "sidebar_border",
-            "style.sidebar.border_width",
-            "style.sidebar.top_padding",
-            "style.sidebar.padding",
-            "style.sidebar.bottom_padding",
-            "style.sidebar.panes_gap",
-        ],
-    ),
-    (
-        "Search bar",
-        &[
-            SEARCH_TOGGLE,
-            "search",
-            "style.sidebar.search_height",
-            "style.sidebar.search_padding",
-            "style.sidebar.search_gap",
-        ],
-    ),
-    (
-        "Workspaces",
-        &[
-            "workspace",
-            "workspace_active",
-            "workspace_hover",
-            "workspace_border",
-            "workspace_border_active",
-            "workspace_border_hover",
-            "workspace_icon",
-            ICON_BACKGROUND_TOGGLE,
-            "style.workspaces.tile_size",
-            "style.workspaces.tile_radius",
-            "style.workspaces.padding",
-            "style.workspaces.radius",
-        ],
-    ),
-    (
-        "Tabs",
-        &[
-            "tab_strip",
-            "tab",
-            "tab_active",
-            "tab_hover",
-            "tab_border",
-            "tab_border_active",
-            "tab_border_hover",
-            "tab_accent",
-            "style.tabs.accent_width",
-            "style.tabs.radius",
-            "style.tabs.gap",
-        ],
-    ),
-    (
-        "Panels",
-        &[
-            "card",
-            "card_border",
-            "shadow",
-            "style.panes.radius",
-            "style.panes.border_width",
-            "style.panes.gap",
-            "style.panes.margin",
-        ],
-    ),
-    (
-        "New workspace button",
-        &[
-            "add_workspace",
-            "add_workspace_border",
-            "style.workspaces.add_radius",
-        ],
-    ),
-    (
-        "New tab button",
-        &["add_tab", "add_tab_border", "style.tabs.add_radius"],
-    ),
-];
+/// What a color row shows while its color is unset, worked out once per list.
+struct ColorDefaults {
+    /// The interface's own colors, before the config.
+    base: Chrome,
+    /// The theme colors in effect.
+    theme: ThemeColors,
+    /// The theme colors before the config.
+    theme_base: ThemeColors,
+}
 
 impl App {
     /// Every row, section by section. Rows of a section and group must be next to each other,
@@ -196,16 +466,8 @@ impl App {
     pub(super) fn settings_list(&self) -> Vec<Setting> {
         let config = &self.config;
         let mut list = self.general_settings();
-        list.extend(self.appearance_settings());
-        // Dev-only pages (`Section::shown_in_build`), left out so search can't reach them.
-        if cfg!(debug_assertions) {
-            list.extend(self.quick_settings());
-            list.extend(self.theme_settings());
-        }
         list.extend(self.terminal_settings());
         list.extend(self.notification_settings());
-        list.extend(self.agent_settings());
-        list.extend(self.item_settings());
         list.extend(keymap::named_bindings(&config.keybindings).into_iter().map(
             |(chord, name)| {
                 Setting::new(
@@ -217,23 +479,35 @@ impl App {
                 )
             },
         ));
+        list.extend(self.agent_settings());
+        list.extend(self.browser_settings());
+        list.extend(self.vscode_settings());
+        list.extend(self.look_settings());
+        // Dev-only (`Section::shown_in_build`), left out so search can't reach it.
+        if cfg!(debug_assertions) {
+            list.extend(self.quick_settings());
+        }
         list
     }
 
-    /// General: the session and the browser.
+    /// General: restoring the session.
     fn general_settings(&self) -> Vec<Setting> {
-        use Section::General;
+        vec![Setting::new(
+            Section::General,
+            "Session",
+            "Restore session",
+            "Reopen the last layout on launch: workspaces, splits, tabs and directories.",
+            Control::Toggle("session.restore", self.config.session.restore),
+        )]
+    }
+
+    /// Browser: where terminal links open, and the home page.
+    fn browser_settings(&self) -> Vec<Setting> {
+        use Section::Browser;
         let config = &self.config;
         vec![
             Setting::new(
-                General,
-                "Session",
-                "Restore session",
-                "Reopen the last layout on launch: workspaces, splits, tabs and directories.",
-                Control::Toggle("session.restore", config.session.restore),
-            ),
-            Setting::new(
-                General,
+                Browser,
                 "Browser",
                 "Open links in",
                 "Where links clicked in a terminal open.",
@@ -250,7 +524,7 @@ impl App {
                 ),
             ),
             Setting::new(
-                General,
+                Browser,
                 "Browser",
                 "Home page",
                 "The page a new browser tab opens. Press Enter to apply.",
@@ -263,171 +537,173 @@ impl App {
         ]
     }
 
-    /// Appearance: everything visual, one card per part, each part's sizes followed by its
-    /// colors: the interface and terminal themes, the terminal font, the theme colors, then
-    /// every `[style.*]` table, then the effects and glass colors.
-    fn appearance_settings(&self) -> Vec<Setting> {
-        use Section::Appearance;
+    /// VS Code: download or remove it, and its server while it runs. Nothing where browser
+    /// tabs don't exist.
+    fn vscode_settings(&self) -> Vec<Setting> {
+        if !crate::vscode::available() {
+            return Vec::new();
+        }
+        let web = &self.vscode_web;
+        let (mut description, button, message) = if web.busy {
+            (
+                "Working\u{2026}".to_owned(),
+                "Please wait",
+                SettingsMessage::VsCode(true),
+            )
+        } else if web.installed {
+            (
+                format!(
+                    "Installed in {}. Open a VS Code tab from a pane's + menu or the tab strip.",
+                    crate::vscode::dir().display()
+                ),
+                "Remove",
+                SettingsMessage::VsCode(false),
+            )
+        } else {
+            (
+                format!(
+                    "Opt in to run VS Code for the web in browser tabs. Downloads Microsoft's VS \
+                     Code CLI (about 10 MB); the first tab then fetches the VS Code server. \
+                     Downloading accepts its license: {}",
+                    crate::vscode::LICENSE_URL
+                ),
+                "Download",
+                SettingsMessage::VsCode(true),
+            )
+        };
+        if let Some(error) = &web.error {
+            description = format!("{description}\n{error}");
+        }
+        let mut rows = vec![Setting::new(
+            Section::VsCode,
+            "Download",
+            "VS Code in tabs",
+            &description,
+            Control::Button(button.to_owned(), Message::Settings(message)),
+        )];
+        if let Some(server) = &web.server {
+            let state = if web.ready { "Running" } else { "Starting" };
+            rows.push(Setting::new(
+                Section::VsCode,
+                "Server",
+                "Server",
+                &format!(
+                    "{state} on 127.0.0.1:{}, for this machine only. Stopping it disconnects \
+                     open VS Code tabs; the next one starts it again.",
+                    server.port
+                ),
+                Control::Button(
+                    "Stop".to_owned(),
+                    Message::Settings(SettingsMessage::VsCodeStop),
+                ),
+            ));
+        }
+        rows
+    }
+
+    /// The Appearance pages, laid out by [`LOOK`].
+    fn look_settings(&self) -> Vec<Setting> {
         let themes: Vec<(String, Value)> = Theme::names(&self.config_dir)
             .into_iter()
             .map(|name| (name.clone(), Value::Str(name)))
             .collect();
-        let font = &self.config.font;
-        let mut list = vec![
-            Setting::new(
-                Appearance,
-                "Interface",
-                "Theme",
-                "How the sidebar, tabs and panes are drawn. Glass is a fixed frosted preset; Solid is flat, and the Solid Theme page sets its colors, borders and spacing.",
-                interface_choice(self.config.ui_theme),
-            ),
-            Setting::new(
-                Appearance,
-                "Terminal colors",
-                "Color theme",
-                "Terminal colors. Add your own to the themes folder next to config.toml.",
-                choice("theme", themes, &str_value(&self.config.theme_name)),
-            ),
-            Setting::new(
-                Appearance,
-                "Terminal font",
-                "Font family",
-                "Any installed monospace font. Empty uses the bundled JetBrains Mono.",
-                Control::Text {
-                    key: "font.family",
-                    value: font.family.clone().unwrap_or_default(),
-                    placeholder: "JetBrains Mono",
-                },
-            ),
-            number_row(Appearance, &FONT_SIZE, font.size),
-            number_row(Appearance, &LINE_HEIGHT, font.line_height),
-            Setting::new(
-                Appearance,
-                "Terminal font",
-                "Ligatures",
-                "Join character pairs like => and != where the font supports it.",
-                Control::Toggle("font.ligatures", font.ligatures),
-            ),
-        ];
-        list.extend(self.theme_colors());
-        list.extend(self.colors_card("Accents", "Accent colors"));
-        list.extend(self.colors_card("Text", "Text colors"));
-        let mut table = "";
-        for setting in Style::settings() {
-            if setting.group != table {
-                list.extend(self.colors_after(table));
-                table = setting.group;
-            }
-            list.push(self.style_row(Appearance, setting));
-        }
-        list.extend(self.colors_after(table));
-        list
-    }
-
-    /// The theme colors' card: each a swatch and a field.
-    fn theme_colors(&self) -> Vec<Setting> {
-        let ui = self.config.ui_theme;
-        let overrides = self.config.colors.for_ui(ui);
-        let base = ThemeColors::base(ui);
-        let theme = ThemeColors::new(ui, overrides);
-        THEME_COLORS
-            .iter()
-            .filter_map(|t| {
-                Some(Setting::new(
-                    Section::Appearance,
-                    "Theme colors",
-                    t.label,
-                    t.description,
-                    Control::Color {
-                        key: t.key(ui),
-                        value: theme.get(t.name)?,
-                        default: base.get(t.name)?,
-                        link: None,
-                        themed: false,
-                        set: overrides.get(t.name).cloned(),
-                    },
-                ))
-            })
-            .collect()
-    }
-
-    /// The colors of `COLORS` group `group`, as an Appearance card titled `title`.
-    fn colors_card(&self, group: &str, title: &'static str) -> Vec<Setting> {
-        self.element_colors(
-            |c| c.group == group,
-            |_| (Section::Appearance, title),
-            false,
-        )
-    }
-
-    /// The colors card that follows the `[style.*]` table titled `table`, if it has one.
-    fn colors_after(&self, table: &str) -> Vec<Setting> {
-        match table {
-            "Window" => self.colors_card("Window", "Window colors"),
-            "Tabs" => self.colors_card("Workspaces and tabs", "Workspace and tab colors"),
-            "Panes" => self.colors_card("Panes", "Pane colors"),
-            "Menus" => self.colors_card("Menus and dialogs", "Menu and dialog colors"),
-            "Effects" => {
-                let mut list = self.colors_card("Glass", "Glass colors");
-                list.extend(self.colors_card("Backdrop", "Backdrop colors"));
-                list
-            }
-            _ => Vec::new(),
-        }
-    }
-
-    /// The rows for the element colors `keep` picks, under the section and card `place` gives
-    /// each; `repeat` marks them as copies of the Appearance page's.
-    fn element_colors(
-        &self,
-        keep: impl Fn(&macaroni_config::ColorSetting) -> bool,
-        place: impl Fn(&macaroni_config::ColorSetting) -> (Section, &'static str),
-        repeat: bool,
-    ) -> Vec<Setting> {
-        // Defaults show what a color is while unset: the interface's own, or its theme color's.
-        let ui = self.config.ui_theme;
-        let overrides = self.config.colors.for_ui(ui);
-        let base = Chrome::base(&Palette::from_theme(&self.config.theme), ui);
-        let theme = ThemeColors::new(ui, overrides);
-        COLORS
-            .iter()
-            .filter(|color| ui == UiTheme::Glass || !color.glass_only)
-            .filter(|color| keep(color))
-            .filter_map(|color| {
-                let link = THEME_COLORS.iter().find(|t| t.name == color.link);
-                let (section, group) = place(color);
-                let mut row = Setting::new(
-                    section,
-                    group,
-                    color.label,
-                    color.description,
-                    Control::Color {
-                        key: color.key(ui),
-                        value: self.chrome.color(color.name)?,
-                        default: match link {
-                            Some(t) => theme.get(t.name)?,
-                            None => base.color(color.name)?,
-                        },
-                        link: link.map(|t| t.label),
-                        themed: true,
-                        set: overrides.get(color.name).cloned(),
-                    },
-                );
-                row.repeat = repeat;
-                Some(row)
-            })
-            .collect()
-    }
-
-    /// The colors repeated on `section`'s page, by [`COLOR_REPEATS`].
-    fn color_repeats(&self, section: Section) -> Vec<Setting> {
+        let mut items = item_rows(&self.config, themes);
+        let defaults = self.color_defaults();
         let mut list = Vec::new();
-        for &(group, s, title) in COLOR_REPEATS {
-            if s == section {
-                list.extend(self.element_colors(|c| c.group == group, |_| (s, title), true));
+        for &(section, cards) in LOOK {
+            for &(card, keys) in cards {
+                for &key in keys {
+                    let row = match items.iter().position(|s| s.control.key() == Some(key)) {
+                        Some(at) => Some(items.swap_remove(at)),
+                        None => self.look_row(&defaults, key),
+                    };
+                    if let Some(mut row) = row {
+                        row.section = section;
+                        row.group = card;
+                        list.push(row);
+                    }
+                }
             }
         }
         list
+    }
+
+    /// The row for a [`LOOK`] key that's a color, theme color or `[style.*]` number; `None` for
+    /// one the interface in use doesn't draw.
+    fn look_row(&self, defaults: &ColorDefaults, key: &str) -> Option<Setting> {
+        let ui = self.config.ui_theme;
+        if let Some(setting) = number_setting(key) {
+            if ui == UiTheme::Solid && GLASS_NUMBERS.contains(&key) {
+                return None;
+            }
+            return Some(self.style_row(Section::Theme, setting));
+        }
+        if let Some(theme) = THEME_COLORS.iter().find(|t| t.name == key) {
+            return self.theme_color(defaults, theme);
+        }
+        let color = COLORS.iter().find(|c| c.name == key)?;
+        self.element_color(defaults, color)
+    }
+
+    /// The shared values [`App::element_color`] and [`App::theme_color`] fall back to.
+    fn color_defaults(&self) -> ColorDefaults {
+        let ui = self.config.ui_theme;
+        ColorDefaults {
+            base: Chrome::base(&Palette::from_theme(&self.config.theme), ui),
+            theme: ThemeColors::new(ui, self.config.colors.for_ui(ui)),
+            theme_base: ThemeColors::base(ui),
+        }
+    }
+
+    /// A theme color's row: a swatch and a field, without the theme options (theme colors are
+    /// the end of the chain).
+    fn theme_color(&self, defaults: &ColorDefaults, t: &ThemeColor) -> Option<Setting> {
+        let ui = self.config.ui_theme;
+        Some(Setting::new(
+            Section::Theme,
+            "",
+            t.label,
+            t.description,
+            Control::Color {
+                key: t.key(ui),
+                value: defaults.theme.get(t.name)?,
+                default: defaults.theme_base.get(t.name)?,
+                link: None,
+                themed: false,
+                set: self.config.colors.for_ui(ui).get(t.name).cloned(),
+            },
+        ))
+    }
+
+    /// An element color's row; `None` for one the interface in use doesn't draw.
+    fn element_color(&self, defaults: &ColorDefaults, color: &ColorSetting) -> Option<Setting> {
+        let ui = self.config.ui_theme;
+        let drawn = match ui {
+            UiTheme::Solid => !color.glass_only,
+            UiTheme::Glass => color.group != SOLID_GROUP,
+        };
+        if !drawn {
+            return None;
+        }
+        // While unset a color is the interface's own, or its theme color's.
+        let link = THEME_COLORS.iter().find(|t| t.name == color.link);
+        Some(Setting::new(
+            Section::Theme,
+            "",
+            color.label,
+            color.description,
+            Control::Color {
+                key: color.key(ui),
+                value: self.chrome.color(color.name)?,
+                default: match link {
+                    Some(t) => defaults.theme.get(t.name)?,
+                    None => defaults.base.color(color.name)?,
+                },
+                link: link.map(|t| t.label),
+                themed: true,
+                set: self.config.colors.for_ui(ui).get(color.name).cloned(),
+            },
+        ))
     }
 
     /// A `[style.*]` number's row.
@@ -440,11 +716,12 @@ impl App {
         number_row(section, setting, value)
     }
 
-    /// Terminal: the shell, history, cursor and mouse.
+    /// Terminal: the shell, font, cursor, history and mouse.
     fn terminal_settings(&self) -> Vec<Setting> {
         use Section::Terminal;
         let config = &self.config;
         let terminal = &config.terminal;
+        let font = &config.font;
         let mut scrollback: Vec<(String, Value)> = [1_000, 5_000, 10_000, 50_000, 100_000]
             .into_iter()
             .map(|n| (format!("{} lines", thousands(n)), Value::Int(n)))
@@ -458,7 +735,7 @@ impl App {
             .as_ref()
             .map(|s| (s.shells.clone(), s.default_shell.clone()))
             .unwrap_or_default();
-        vec![
+        let mut rows = vec![
             Setting::new(
                 Terminal,
                 "Shell",
@@ -484,10 +761,23 @@ impl App {
             ),
             Setting::new(
                 Terminal,
-                "History",
-                "Scrollback",
-                "Lines each terminal keeps. Applies to new terminals.",
-                choice("terminal.scrollback", scrollback, &Value::Int(lines)),
+                "Font",
+                "Font family",
+                "Any installed monospace font. Empty uses the bundled JetBrains Mono.",
+                Control::Text {
+                    key: "font.family",
+                    value: font.family.clone().unwrap_or_default(),
+                    placeholder: "JetBrains Mono",
+                },
+            ),
+            number_row(Terminal, &FONT_SIZE, font.size),
+            number_row(Terminal, &LINE_HEIGHT, font.line_height),
+            Setting::new(
+                Terminal,
+                "Font",
+                "Ligatures",
+                "Join character pairs like => and != where the font supports it.",
+                Control::Toggle("font.ligatures", font.ligatures),
             ),
             Setting::new(
                 Terminal,
@@ -508,6 +798,13 @@ impl App {
                     }),
                 ),
             ),
+            Setting::new(
+                Terminal,
+                "History",
+                "Scrollback",
+                "Lines each terminal keeps. Applies to new terminals.",
+                choice("terminal.scrollback", scrollback, &Value::Int(lines)),
+            ),
             number_row(Terminal, &SCROLL_LINES, terminal.scroll_lines as f32),
             Setting::new(
                 Terminal,
@@ -516,14 +813,49 @@ impl App {
                 "Copy text to the clipboard as soon as it's selected.",
                 Control::Toggle("terminal.copy_on_select", terminal.copy_on_select),
             ),
-        ]
+        ];
+        // After the two shell rows.
+        rows.splice(2..2, self.ssh_settings());
+        rows
+    }
+
+    /// The SSH profiles card: one row per `[[ssh]]` profile, then fields to add one.
+    fn ssh_settings(&self) -> Vec<Setting> {
+        const GROUP: &str = "SSH profiles";
+        let mut rows: Vec<Setting> = self
+            .config
+            .ssh
+            .iter()
+            .enumerate()
+            .map(|(i, profile)| {
+                Setting::new(
+                    Section::Terminal,
+                    GROUP,
+                    profile.label(),
+                    &format!("ssh {}", profile.ssh_args().join(" ")),
+                    Control::Button(
+                        "Remove".to_owned(),
+                        Message::Settings(SettingsMessage::RemoveSsh(i)),
+                    ),
+                )
+            })
+            .collect();
+        rows.push(Setting::new(
+            Section::Terminal,
+            GROUP,
+            "New profile",
+            "Opens from a pane's + menu (right-click it). Type a host, user@host or a Host from \
+             ~/.ssh/config, and press Enter. A key file and more ssh arguments go in config.toml.",
+            Control::NewSsh,
+        ));
+        rows
     }
 
     /// Notifications: when a tab asks for attention, and the bell.
     fn notification_settings(&self) -> Vec<Setting> {
         use Section::Notifications;
         let n = &self.config.notifications;
-        let mut list = vec![
+        vec![
             Setting::new(
                 Notifications,
                 "Attention",
@@ -554,9 +886,7 @@ impl App {
                     placeholder: "Path to a sound file",
                 },
             ),
-        ];
-        list.extend(self.color_repeats(Notifications));
-        list
+        ]
     }
 
     /// Agents: Claude Code's hooks, then how agents show up.
@@ -615,13 +945,6 @@ impl App {
             Setting::new(
                 Agents,
                 "In tabs",
-                "Status in the tab strip",
-                "The agent's state and status line, at the right of its pane's tabs.",
-                Control::Toggle("agents.tab_status", agents.tab_status),
-            ),
-            Setting::new(
-                Agents,
-                "In tabs",
                 "Agent icon",
                 "Tabs running an agent show sparkles, tinted by its state.",
                 Control::Toggle("agents.tab_icon", agents.tab_icon),
@@ -629,78 +952,37 @@ impl App {
         ]
     }
 
-    /// Solid Theme: the solid interface's window, workspace, tab and `+` button colors, each
-    /// card's borders, corners and gaps beside them ([`THEME_CARDS`]). Rows also on Appearance
-    /// are repeats, left out of search; the solid-only colors are only here. Glass is a fixed
-    /// preset, so there the page only offers to switch.
-    fn theme_settings(&self) -> Vec<Setting> {
-        use Section::Theme;
+    /// Quick Theme: [`QUICK_CARD`]'s colors, all copies of rows on the Appearance pages (so left
+    /// out of search). Glass is its own look, so there the page only offers to switch.
+    fn quick_settings(&self) -> Vec<Setting> {
+        use Section::Quick;
+        let (card, names) = QUICK_CARD;
         if self.config.ui_theme == UiTheme::Glass {
-            return vec![Setting::new(
-                Theme,
-                "Solid theme",
+            let mut row = Setting::new(
+                Quick,
+                card,
                 "Use the solid interface",
-                "Glass is a fixed preset. These settings shape the solid interface, so switch to it to try them.",
+                "These colors shape the solid interface, so switch to it to try them.",
                 Control::Button(
                     "Use Solid".into(),
                     Message::Settings(SettingsMessage::Set("ui_theme", Some(str_value("solid")))),
                 ),
-            )];
+            );
+            row.repeat = true;
+            return vec![row];
         }
-        let mut list = Vec::new();
-        for &(card, entries) in THEME_CARDS {
-            for &entry in entries {
-                if let Some(mut row) = item_toggle(&self.config, entry) {
-                    row.section = Theme;
-                    row.group = card;
-                    row.repeat = true;
-                    list.push(row);
-                } else if let Some(setting) = number_setting(entry) {
-                    let mut row = self.style_row(Theme, setting);
-                    row.group = card;
-                    row.repeat = true;
-                    list.push(row);
-                } else {
-                    let repeat = COLORS
-                        .iter()
-                        .any(|c| c.name == entry && c.group != SOLID_GROUP);
-                    list.extend(self.element_colors(
-                        |c| c.name == entry,
-                        |_| (Theme, card),
-                        repeat,
-                    ));
-                }
-            }
-        }
-        list
-    }
-
-    /// Quick Theme: [`QUICK_CARD`]'s colors, all copies of the Solid Theme page's (so left out
-    /// of search). In glass, like Solid Theme, only the switch to solid.
-    fn quick_settings(&self) -> Vec<Setting> {
-        use Section::Quick;
-        if self.config.ui_theme == UiTheme::Glass {
-            let mut list = self.theme_settings();
-            for row in &mut list {
+        let defaults = self.color_defaults();
+        names
+            .iter()
+            .filter_map(|name| COLORS.iter().find(|c| c.name == *name))
+            .filter_map(|color| self.element_color(&defaults, color))
+            .map(|mut row| {
                 row.section = Quick;
+                row.group = card;
                 row.repeat = true;
-            }
-            return list;
-        }
-        let (card, names) = QUICK_CARD;
-        let mut list = Vec::new();
-        for &name in names {
-            list.extend(self.element_colors(|c| c.name == name, |_| (Quick, card), true));
-        }
-        list
-    }
-
-    /// Sidebar & Tabs: what each workspace item and tab shows, then their colors.
-    fn item_settings(&self) -> Vec<Setting> {
-        let mut list = workspace_item_settings(&self.config);
-        list.extend(tab_item_settings(&self.config));
-        list.extend(self.color_repeats(Section::Items));
-        list
+                row
+            })
+            .collect()
     }
 }
 
@@ -740,20 +1022,42 @@ fn template(key: &'static str, value: &str, presets: &[(&str, &str)]) -> Control
     }
 }
 
-/// `[workspace_items]`.
-fn workspace_item_settings(config: &Config) -> Vec<Setting> {
+/// The Appearance rows that aren't colors or numbers: the interface and terminal themes
+/// (`themes` are the terminal themes found), `[workspace_items]` and `[tab_items]`. Their
+/// section and card come from where [`LOOK`] lists their keys.
+fn item_rows(config: &Config, themes: Vec<(String, Value)>) -> Vec<Setting> {
     let ws = &config.workspace_items;
-    let item = |label, description, control| {
-        Setting::new(Section::Items, "Workspaces", label, description, control)
-    };
+    let tab = &config.tab_items;
+    let ui = config.ui_theme;
+    let row =
+        |label, description, control| Setting::new(Section::Theme, "", label, description, control);
     vec![
-        item(
-            "Icon",
-            "The tile on the left.",
+        row(
+            "Interface",
+            "How the sidebar, tabs and panes are drawn: frosted Glass, or flat Solid. Each keeps its own colors and sizes.",
+            interface_choice(ui),
+        ),
+        row(
+            "Terminal colors",
+            "The terminal's color theme. Add your own to the themes folder next to config.toml.",
+            choice("theme", themes, &str_value(&config.theme_name)),
+        ),
+        row(
+            "Show search bar",
+            "The search field at the top of the sidebar.",
+            Control::Toggle("workspace_items.search", ws.search(ui)),
+        ),
+        row(
+            "Show icon",
+            "The icon at the left of each workspace.",
             Control::Toggle("workspace_items.icon", ws.icon),
         ),
-        icon_background_toggle(config),
-        item(
+        row(
+            "Icon background",
+            "The tile behind each workspace's icon. Off, the icon shows on its own.",
+            Control::Toggle("workspace_items.icon_background", ws.icon_background(ui)),
+        ),
+        row(
             "Title",
             "Custom: {name}, {title}, {dir}, {index}, or any detail placeholder.",
             template(
@@ -767,10 +1071,10 @@ fn workspace_item_settings(config: &Config) -> Vec<Setting> {
                 ],
             ),
         ),
-        item(
+        row(
             "Detail",
             "The line under the title; one that comes out empty is hidden. Custom: {activity}, \
-                 {status}, {summary}, {tabs}, {panes}, {notice}, {agent}, {dir}, {path}, {title}.",
+             {status}, {summary}, {tabs}, {panes}, {notice}, {agent}, {dir}, {path}, {title}.",
             template(
                 "workspace_items.detail",
                 &ws.detail,
@@ -787,7 +1091,7 @@ fn workspace_item_settings(config: &Config) -> Vec<Setting> {
                 ],
             ),
         ),
-        item(
+        row(
             "Badge",
             "Small text on the right. Custom: {shortcut}, {index}, {tabs}, {panes}.",
             template(
@@ -802,80 +1106,24 @@ fn workspace_item_settings(config: &Config) -> Vec<Setting> {
                 ],
             ),
         ),
-        item(
+        row(
             "Muted and pinned marks",
             "The bell and pin beside a muted or pinned workspace's name.",
             Control::Toggle("workspace_items.status_icons", ws.status_icons),
         ),
-        item(
+        row(
             "Close button",
             "Shown on the hovered and selected workspaces.",
             Control::Toggle("workspace_items.close_button", ws.close_button),
         ),
-        search_toggle(config),
-    ]
-}
-
-/// The `[workspace_items]` key of the icon tile's background toggle, also an entry in
-/// [`THEME_CARDS`].
-const ICON_BACKGROUND_TOGGLE: &str = "workspace_items.icon_background";
-
-/// The workspace icon tile's background on/off row, on Sidebar & Tabs.
-fn icon_background_toggle(config: &Config) -> Setting {
-    Setting::new(
-        Section::Items,
-        "Workspaces",
-        "Icon background",
-        "The tile behind each workspace's icon. Off, the icon shows on its own.",
-        Control::Toggle(
-            ICON_BACKGROUND_TOGGLE,
-            config.workspace_items.icon_background(config.ui_theme),
-        ),
-    )
-}
-
-/// The `[workspace_items]` toggle row for `key`, if it's one [`THEME_CARDS`] lists.
-fn item_toggle(config: &Config, key: &str) -> Option<Setting> {
-    match key {
-        SEARCH_TOGGLE => Some(search_toggle(config)),
-        ICON_BACKGROUND_TOGGLE => Some(icon_background_toggle(config)),
-        _ => None,
-    }
-}
-
-/// The `[workspace_items]` key of the search bar's toggle, also an entry in [`THEME_CARDS`].
-const SEARCH_TOGGLE: &str = "workspace_items.search";
-
-/// The sidebar search bar's on/off row, on Sidebar & Tabs.
-fn search_toggle(config: &Config) -> Setting {
-    Setting::new(
-        Section::Items,
-        "Workspaces",
-        "Search bar",
-        "The search field at the top of the sidebar.",
-        Control::Toggle(
-            SEARCH_TOGGLE,
-            config.workspace_items.search(config.ui_theme),
-        ),
-    )
-}
-
-/// `[tab_items]`.
-fn tab_item_settings(config: &Config) -> Vec<Setting> {
-    let tab = &config.tab_items;
-    let item = |label, description, control| {
-        Setting::new(Section::Items, "Tabs", label, description, control)
-    };
-    vec![
-        item(
+        row(
             "Icon",
             "Pinned tabs always show theirs.",
             Control::Toggle("tab_items.icon", tab.icon),
         ),
-        item(
+        row(
             "Title",
-            "Custom: {title}, {name}, {dir}, {path}, {url}, {kind}, {index}, {notice}, \
-                 {agent}.",
+            "Custom: {title}, {name}, {dir}, {path}, {url}, {kind}, {index}, {notice}, {agent}.",
             template(
                 "tab_items.title",
                 &tab.title,
@@ -887,7 +1135,7 @@ fn tab_item_settings(config: &Config) -> Vec<Setting> {
                 ],
             ),
         ),
-        item(
+        row(
             "Badge",
             "Small text after the title, with the same placeholders.",
             template(
@@ -896,15 +1144,20 @@ fn tab_item_settings(config: &Config) -> Vec<Setting> {
                 &[("Hidden", ""), ("Position", "{index}"), ("Folder", "{dir}")],
             ),
         ),
-        item(
+        row(
             "Muted mark",
             "The crossed-out bell on a muted tab.",
             Control::Toggle("tab_items.status_icons", tab.status_icons),
         ),
-        item(
+        row(
             "Close button",
             "The x at the right of each tab.",
             Control::Toggle("tab_items.close_button", tab.close_button),
+        ),
+        row(
+            "New tab buttons",
+            "Terminal, browser and VS Code (when installed) buttons at the right of the strip.",
+            Control::Toggle("tab_items.new_buttons", tab.new_buttons),
         ),
     ]
 }
@@ -1047,5 +1300,36 @@ mod tests {
         assert_eq!(FONT_SIZE.default, config.font.size);
         assert_eq!(LINE_HEIGHT.default, config.font.line_height);
         assert_eq!(SCROLL_LINES.default, config.terminal.scroll_lines as f32);
+    }
+
+    #[test]
+    fn every_color_and_number_has_one_card() {
+        let items: Vec<&str> = item_rows(&Config::default(), Vec::new())
+            .iter()
+            .filter_map(|s| s.control.key())
+            .collect();
+        let placed: Vec<&str> = LOOK
+            .iter()
+            .flat_map(|(_, cards)| cards.iter())
+            .flat_map(|(_, keys)| keys.iter().copied())
+            .collect();
+        for key in &placed {
+            let known = items.contains(key)
+                || number_setting(key).is_some()
+                || THEME_COLORS.iter().any(|t| t.name == *key)
+                || COLORS.iter().any(|c| c.name == *key);
+            assert!(known, "LOOK lists {key}, which isn't a setting");
+            let count = placed.iter().filter(|k| *k == key).count();
+            assert_eq!(count, 1, "LOOK lists {key} {count} times");
+        }
+        let wanted = items
+            .iter()
+            .copied()
+            .chain(Style::settings().map(|s| s.key))
+            .chain(THEME_COLORS.iter().map(|t| t.name))
+            .chain(COLORS.iter().map(|c| c.name));
+        for key in wanted {
+            assert!(placed.contains(&key), "{key} isn't on any Appearance card");
+        }
     }
 }

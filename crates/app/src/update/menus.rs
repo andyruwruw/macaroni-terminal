@@ -12,7 +12,16 @@ use macaroni_term::shell::{self, ShellOption};
 
 use crate::message::{ColorTarget, GroupAction, Message, TabAction, WorkspaceAction};
 use crate::state::{Menu, MenuPage, MenuTarget, Submenu};
-use crate::{App, home_dir, open_vscode, theme};
+use crate::{App, home_dir, open_vscode, theme, vscode};
+
+/// What a terminal runs for an `[[ssh]]` profile.
+pub(crate) fn ssh_shell(profile: &macaroni_config::SshProfile) -> ShellOption {
+    ShellOption {
+        name: profile.label().to_owned(),
+        program: "ssh".to_owned(),
+        args: profile.ssh_args(),
+    }
+}
 
 /// What the Git Bash offer runs in PowerShell: winget installs Git for Windows, in a tab that
 /// stays open (`-NoExit`) so its prompts, UAC and result stay with the user.
@@ -173,6 +182,25 @@ impl App {
         self.new_tab_running(Some(pane), choice)
     }
 
+    /// The new-tab menu's SSH profile at `index` was picked: a tab running `ssh` to it, with the
+    /// server icon.
+    pub(crate) fn new_ssh_tab(&mut self, pane: PaneId, index: usize) -> Task<Message> {
+        self.menu = None;
+        let Some(profile) = self.config.ssh.get(index).cloned() else {
+            return Task::none();
+        };
+        let task = self.new_tab_running(Some(pane), ssh_shell(&profile));
+        let Some(session) = self.focused_session() else {
+            return task;
+        };
+        self.ssh_tabs.insert(session, profile.label().to_owned());
+        let tab = self.model.focused_tab().id;
+        Task::batch([
+            task,
+            self.apply(Command::SetTabIcon(tab, Some("server".to_owned()))),
+        ])
+    }
+
     /// Opens a new tab that installs Git Bash with winget.
     pub(crate) fn install_git_bash(&mut self) -> Task<Message> {
         self.offer_git_bash = false;
@@ -218,6 +246,107 @@ impl App {
                 .or_else(home_dir);
             open_vscode(code, dir);
         }
+        Task::none()
+    }
+
+    /// The directory of the pane's active tab, else its workspace's folder, else home.
+    fn pane_dir(&self, pane: PaneId) -> Option<PathBuf> {
+        let tab = self.model.pane(pane).and_then(|p| self.model.tab(p.active));
+        tab.and_then(|t| t.cwd.clone())
+            .or_else(|| {
+                let ws = self.workspace_of_tab(tab?.id)?;
+                self.model.workspace(ws)?.cwd.clone()
+            })
+            .map(PathBuf::from)
+            .or_else(home_dir)
+    }
+
+    /// Opens VS Code for the web at the pane's directory in a new browser tab there, once its
+    /// server listens (starting it first if needed).
+    pub(crate) fn vscode_tab(&mut self, pane: PaneId) -> Task<Message> {
+        self.menu = None;
+        if !self.vscode_web.installed {
+            return Task::none();
+        }
+        let folder = self.pane_dir(pane);
+        self.vscode_web.error = None;
+        if self.vscode_web.ensure_started().is_some() {
+            // Opened by `vscode_ready`.
+            self.vscode_web.waiting.push((pane, folder));
+            return Task::none();
+        }
+        if self.vscode_web.server.is_none() {
+            let error = self.vscode_web.error.clone().unwrap_or_default();
+            self.config_errors.push(error);
+            return Task::none();
+        }
+        self.open_vscode_tab(pane, folder.as_deref())
+    }
+
+    /// A browser tab in `pane` showing VS Code at `folder`, with the code icon. The server is
+    /// running.
+    fn open_vscode_tab(&mut self, pane: PaneId, folder: Option<&std::path::Path>) -> Task<Message> {
+        let Some(url) = self.vscode_web.server.as_ref().map(|s| s.url(folder)) else {
+            return Task::none();
+        };
+        let mut tasks = Vec::new();
+        if self.model.pane(pane).is_some() {
+            tasks.push(self.apply(Command::FocusPane(pane)));
+        }
+        tasks.push(self.apply(Command::OpenBrowser { url, split: None }));
+        let tab = self.model.focused_tab().id;
+        tasks.push(self.apply(Command::SetTabIcon(tab, Some("code".to_owned()))));
+        Task::batch(tasks)
+    }
+
+    /// The server listens (or gave up): open the tabs that waited for it.
+    pub(crate) fn vscode_ready(&mut self, listening: bool) -> Task<Message> {
+        if !listening {
+            self.vscode_web.stop();
+            let log = vscode::dir().join("server.log");
+            let error = format!("VS Code didn't start. Its log: {}", log.display());
+            self.vscode_web.error = Some(error.clone());
+            self.config_errors.push(error);
+            return Task::none();
+        }
+        self.vscode_web.ready = true;
+        let waiting = std::mem::take(&mut self.vscode_web.waiting);
+        Task::batch(
+            waiting
+                .into_iter()
+                .map(|(pane, folder)| self.open_vscode_tab(pane, folder.as_deref()))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Downloads (`true`) or removes VS Code on a thread; [`Message::VsCodeInstalled`] reports.
+    /// Removing stops the server first, so no file is in use.
+    pub(crate) fn vscode_install(&mut self, install: bool) -> Task<Message> {
+        if self.vscode_web.busy {
+            return Task::none();
+        }
+        self.vscode_web.busy = true;
+        self.vscode_web.error = None;
+        if !install {
+            self.vscode_web.stop();
+        }
+        Task::future(vscode::off_thread(move || {
+            if install {
+                vscode::install().map(|()| true)
+            } else {
+                vscode::uninstall().map(|()| false)
+            }
+        }))
+        .map(Message::VsCodeInstalled)
+    }
+
+    /// A download or removal finished.
+    pub(crate) fn vscode_installed(&mut self, result: Result<bool, String>) -> Task<Message> {
+        self.vscode_web.busy = false;
+        if let Err(error) = &result {
+            self.vscode_web.error = Some(error.clone());
+        }
+        self.vscode_web.installed = vscode::installed();
         Task::none()
     }
 

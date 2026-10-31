@@ -23,7 +23,7 @@ Merges into `~/.claude/settings.json` (or `--settings <path>`) a hook running `"
 
 ## Hook mapping (`hook_calls`)
 
-- `SessionStart`: idle, records `session_id` and `cwd`.
+- `SessionStart`: idle, records `session_id` and `cwd`. Every event passes `session_id` on, but only once its `transcript_path` exists: Claude saves a session only after its first message, and `--resume` can't find an unsaved one, so the tab keeps its last resumable id.
 - `UserPromptSubmit`, `PreToolUse`: working; `PreToolUse` detail from `describe_tool`.
 - `Notification`: needs input, then `notify`.
 - `Stop`: idle "Done", then `notify`.
@@ -39,8 +39,8 @@ Trap: `macaroni-cli hook` must never fail or print (some hooks' stdout goes into
 
 ## Session restore
 
-- `session.json` sits next to `config.toml`, built from `Model::spec()` and rebuilt with `Model::restore()` (new tabs in saved order). Per tab: `cwd` (OSC 7, else the agent's cwd) and agent session.
-- Saved at most once per `SESSION_SAVE_INTERVAL` after changes, and on window close (the app intercepts close requests to save first). Closing the last workspace forgets the session. `macaroni <program>` neither restores nor saves.
+- `session.json` sits next to `config.toml`, built from `Model::spec()` and rebuilt with `Model::restore()` (new tabs in saved order). Per tab: `cwd` (the agent's cwd while one runs, since `claude --resume` only finds a session from its own directory; else OSC 7) and agent session, plus `ssh` (the profile name) for SSH tabs, which reconnect on restore while the profile still exists. Hidden tabs' terminals start as soon as the first shown one does, at its size (`App::start_hidden`), so every restored agent resumes at launch. Trap: restored details wait in `App.restored` until a tab's terminal starts, so `capture` takes them from there for unstarted tabs; reading only the model would drop them on the next save.
+- Saved at most once per `SESSION_SAVE_INTERVAL` after changes, and on window close (the app intercepts close requests to save first). After that close save, `App::exit` turns saving off: agents killed by the close can still report (`SessionEnd` clears the agent) while browsers finish closing. Closing the last workspace forgets the session. `macaroni <program>` neither restores nor saves.
 - With `[session] resume_agents`, a restored agent tab gets `claude --resume <id>` typed into its shell. Trap: the id is typed into a shell, so it must pass `is_safe_session_id` first.
 
 ## Input

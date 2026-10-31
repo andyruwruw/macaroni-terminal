@@ -27,6 +27,7 @@ This terminal seeks to provide that. Run your agent, dev server, code and browse
 <p align="center"><img src="docs/screenshots/browser.png" alt="An embedded browser tab beside a terminal"></p>
 
 - **Browser tabs** (Windows). Embedded Chromium with an address bar and DevTools. Ctrl+click a terminal link to open it in a split.
+- **VS Code tabs** (Windows, opt-in). Download VS Code for the web from settings and open it in a tab at the pane's folder.
 
 <p align="center"><img src="docs/screenshots/scriptable.png" alt="macaroni-cli and a live-reloading config.toml"></p>
 
@@ -34,6 +35,7 @@ This terminal seeks to provide that. Run your agent, dev server, code and browse
 - **Configurable everything.** One live-reloading `config.toml` with a settings dialog over it: themes, a glass look, colors, sizes and every shortcut.
 - **Session restore.** Layout, directories and agent sessions come back after a restart.
 - **Good shells by default.** Your login shell on macOS, Git Bash on Windows (with PowerShell as a fallback and a one-click install).
+- **SSH profiles.** Save hosts once and open them from the new-tab menu; a dropped connection reconnects with Enter.
 
 ## Get started
 

@@ -81,8 +81,9 @@ mod terminal;
 mod theme;
 mod update;
 mod view;
+mod vscode;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -276,10 +277,18 @@ struct App {
     vscode: Option<PathBuf>,
     /// Shells picked for tabs whose terminals haven't started yet.
     tab_shells: BTreeMap<SessionId, ShellOption>,
+    /// Terminals running an `[[ssh]]` profile, by its name, so the session saves them as SSH
+    /// tabs and a restart connects them again.
+    ssh_tabs: BTreeMap<SessionId, String>,
+    /// SSH terminals whose connection ended with an error: they stay open to show it, and
+    /// Enter connects again.
+    disconnected: BTreeSet<SessionId>,
     /// Offer to install Git Bash (Windows, not installed, no shell configured).
     offer_git_bash: bool,
     /// Every browser tab's panel (address bar state, bounds, and its browser once started).
     browsers: BTreeMap<BrowserId, Panel>,
+    /// VS Code in browser tabs: whether it's downloaded, and its server.
+    vscode_web: vscode::WebVsCode,
     /// Where browsers send their events; `None` until [`Message::BrowserEventsReady`].
     browser_events: Option<UnboundedSender<(BrowserId, BrowserMessage)>>,
     /// The main window, once it has opened.
@@ -402,10 +411,13 @@ impl App {
             session_saved: None,
             session_dirty: false,
             shells: shell::available(),
-            vscode: None,
+            vscode: shell::vscode(),
             tab_shells: BTreeMap::new(),
+            ssh_tabs: BTreeMap::new(),
+            disconnected: BTreeSet::new(),
             offer_git_bash: false,
             browsers: BTreeMap::new(),
+            vscode_web: vscode::WebVsCode::new(),
             browser_events: None,
             window: None,
             maximized: false,
@@ -588,8 +600,12 @@ impl App {
             Message::Workspace(ws, action) => self.workspace_menu(ws, action),
             Message::Group(group, action) => self.group_menu(group, action),
             Message::NewTabWith(pane, index) => self.new_tab_with(pane, index),
+            Message::NewSshTab(pane, index) => self.new_ssh_tab(pane, index),
             Message::NewBrowserIn(pane) => self.new_browser_in(pane),
             Message::OpenVsCode(pane) => self.open_vscode_in(pane),
+            Message::VsCodeTab(pane) => self.vscode_tab(pane),
+            Message::VsCodeReady(listening) => self.vscode_ready(listening),
+            Message::VsCodeInstalled(result) => self.vscode_installed(result),
             Message::InstallGitBash => self.install_git_bash(),
             Message::DismissShellOffer => {
                 self.offer_git_bash = false;
@@ -692,7 +708,15 @@ impl App {
         } else {
             Subscription::none()
         };
+        // Only while VS Code's server is starting: tells the app once it listens.
+        let vscode = match &self.vscode_web.server {
+            Some(server) if !self.vscode_web.ready => {
+                Subscription::run_with(server.port, vscode_listening)
+            }
+            _ => Subscription::none(),
+        };
         Subscription::batch([
+            vscode,
             search,
             dismiss,
             Subscription::run(session_events),
@@ -842,6 +866,15 @@ fn save_ticks() -> impl Stream<Item = Message> {
         while receiver.next().await.is_some() {
             let _ = output.send(Message::SaveTick).await;
         }
+    })
+}
+
+/// [`Message::VsCodeReady`] once VS Code's server listens on `port`, or gives up.
+fn vscode_listening(port: &u16) -> impl Stream<Item = Message> + use<> {
+    let port = *port;
+    iced::stream::channel(1, async move |mut output| {
+        let listening = vscode::off_thread(move || vscode::wait_listening(port)).await;
+        let _ = output.send(Message::VsCodeReady(listening)).await;
     })
 }
 

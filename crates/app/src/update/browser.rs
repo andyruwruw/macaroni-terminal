@@ -107,6 +107,16 @@ impl App {
             .and_then(|t| self.model.tab(t)?.url.clone())
             .filter(|u| !u.is_empty())
             .unwrap_or_else(|| self.config.browser.home.clone());
+        // A VS Code tab (restored, say) waits for its server, which starts now if it isn't
+        // running; `place_browsers` tries again on the next update. One that failed to start
+        // loads anyway and shows the browser's error.
+        let web = &mut self.vscode_web;
+        if web.owns(&url) && !web.ready && web.error.is_none() {
+            web.ensure_started();
+            if web.server.is_some() {
+                return;
+            }
+        }
         let Some(panel) = self.browsers.get_mut(&id) else {
             return;
         };

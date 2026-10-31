@@ -300,6 +300,12 @@ impl Session {
         self.emulator.lock().set_default_cursor(shape);
     }
 
+    /// Shows `bytes` as if the program had printed them, for the app's own messages in a
+    /// terminal whose program has exited. Takes effect in the next snapshot.
+    pub fn print(&self, bytes: &[u8]) {
+        self.emulator.lock().feed(bytes);
+    }
+
     /// Sends input (encoded keys, pastes, mouse reports) to the program. Errors are ignored:
     /// they only happen once the child is gone, which `Exited` reports.
     pub fn write(&self, bytes: &[u8]) {

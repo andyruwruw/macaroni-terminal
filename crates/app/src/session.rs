@@ -7,9 +7,10 @@
 //! takes; `restore.rs` applies the rest. The format is versioned ([`VERSION`]): a file with
 //! another version, or no workspaces, is ignored and the app starts fresh.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use macaroni_core::{Axis, LayoutSpec, Model, TabId, TabKind, TabSpec, WorkspaceSpec};
+use macaroni_core::{Axis, LayoutSpec, Model, SessionId, TabId, TabKind, TabSpec, WorkspaceSpec};
 use serde::{Deserialize, Serialize};
 
 /// The session file's name, in the config directory.
@@ -135,6 +136,9 @@ pub struct SavedTab {
     /// The Claude Code session to resume in this tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<String>,
+    /// Set for SSH tabs: the `[[ssh]]` profile to connect to again, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<String>,
     /// Set for browser tabs: the page to reopen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -160,8 +164,15 @@ pub fn path(config_dir: &Path) -> PathBuf {
     config_dir.join(FILE_NAME)
 }
 
-/// The model's layout plus each tab's directory and agent session.
-pub fn capture(model: &Model) -> Saved {
+/// The model's layout plus each tab's directory and agent session. `restored` holds what was
+/// restored for tabs whose terminal hasn't started yet (hidden ones start just after the first shown):
+/// they keep that directory and agent session, which the model doesn't have for them, so a tab
+/// left unopened survives any number of restarts. `ssh` names the profile each SSH terminal runs.
+pub fn capture(
+    model: &Model,
+    restored: &BTreeMap<TabId, SavedTab>,
+    ssh: &BTreeMap<SessionId, String>,
+) -> Saved {
     // `tabs` lists every tab in the order the specs' panes list them, so each pane takes its
     // share off the front.
     let (specs, active, tabs) = model.spec();
@@ -172,7 +183,7 @@ pub fn capture(model: &Model) -> Saved {
         .map(|(spec, ws)| SavedWorkspace {
             name: spec.name,
             focused: spec.focused,
-            layout: layout_from_spec(&spec.layout, model, &mut tabs),
+            layout: layout_from_spec(&spec.layout, model, restored, ssh, &mut tabs),
             muted: ws.muted,
             pinned: ws.pinned,
             icon: ws.icon.clone(),
@@ -206,6 +217,8 @@ pub fn capture(model: &Model) -> Saved {
 fn layout_from_spec(
     spec: &LayoutSpec,
     model: &Model,
+    restored: &BTreeMap<TabId, SavedTab>,
+    ssh: &BTreeMap<SessionId, String>,
     tabs: &mut impl Iterator<Item = TabId>,
 ) -> SavedLayout {
     match spec {
@@ -234,12 +247,27 @@ fn layout_from_spec(
                             ..common
                         };
                     }
+                    if let Some(pending) = restored.get(&id) {
+                        return SavedTab {
+                            cwd: pending.cwd.clone(),
+                            agent_session: pending.agent_session.clone(),
+                            ssh: pending.ssh.clone(),
+                            ..common
+                        };
+                    }
+                    // An agent's own directory wins over the shell's: `claude --resume` only
+                    // finds a session from the directory it ran in, and the shell reports one
+                    // only at a prompt, so `cd x && claude` leaves the old one.
                     let agent = tab.and_then(|t| t.agent.as_ref());
                     SavedTab {
-                        cwd: tab
-                            .and_then(|t| t.cwd.clone())
-                            .or_else(|| agent.and_then(|a| a.cwd.clone())),
+                        cwd: agent
+                            .and_then(|a| a.cwd.clone())
+                            .or_else(|| tab.and_then(|t| t.cwd.clone())),
                         agent_session: agent.and_then(|a| a.session_id.clone()),
+                        ssh: match tab.map(|t| &t.kind) {
+                            Some(TabKind::Terminal(session)) => ssh.get(session).cloned(),
+                            _ => None,
+                        },
                         ..common
                     }
                 })
@@ -256,8 +284,8 @@ fn layout_from_spec(
                 Axis::Column => SavedAxis::Column,
             },
             ratio: *ratio,
-            first: Box::new(layout_from_spec(first, model, tabs)),
-            second: Box::new(layout_from_spec(second, model, tabs)),
+            first: Box::new(layout_from_spec(first, model, restored, ssh, tabs)),
+            second: Box::new(layout_from_spec(second, model, restored, ssh, tabs)),
         },
     }
 }
@@ -384,7 +412,7 @@ mod tests {
         model.apply(Command::SetTabMuted(first, true));
         model.apply(Command::SetTabPinned(first, true));
 
-        let saved = capture(&model);
+        let saved = capture(&model, &BTreeMap::new(), &BTreeMap::new());
         let json = serde_json::to_string(&saved).unwrap();
         let reloaded: Saved = serde_json::from_str(&json).unwrap();
         assert_eq!(reloaded, saved);
@@ -405,7 +433,71 @@ mod tests {
         assert_eq!(new_tabs.len(), tabs.len());
         let browser = restored.tab(new_tabs[3]).unwrap();
         assert_eq!(browser.url.as_deref(), Some("https://example.com/"));
-        assert_eq!(capture(&restored).workspaces.len(), 1);
+        assert_eq!(
+            capture(&restored, &BTreeMap::new(), &BTreeMap::new())
+                .workspaces
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn unstarted_tabs_keep_what_was_restored_and_agents_keep_their_dir() {
+        let (mut model, _) = Model::new();
+        let first = model.focused_tab().id;
+        model.apply(Command::NewTab);
+        let second = model.focused_tab().id;
+        // The shell last reported its old directory; the agent runs somewhere else.
+        let TabKind::Terminal(session) = model.tab(first).unwrap().kind else {
+            panic!("a new tab is a terminal");
+        };
+        model.apply(Command::SetTabCwd(session, Some("C:/Users/me".into())));
+        model.apply(Command::SetAgent {
+            tab: first,
+            state: AgentState::Idle,
+            detail: None,
+            session_id: Some("1f2e-33".into()),
+            cwd: Some("C:/repo".into()),
+        });
+        // The second tab was restored but never shown, so its terminal hasn't started.
+        let restored = BTreeMap::from([(
+            second,
+            SavedTab {
+                cwd: Some("C:/other".into()),
+                agent_session: Some("4a5b-66".into()),
+                ..SavedTab::default()
+            },
+        )]);
+
+        let (_, _, tabs) = into_spec(capture(&model, &restored, &BTreeMap::new()));
+        assert_eq!(tabs[0].cwd.as_deref(), Some("C:/repo"));
+        assert_eq!(tabs[0].agent_session.as_deref(), Some("1f2e-33"));
+        assert_eq!(tabs[1].cwd.as_deref(), Some("C:/other"));
+        assert_eq!(tabs[1].agent_session.as_deref(), Some("4a5b-66"));
+        assert_eq!(tabs[0].ssh, None);
+    }
+
+    #[test]
+    fn ssh_tabs_save_their_profile() {
+        let (mut model, _) = Model::new();
+        let first = model.focused_tab().id;
+        model.apply(Command::NewTab);
+        let second = model.focused_tab().id;
+        let TabKind::Terminal(session) = model.tab(first).unwrap().kind else {
+            panic!("a new tab is a terminal");
+        };
+        let ssh = BTreeMap::from([(session, "Pi".to_owned())]);
+        let restored = BTreeMap::from([(
+            second,
+            SavedTab {
+                ssh: Some("Work".into()),
+                ..SavedTab::default()
+            },
+        )]);
+
+        let (_, _, tabs) = into_spec(capture(&model, &restored, &ssh));
+        assert_eq!(tabs[0].ssh.as_deref(), Some("Pi"));
+        assert_eq!(tabs[1].ssh.as_deref(), Some("Work"));
     }
 
     #[test]
@@ -425,7 +517,7 @@ mod tests {
         std::fs::write(&file, r#"{"version":99,"active":0,"workspaces":[]}"#).unwrap();
         assert_eq!(load(&file), None);
         let (model, _) = Model::new();
-        save(&file, &capture(&model)).unwrap();
+        save(&file, &capture(&model, &BTreeMap::new(), &BTreeMap::new())).unwrap();
         assert!(load(&file).is_some());
         forget(&file);
         assert_eq!(load(&file), None);

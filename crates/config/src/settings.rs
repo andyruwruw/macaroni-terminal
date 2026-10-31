@@ -59,6 +59,52 @@ pub struct ShellSettings {
     pub args: Vec<String>,
 }
 
+/// One `[[ssh]]` entry: a terminal that runs `ssh` to a host, opened from the new-tab menu.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SshProfile {
+    /// Shown in the new-tab menu and saved with the tabs it opens. Empty uses `host`.
+    pub name: String,
+    /// The destination: a host name or address, `user@host`, or a `Host` from `~/.ssh/config`.
+    pub host: String,
+    /// The login name (`-l`), when `host` doesn't include one.
+    pub user: Option<String>,
+    /// The port (`-p`).
+    pub port: Option<u16>,
+    /// A private key file (`-i`).
+    pub identity_file: Option<String>,
+    /// More `ssh` arguments, placed before the destination.
+    pub args: Vec<String>,
+}
+
+impl SshProfile {
+    /// The profile's name, or its host when it has none.
+    pub fn label(&self) -> &str {
+        if self.name.trim().is_empty() {
+            &self.host
+        } else {
+            &self.name
+        }
+    }
+
+    /// The `ssh` arguments that connect to it.
+    pub fn ssh_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(user) = &self.user {
+            args.extend(["-l".to_owned(), user.clone()]);
+        }
+        if let Some(port) = self.port {
+            args.extend(["-p".to_owned(), port.to_string()]);
+        }
+        if let Some(key) = &self.identity_file {
+            args.extend(["-i".to_owned(), key.clone()]);
+        }
+        args.extend(self.args.iter().cloned());
+        args.push(self.host.clone());
+        args
+    }
+}
+
 /// `[terminal] cursor_style`: the cursor's shape until a program asks for another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -129,8 +175,6 @@ pub struct AgentSettings {
     pub notify_finished: bool,
     /// Mark the tab and notify when an agent needs input or permission.
     pub notify_input: bool,
-    /// Show an agent's state and status line at the right of its pane's tab strip.
-    pub tab_status: bool,
     /// Give a tab running an agent the sparkles icon.
     pub tab_icon: bool,
 }
@@ -140,7 +184,6 @@ impl Default for AgentSettings {
         Self {
             notify_finished: true,
             notify_input: true,
-            tab_status: false,
             tab_icon: true,
         }
     }
@@ -278,6 +321,8 @@ pub struct TabItemSettings {
     pub status_icons: bool,
     /// The tab's close button.
     pub close_button: bool,
+    /// Buttons at the right of each tab strip that open a terminal, a browser or VS Code.
+    pub new_buttons: bool,
 }
 
 impl Default for TabItemSettings {
@@ -288,6 +333,7 @@ impl Default for TabItemSettings {
             badge: String::new(),
             status_icons: true,
             close_button: true,
+            new_buttons: true,
         }
     }
 }
@@ -306,6 +352,8 @@ struct File {
     ui_theme: UiTheme,
     /// `[shell]`.
     shell: ShellSettings,
+    /// `[[ssh]]`.
+    ssh: Vec<SshProfile>,
     /// `[terminal]`.
     terminal: TerminalSettings,
     /// `[notifications]`.
@@ -336,6 +384,7 @@ impl Default for File {
             theme: DEFAULT_THEME.to_owned(),
             ui_theme: UiTheme::default(),
             shell: ShellSettings::default(),
+            ssh: Vec::new(),
             terminal: TerminalSettings::default(),
             notifications: NotificationSettings::default(),
             session: SessionSettings::default(),
@@ -364,6 +413,8 @@ pub struct Config {
     pub ui_theme: UiTheme,
     /// `[shell]`.
     pub shell: ShellSettings,
+    /// `[[ssh]]`, in file order; each has a host.
+    pub ssh: Vec<SshProfile>,
     /// `[terminal]`.
     pub terminal: TerminalSettings,
     /// `[notifications]`.
@@ -396,6 +447,7 @@ impl Default for Config {
             theme_name: file.theme,
             ui_theme: file.ui_theme,
             shell: file.shell,
+            ssh: file.ssh,
             terminal: file.terminal,
             notifications: file.notifications,
             session: file.session,
@@ -476,6 +528,9 @@ impl Config {
                 file.terminal.scroll_lines
             ));
         }
+        if let Some(n) = file.ssh.iter().position(|p| p.host.trim().is_empty()) {
+            return Err(format!("ssh entry {} has no host", n + 1));
+        }
         file.style.check()?;
         file.colors.check()?;
         let theme = Theme::resolve(&file.theme, dir)?;
@@ -493,6 +548,7 @@ impl Config {
             theme,
             ui_theme: file.ui_theme,
             shell: file.shell,
+            ssh: file.ssh,
             terminal: file.terminal,
             notifications: file.notifications,
             session: file.session,

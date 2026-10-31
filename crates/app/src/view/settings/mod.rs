@@ -1,5 +1,6 @@
 //! The settings dialog: a modal over the app with pages down the left, a search field over
-//! them, and each page's settings in collapsible cards, with Quick Access to jump between them. Every change
+//! them, and each page's settings in collapsible cards under the page's live preview, with Quick
+//! Access to jump between them. Every change
 //! is written straight into `config.toml` (`macaroni_config::write_setting`), and the config
 //! watcher applies it like a hand edit, so the file stays the one source of truth.
 //!
@@ -7,7 +8,7 @@
 //! its messages ([`SettingsMessage`], handled by [`App::settings_update`]) and the row model
 //! ([`Setting`], [`Control`]). `list` builds every row from `App.config` on each draw, so the
 //! rows always show what's in effect; `dialog` draws them ([`App::settings_view`], the top
-//! `stack` layer in `App::view`), and `preview` the live previews at the top of some cards.
+//! `stack` layer in `App::view`), and `preview` the live preview pinned over a page's cards.
 
 mod color_picker;
 mod dialog;
@@ -36,52 +37,73 @@ pub const SEARCH_INPUT: &str = "settings-search";
 /// The widget id of the scrolling column of settings, which Quick Access scrolls.
 const BODY_SCROLL: &str = "settings-body";
 
-/// A page of the dialog, listed down its left side.
+/// A page of the dialog, listed down its left side. The pages from [`Section::Theme`] on are
+/// the look, one per part of the window, each with that part's colors and sizes together under
+/// one live preview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Section {
-    /// The session and the browser.
+    /// Restoring the session.
     #[default]
     General,
-    /// Everything visual: the interface and terminal themes, the font, every color and size,
-    /// and the effects.
-    Appearance,
-    /// "Quick Theme": the handful of solid colors that set the overall look, on one card under
-    /// one preview.
-    Quick,
-    /// "Solid Theme": the colors, borders, corners and gaps of the solid interface's window,
-    /// workspaces, tabs and `+` buttons, together on one page to try out.
-    Theme,
-    /// The shell, scrollback, cursor and mouse.
+    /// The shell, SSH profiles, font, cursor, scrollback and mouse.
     Terminal,
     /// OS notifications and the terminal bell.
     Notifications,
-    /// Claude Code's hooks and `[agents]`.
-    Agents,
-    /// "Sidebar & Tabs": what workspaces and tabs show (`[workspace_items]`, `[tab_items]`).
-    Items,
     /// "Keyboard Shortcuts": the bindings in effect, read-only.
     Shortcuts,
+    /// Claude Code's hooks and `[agents]`.
+    Agents,
+    /// `[browser]`: where links open and the home page.
+    Browser,
+    /// "VS Code": downloading VS Code for the web, and its server.
+    VsCode,
+    /// The interface and terminal themes, the theme colors, text and accents.
+    Theme,
+    /// The window's background and lines, and the title bar.
+    Window,
+    /// The sidebar: its search bar, workspace rows, groups and New workspace button.
+    Sidebar,
+    /// Tabs, the tab strip and the New tab button.
+    Tabs,
+    /// Pane cards, the gaps between them and their outlines.
+    Panes,
+    /// "Menus & Controls": menus, pickers, buttons, fields and dialogs.
+    Menus,
+    /// Opacities, dragging, and the glass interface's sheets and backdrop.
+    Effects,
+    /// "Quick Theme": the handful of solid colors that set the overall look, on one card under
+    /// one preview.
+    Quick,
 }
 
 impl Section {
     /// Every section, in the order the dialog lists them.
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 15] = [
         Self::General,
-        Self::Appearance,
-        Self::Quick,
-        Self::Theme,
         Self::Terminal,
         Self::Notifications,
-        Self::Agents,
-        Self::Items,
         Self::Shortcuts,
+        Self::Agents,
+        Self::Browser,
+        Self::VsCode,
+        Self::Theme,
+        Self::Window,
+        Self::Sidebar,
+        Self::Tabs,
+        Self::Panes,
+        Self::Menus,
+        Self::Effects,
+        Self::Quick,
     ];
 
-    /// Whether the dialog lists the section: Quick Theme and Solid Theme are tools for working
-    /// on the solid look, so only debug builds (`cargo xtask dev`) have them; release builds
-    /// set the look from Appearance.
+    /// Whether the dialog lists the section: Quick Theme is a tool for working on the solid
+    /// look, so only debug builds (`cargo xtask dev`) have it, and VS Code needs browser tabs.
     fn shown_in_build(self) -> bool {
-        cfg!(debug_assertions) || !matches!(self, Self::Quick | Self::Theme)
+        match self {
+            Self::Quick => cfg!(debug_assertions),
+            Self::VsCode => crate::vscode::available(),
+            _ => true,
+        }
     }
 
     /// The sections the dialog lists, in order ([`Section::shown_in_build`]).
@@ -89,18 +111,57 @@ impl Section {
         Self::ALL.into_iter().filter(|s| s.shown_in_build())
     }
 
+    /// The heading the dialog's list shows above this section, which starts a run of them.
+    fn heading(self) -> Option<&'static str> {
+        match self {
+            Self::Agents => Some("Integrations"),
+            Self::Theme => Some("Appearance"),
+            Self::Quick => Some("Developer"),
+            _ => None,
+        }
+    }
+
     /// The section's name, in the dialog's list and over its rows.
     fn title(self) -> &'static str {
         match self {
             Self::General => "General",
-            Self::Appearance => "Appearance",
-            Self::Quick => "Quick Theme",
-            Self::Theme => "Solid Theme",
             Self::Terminal => "Terminal",
             Self::Notifications => "Notifications",
             Self::Agents => "Agents",
-            Self::Items => "Sidebar & Tabs",
+            Self::Browser => "Browser",
+            Self::VsCode => "VS Code",
             Self::Shortcuts => "Keyboard Shortcuts",
+            Self::Theme => "Theme",
+            Self::Window => "Window",
+            Self::Sidebar => "Sidebar",
+            Self::Tabs => "Tabs",
+            Self::Panes => "Panes",
+            Self::Menus => "Menus & Controls",
+            Self::Effects => "Effects",
+            Self::Quick => "Quick Theme",
+        }
+    }
+
+    /// What the page covers, under its title.
+    fn blurb(self) -> &'static str {
+        match self {
+            Self::General => "What comes back when macaroni starts.",
+            Self::Terminal => {
+                "The shell, SSH profiles, the font and cursor, scrollback and the mouse."
+            }
+            Self::Notifications => "When a tab asks for attention, and the bell.",
+            Self::Agents => "Claude Code's hooks, and how agents show up in tabs.",
+            Self::Browser => "Browser tabs: where terminal links open and the home page.",
+            Self::VsCode => "VS Code for the web in browser tabs, downloaded when you opt in.",
+            Self::Shortcuts => "The key bindings in effect. Change them in config.toml.",
+            Self::Theme => "The interface and terminal themes, and the colors the rest follow.",
+            Self::Window => "The window's background and lines, and the title bar.",
+            Self::Sidebar => "The workspace list: what each row shows, its colors and sizes.",
+            Self::Tabs => "What tabs show, their colors and sizes, and the New tab button.",
+            Self::Panes => "Pane cards, the space between them and their outlines.",
+            Self::Menus => "Right-click menus, pickers, buttons, fields and dialogs.",
+            Self::Effects => "Opacities, dragging, and the glass interface's sheets and backdrop.",
+            Self::Quick => "The few solid colors that set the overall look.",
         }
     }
 
@@ -108,14 +169,20 @@ impl Section {
     fn icon(self) -> Icon {
         match self {
             Self::General => Icon::Sliders,
-            Self::Appearance => Icon::Palette,
-            Self::Quick => Icon::Zap,
-            Self::Theme => Icon::SwatchBook,
             Self::Terminal => Icon::Terminal,
             Self::Notifications => Icon::Bell,
             Self::Agents => Icon::Bot,
-            Self::Items => Icon::PanelLeft,
+            Self::Browser => Icon::Globe,
+            Self::VsCode => Icon::Code,
             Self::Shortcuts => Icon::Keyboard,
+            Self::Theme => Icon::SwatchBook,
+            Self::Window => Icon::AppWindow,
+            Self::Sidebar => Icon::PanelLeft,
+            Self::Tabs => Icon::PanelTop,
+            Self::Panes => Icon::Columns,
+            Self::Menus => Icon::Menu,
+            Self::Effects => Icon::Sparkles,
+            Self::Quick => Icon::Zap,
         }
     }
 }
@@ -177,12 +244,22 @@ pub enum SettingsMessage {
     Collapse(Section, &'static str),
     /// Quick Access: scroll to the shown page's `n`th card, unfolding it, and close the list.
     Jump(usize, Section, &'static str),
+    /// A search result's card title was clicked: show its page, scrolled to that card.
+    Reveal(Section, &'static str),
     /// Open or close Quick Access.
     Quick,
     /// Ctrl+F (Cmd+F): put the keyboard in the search field, its text selected.
     FocusSearch,
     /// Install (`true`) or remove macaroni's Claude Code hooks with `macaroni-cli setup claude`.
     Hooks(bool),
+    /// Download (`true`) or remove VS Code for the web.
+    VsCode(bool),
+    /// Stop VS Code's server; the next VS Code tab starts it again.
+    VsCodeStop,
+    /// Enter in the new SSH profile's fields: add it from their drafts.
+    AddSsh,
+    /// Remove the `[[ssh]]` profile at this index.
+    RemoveSsh(usize),
     /// A color row's button was clicked at this window position: open the menu for its key,
     /// starting from what the row shows.
     Pick(&'static str, Point, PickerStart),
@@ -281,6 +358,32 @@ enum Control {
     },
     /// A button, with its label and what it sends.
     Button(String, Message),
+    /// The new SSH profile's name and destination fields ([`SSH_NAME`] and [`SSH_HOST`]).
+    NewSsh,
+}
+
+/// The draft key of the new SSH profile's name field.
+const SSH_NAME: &str = "ssh.name";
+/// The draft key of the new SSH profile's destination field.
+const SSH_HOST: &str = "ssh.host";
+
+impl Control {
+    /// The dotted config key the control writes; `None` for a shortcut or a button.
+    fn key(&self) -> Option<&'static str> {
+        match self {
+            Self::Toggle(key, _)
+            | Self::Choice(key, ..)
+            | Self::Dropdown(key, ..)
+            | Self::Text { key, .. }
+            | Self::List { key, .. }
+            | Self::Template { key, .. }
+            | Self::Color { key, .. } => Some(key),
+            Self::Shell { .. } => Some("shell.program"),
+            Self::NewSsh => Some(SSH_HOST),
+            Self::Number { setting, .. } => Some(setting.key),
+            Self::Shortcut(_) | Self::Button(..) => None,
+        }
+    }
 }
 
 /// The template drop-down's entry for typing one's own.
@@ -298,8 +401,8 @@ struct Setting {
     description: String,
     /// What's on the right of the row.
     control: Control,
-    /// A copy of a row listed elsewhere too (colors repeated where they're used), left out of
-    /// search results so each setting is found once.
+    /// A copy of a row listed elsewhere too (the Quick Theme page's colors), left out of search
+    /// results so each setting is found once.
     repeat: bool,
 }
 
@@ -323,8 +426,9 @@ impl Setting {
     }
 
     /// Whether every word of the search `query` (already trimmed and lowercased) is somewhere
-    /// in the row's section, group, label or description, so "tab padding" finds the Tabs
-    /// card's Padding row though neither name has both words. Repeats never match.
+    /// in the row's section, group, label, description or config key, so "tab padding" finds
+    /// the Tabs card's padding rows though no one name has both words, and `tab_strip` finds
+    /// a color by the name config.toml uses. Repeats never match.
     fn matches(&self, query: &str) -> bool {
         if self.repeat {
             return false;
@@ -333,14 +437,15 @@ impl Setting {
         query.split_whitespace().all(|word| haystack.contains(word))
     }
 
-    /// What search looks in: the section, group, label and description, lowercased.
+    /// What search looks in: the section, group, label, description and key, lowercased.
     fn search_text(&self) -> String {
         format!(
-            "{} {} {} {}",
+            "{} {} {} {} {}",
             self.section.title(),
             self.group,
             self.label,
-            self.description
+            self.description,
+            self.control.key().unwrap_or_default()
         )
         .to_lowercase()
     }
@@ -493,6 +598,15 @@ impl App {
     /// [`App::write_setting`]); the config watcher then reloads it, and the next draw shows the
     /// new value. Ignored while the dialog is closed.
     pub fn settings_update(&mut self, message: SettingsMessage) -> Task<Message> {
+        match message {
+            SettingsMessage::Reveal(section, group) => return self.reveal_card(section, group),
+            SettingsMessage::VsCode(install) => return self.vscode_install(install),
+            SettingsMessage::VsCodeStop => {
+                self.vscode_web.stop();
+                return Task::none();
+            }
+            _ => {}
+        }
         let Some(settings) = &mut self.settings else {
             return Task::none();
         };
@@ -671,6 +785,33 @@ impl App {
                 }
             }
             SettingsMessage::PickerClose => settings.picker = None,
+            SettingsMessage::Reveal(..)
+            | SettingsMessage::VsCode(_)
+            | SettingsMessage::VsCodeStop => {}
+            SettingsMessage::AddSsh => {
+                let host = settings.drafts.get(SSH_HOST).map_or("", |h| h.trim());
+                if host.is_empty() {
+                    return Task::none();
+                }
+                let mut profile = parse_destination(host);
+                profile.name = settings
+                    .drafts
+                    .remove(SSH_NAME)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                settings.drafts.remove(SSH_HOST);
+                let mut profiles = self.config.ssh.clone();
+                profiles.push(profile);
+                self.write_ssh(&profiles);
+            }
+            SettingsMessage::RemoveSsh(index) => {
+                let mut profiles = self.config.ssh.clone();
+                if index < profiles.len() {
+                    profiles.remove(index);
+                    self.write_ssh(&profiles);
+                }
+            }
             SettingsMessage::Hooks(install) => {
                 // Quick (it edits one JSON file), so it runs here rather than on a thread.
                 settings.hooks_result = Some(run_setup(install));
@@ -678,6 +819,27 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    /// Leaves the search for `section`'s page and scrolls to its card `group`. The scroll is a
+    /// [`SettingsMessage::Jump`] sent on, so it runs once the page is drawn.
+    fn reveal_card(&mut self, section: Section, group: &'static str) -> Task<Message> {
+        let mut groups: Vec<&str> = Vec::new();
+        for setting in self.settings_list() {
+            if setting.section == section && groups.last() != Some(&setting.group) {
+                groups.push(setting.group);
+            }
+        }
+        let Some(settings) = &mut self.settings else {
+            return Task::none();
+        };
+        settings.section = section;
+        settings.query.clear();
+        settings.quick = false;
+        match groups.iter().position(|g| *g == group) {
+            Some(n) => Task::done(Message::Settings(SettingsMessage::Jump(n, section, group))),
+            None => Task::none(),
+        }
     }
 
     /// Shows `color` as the `[colors.*]` setting `key` (`colors.<interface>.<name>`) right away,
@@ -731,6 +893,13 @@ impl App {
         self.write_one(key, value);
     }
 
+    /// Replaces the `[[ssh]]` profiles in `config.toml`, as [`App::write_setting`] writes a key.
+    fn write_ssh(&mut self, profiles: &[macaroni_config::SshProfile]) {
+        if let Err(error) = macaroni_config::write_ssh(&self.config_dir, profiles) {
+            self.config_errors.push(error);
+        }
+    }
+
     /// Writes one dotted `key` into `config.toml`, as [`App::write_setting`] does.
     fn write_one(&mut self, key: &str, value: Option<Value>) {
         if let Err(error) = macaroni_config::write_setting(&self.config_dir, key, value) {
@@ -739,14 +908,44 @@ impl App {
     }
 }
 
+/// A profile from what's typed as its destination: `user@host`, with an optional `:port`
+/// (ignored for an IPv6 address, which has colons of its own).
+fn parse_destination(typed: &str) -> macaroni_config::SshProfile {
+    let (host, port) = match typed.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') => match port.parse() {
+            Ok(port) => (host, Some(port)),
+            Err(_) => (typed, None),
+        },
+        _ => (typed, None),
+    };
+    macaroni_config::SshProfile {
+        host: host.to_owned(),
+        port,
+        ..macaroni_config::SshProfile::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn destinations_split_off_a_port() {
+        let pi = parse_destination("pi@raspberrypi.local:2222");
+        assert_eq!(
+            (pi.host.as_str(), pi.port),
+            ("pi@raspberrypi.local", Some(2222))
+        );
+        let plain = parse_destination("work");
+        assert_eq!((plain.host.as_str(), plain.port), ("work", None));
+        let v6 = parse_destination("fe80::1");
+        assert_eq!((v6.host.as_str(), v6.port), ("fe80::1", None));
+    }
+
+    #[test]
     fn search_matches_words_across_fields() {
         let row = Setting::new(
-            Section::Appearance,
+            Section::Tabs,
             "Tabs",
             "Padding",
             "Inside each tab.",
@@ -754,7 +953,8 @@ mod tests {
         );
         assert!(row.matches("tab padding"));
         assert!(row.matches("padding tabs"));
-        assert!(row.matches("appearance inside"));
+        assert!(row.matches("tabs inside"));
+        assert!(row.matches("style.tabs.padding"));
         assert!(!row.matches("sidebar padding"));
     }
 }

@@ -34,9 +34,6 @@ use crate::{
     glass, label,
 };
 
-/// The most characters of an agent's status line shown at the right of a tab strip.
-pub(super) const MAX_AGENT_STATUS: usize = 48;
-
 /// The Settings button at the foot of the sidebar, where the system draws the title bar: its
 /// icon size.
 const SETTINGS_ICON_SIZE: f32 = 16.0;
@@ -922,7 +919,7 @@ fn group_glyph(group: &Group) -> Glyph {
 }
 
 /// The name shown beside a compact sidebar item on hover.
-fn name_tip<'a>(c: Chrome, name: String) -> Element<'a, Message> {
+pub(super) fn name_tip<'a>(c: Chrome, name: String) -> Element<'a, Message> {
     container(one_line(name, c.s.workspaces.title_size, c.text))
         .padding([4, 8])
         .style(move |_| container::Style {

@@ -9,12 +9,16 @@
 //! [`Pointer`], which [`App::drop_target`] reads for drops into the strip. What a tab shows
 //! comes from the `[tab_items]` templates, filled by [`tab_value`].
 
-use iced::widget::{Space, container, mouse_area, row, scrollable, stack, text, text_input};
+use std::time::Duration;
+
+use iced::widget::{
+    Space, column, container, mouse_area, row, scrollable, stack, text, text_input, tooltip,
+};
 use iced::{Border, Color, Element, Fill, Length, alignment};
-use macaroni_core::{Agent, Command, Pane, PaneId, Tab, TabId, TabKind};
+use macaroni_core::{Command, Pane, PaneId, Tab, TabId, TabKind};
 
 use super::drag::insertion_line;
-use super::sidebar::{MAX_AGENT_STATUS, agent_line};
+use super::sidebar::{agent_line, name_tip};
 use super::widgets::{
     AddBox, FIELD_PADDING, ICON_BUTTON_PADDING, LINE_HEIGHT, MARK_OVER_TEXT, add_box, card_style,
     faded_icon_button, glass_strength, icon_button, input_style, item_ease, item_fill, one_line,
@@ -27,8 +31,14 @@ use crate::right_click::RightClick;
 use crate::theme::{Chrome, workspace_color};
 use crate::{App, Dragged, DropTarget, MenuTarget, Message, Renaming, anim, glass, label};
 
-/// The most an agent's status line takes beside tabs that overflow the strip.
-const MAX_OVERFLOW_STATUS: f32 = 220.0;
+/// How long the pointer rests on a tab before its tooltip shows.
+const TIP_DELAY: Duration = Duration::from_millis(500);
+
+/// The widest a tab's tooltip grows before its lines wrap.
+const TIP_WIDTH: f32 = 360.0;
+
+/// The gap between the new tab buttons at the right of a strip.
+const NEW_BUTTON_SPACING: f32 = 2.0;
 
 /// Roughly how wide a title character is, as a multiple of the text size, for fitting tabs.
 const CHAR_WIDTH: f32 = 0.56;
@@ -52,7 +62,7 @@ const SCROLLBAR_MARGIN: f32 = 1.0;
 const SCROLLER_ALPHA: f32 = 0.6;
 
 /// Between the agent's status and its summary, and either side of them.
-const STATUS_SPACING: f32 = 8.0;
+const STATUS_SPACING: f32 = 4.0;
 
 /// The find bar's field width.
 const SEARCH_WIDTH: f32 = 220.0;
@@ -102,7 +112,8 @@ fn tab_text(c: Chrome, template: &str, tab: &Tab, index: usize) -> String {
 }
 
 impl App {
-    /// A pane's tabs and `+` button, then its agent's status and the find bar when shown.
+    /// A pane's tabs and `+` button, then the find bar when shown, and the new tab buttons at
+    /// the right end.
     pub(super) fn tab_strip(&self, pane: &Pane, width: f32) -> Element<'_, Message> {
         let c = self.chrome;
         let (tab_width, overflow) = self.fit_tabs(pane, width);
@@ -129,17 +140,11 @@ impl App {
         let mut strip = row![tab_scroller(c, pane.id, tabs.into(), overflow), add]
             .spacing(tab_spacing(c))
             .align_y(alignment::Vertical::Top);
-        let agent = self
-            .model
-            .tab(pane.active)
-            .and_then(|t| t.agent.as_ref())
-            .filter(|_| self.config.agents.tab_status);
         let search = self.search_bar(pane);
-        match agent {
-            Some(agent) => strip = strip.push(agent_status(c, agent, overflow)),
-            // Without a status to fill the rest, a spacer pushes the find bar to the right.
-            None if search.is_some() => strip = strip.push(Space::new().width(Fill)),
-            None => {}
+        let buttons = self.config.tab_items.new_buttons;
+        // Pushes the find bar and the buttons to the right.
+        if search.is_some() || buttons {
+            strip = strip.push(Space::new().width(Fill));
         }
         if let Some(bar) = search {
             strip = strip.push(
@@ -148,7 +153,62 @@ impl App {
                     .align_y(alignment::Vertical::Center),
             );
         }
+        if buttons {
+            strip = strip.push(self.new_tab_buttons(pane.id));
+        }
         strip.into()
+    }
+
+    /// Icon buttons that open a terminal (the default shell), a browser, and VS Code at the
+    /// active tab's folder (a VS Code tab once downloaded, else the desktop app if installed),
+    /// each in `pane` and named on hover.
+    fn new_tab_buttons(&self, pane: PaneId) -> Element<'_, Message> {
+        let c = self.chrome;
+        let button = |glyph, name: &str, message| -> Element<'_, Message> {
+            tooltip(
+                icon_button(c, glyph, message),
+                name_tip(c, name.to_owned()),
+                tooltip::Position::Bottom,
+            )
+            .into()
+        };
+        let mut buttons = row![
+            button(
+                Icon::Terminal,
+                "New terminal",
+                Message::Commands(vec![Command::FocusPane(pane), Command::NewTab]),
+            ),
+            button(Icon::Globe, "New browser", Message::NewBrowserIn(pane)),
+        ];
+        // A tab when VS Code for the web is downloaded, else the desktop app.
+        if self.vscode_web.installed {
+            buttons = buttons.push(button(
+                Icon::Code,
+                "New VS Code tab",
+                Message::VsCodeTab(pane),
+            ));
+        } else if self.vscode.is_some() {
+            buttons = buttons.push(button(
+                Icon::Code,
+                "Open in VS Code",
+                Message::OpenVsCode(pane),
+            ));
+        }
+        container(buttons.spacing(NEW_BUTTON_SPACING))
+            .height(c.s.tabs.height)
+            .align_y(alignment::Vertical::Center)
+            .into()
+    }
+
+    /// How wide [`App::new_tab_buttons`] is (none while they're off), for fitting the tabs.
+    fn new_buttons_width(&self) -> f32 {
+        if !self.config.tab_items.new_buttons {
+            return 0.0;
+        }
+        let c = self.chrome;
+        let code = self.vscode_web.installed || self.vscode.is_some();
+        let count = if code { 3.0 } else { 2.0 };
+        count * tab_row(c) + (count - 1.0) * NEW_BUTTON_SPACING + tab_spacing(c)
     }
 
     /// How wide each unpinned tab is, and whether they overflow the strip and scroll: as wide as
@@ -192,8 +252,9 @@ impl App {
                     + TAB_WIDTH_SLACK
             })
             .sum();
-        // The `+` button (a `tabs.height` square) and its spacing.
-        let room = width - c.s.tabs.height - tab_spacing(c) - STRIP_SLACK;
+        // The `+` button (a `tabs.height` square) and its spacing, and the new tab buttons.
+        let room =
+            width - c.s.tabs.height - tab_spacing(c) - self.new_buttons_width() - STRIP_SLACK;
         // Each unpinned tab's share of what the pinned ones leave, less the spacing after it
         // (`natural` counts that spacing per tab too).
         let unpinned = (tabs.len() - pinned).max(1) as f32;
@@ -256,6 +317,14 @@ impl App {
             (self.item_focus == Some(Renaming::Tab(id)))
                 .then_some(Message::ItemBlur(Renaming::Tab(id))),
         );
+        // No tooltip while something is dragged: it would trail the drag around.
+        let tab_area: Element<'_, Message> = if self.item_drag.is_some() {
+            tab_area.into()
+        } else {
+            tooltip(tab_area, self.tab_tip(tab), tooltip::Position::Bottom)
+                .delay(TIP_DELAY)
+                .into()
+        };
         insertion_line(
             c,
             RightClick::new(tab_area, move |at| {
@@ -264,6 +333,43 @@ impl App {
             .into(),
             line,
         )
+    }
+
+    /// A tab's tooltip: its icon and whole title, then what its agent is doing and the agent's
+    /// status line (model, context) when one runs.
+    fn tab_tip(&self, tab: &Tab) -> Element<'_, Message> {
+        let c = self.chrome;
+        let tint = workspace_color(tab.color.as_deref()).unwrap_or(c.text);
+        let title = row![
+            draw_glyph(tab_icon(tab), c.s.tabs.icon_size, tint, 1.0),
+            text(tab_title(tab)).size(c.s.tabs.title_size).color(c.text),
+        ]
+        .spacing(c.s.tabs.part_spacing)
+        .align_y(alignment::Vertical::Center);
+        let mut lines = column![title].spacing(STATUS_SPACING);
+        if let Some(agent) = &tab.agent {
+            let (line, color) = agent_line(c, agent);
+            lines = lines.push(text(line).size(c.s.tabs.status_size).color(color));
+            if let Some(summary) = &agent.summary {
+                lines = lines.push(
+                    text(summary.clone())
+                        .size(c.s.tabs.status_size)
+                        .color(c.faint),
+                );
+            }
+        }
+        container(lines)
+            .max_width(TIP_WIDTH)
+            .padding([6, 10])
+            .style(move |_| container::Style {
+                border: Border {
+                    color: c.item_edge,
+                    width: c.s.menus.border_width,
+                    radius: c.s.controls.radius.into(),
+                },
+                ..card_style(c.popup, c.s.controls.radius)
+            })
+            .into()
     }
 
     /// What a tab shows inside its card: its icon (all a pinned tab shows), title, badge,
@@ -551,39 +657,6 @@ fn new_tab_button<'a>(c: Chrome, pane: PaneId) -> Element<'a, Message> {
         move |at| Message::MenuOpen(MenuTarget::NewTab(pane), at),
     )
     .into()
-}
-
-/// What the active tab's agent is doing, at the right of the strip. It takes the remaining
-/// width and is clipped, never wrapped; next to tabs that `overflow`, no more than its share.
-fn agent_status<'a>(c: Chrome, agent: &'a Agent, overflow: bool) -> Element<'a, Message> {
-    let (line, color) = agent_line(c, agent);
-    let mut status = row![one_line(
-        truncate(&line, MAX_AGENT_STATUS),
-        c.s.tabs.status_size,
-        color
-    )]
-    .spacing(STATUS_SPACING)
-    .align_y(alignment::Vertical::Center);
-    if let Some(summary) = &agent.summary {
-        status = status.push(one_line(
-            truncate(summary, MAX_AGENT_STATUS),
-            c.s.tabs.status_size,
-            c.faint,
-        ));
-    }
-    container(status)
-        .width(if overflow { Length::Shrink } else { Fill })
-        .max_width(if overflow {
-            MAX_OVERFLOW_STATUS
-        } else {
-            f32::INFINITY
-        })
-        .height(c.s.tabs.height)
-        .align_x(alignment::Horizontal::Right)
-        .align_y(alignment::Vertical::Center)
-        .padding([0.0, STATUS_SPACING])
-        .clip(true)
-        .into()
 }
 
 /// The tab strip's (and the sidebar's) scrollbar: a thin scroller in the UI's own colors, shown

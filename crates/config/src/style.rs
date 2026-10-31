@@ -550,7 +550,7 @@ numbers! {
         icon_size: 16.0, 8.0, 32.0, 0.5, Px, "Icon size", "The terminal, browser or agent icon.";
         title_size: 12.5, 7.0, 24.0, 0.5, Px, "Title text size", "The tab's name.";
         badge_size: 11.0, 7.0, 20.0, 0.5, Px, "Badge text size", "The small text after the title.";
-        status_size: 11.0, 7.0, 20.0, 0.5, Px, "Agent status text size", "Claude Code's status, at the right of the strip.";
+        status_size: 11.0, 7.0, 20.0, 0.5, Px, "Tooltip detail text size", "What a tab's agent is doing, under its name on hover.";
         scrollbar_width: 3.0, 1.0, 10.0, 0.5, Px, "Scrollbar thickness", "The bar under the tabs when they don't all fit.";
     }
 }

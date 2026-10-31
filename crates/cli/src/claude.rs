@@ -98,7 +98,12 @@ pub fn describe_tool(name: &str, input: &Value) -> String {
 
 /// The macaroni calls for one Claude Code hook event.
 pub fn hook_calls(input: &Value, tab: u64) -> Vec<Call> {
-    let session_id = string(input, "session_id");
+    // Claude Code saves a session only once it has a message, and `claude --resume` can't find
+    // one it never saved. Until the transcript exists the id isn't passed on, so the tab keeps
+    // the last one that can be resumed. Input without `transcript_path` passes it on.
+    let session_id = string(input, "session_id").filter(|_| {
+        string(input, "transcript_path").is_none_or(|path| std::path::Path::new(&path).is_file())
+    });
     let cwd = string(input, "cwd");
     let agent = |state, detail: Option<String>| Call::Agent {
         tab: Some(tab),
@@ -453,6 +458,24 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn session_ids_wait_for_their_transcript() {
+        let id = |transcript: &str| match &hook_calls(
+            &json!({"hook_event_name": "SessionStart", "session_id": "s1",
+                    "transcript_path": transcript}),
+            7,
+        )[0]
+        {
+            Call::Agent { session_id, .. } => session_id.clone(),
+            _ => unreachable!("SessionStart reports the agent"),
+        };
+        assert_eq!(
+            id(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")),
+            Some("s1".into())
+        );
+        assert_eq!(id("/no/such/transcript.jsonl"), None);
     }
 
     #[test]

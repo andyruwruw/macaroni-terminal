@@ -1,10 +1,11 @@
-//! Live previews at the top of the settings dialog's cards: the real sidebar items, tab strip,
-//! pane, menu and title bar, drawn by the same view code as the app around the dialog, so they
-//! change as soon as a setting is written and the config reloads.
+//! The live preview pinned over a settings page's cards: the real window, sidebar rows, tab
+//! strip, pane or menu, drawn by the same view code as the app around the dialog, so it changes
+//! as soon as a setting is written and the config reloads (or, for a color being dragged in the
+//! picker, as it's dragged).
 //!
 //! Each is wrapped in [`Inert`], so it can't be clicked and its widgets don't answer operations
-//! meant for the real ones. [`App::settings_preview`] picks one by (section, card); cards with
-//! nothing to show get none.
+//! meant for the real ones. [`App::settings_preview`] picks one by page; pages with nothing to
+//! show get none.
 
 use iced::widget::text::{LineHeight, Shaping};
 use iced::widget::{Space, column, container, row, stack, text, text_input};
@@ -13,11 +14,11 @@ use macaroni_config::CursorStyle;
 use macaroni_core::TabKind;
 
 use super::Section;
-use crate::icons::{Icon, icon};
+use crate::icons::Icon;
 use crate::inert::Inert;
 use crate::state::{MenuPage, MenuTarget};
 use crate::theme::{Chrome, to_iced};
-use crate::view::widgets::{AddBox, add_box, card_style, icon_button, input_style, one_line};
+use crate::view::widgets::{AddBox, add_box, card_style, icon_button, input_style};
 use crate::view::{CUSTOM_FRAME, TitleLine, sidebar_edge, sidebar_margin, with_title_line};
 use crate::{App, Message};
 
@@ -37,18 +38,18 @@ const FONT_SAMPLE: [&str; 3] = [
     "\u{2500}\u{2500} 0123456789 {}[]() @#$%&* \u{2514}\u{2500}\u{2518}",
 ];
 
-/// The size of the Interface preview: the top left of the window.
-const SCREEN_SIZE: Size = Size::new(640.0, 300.0);
+/// The size of the window preview: the window's top left.
+const SCREEN_SIZE: Size = Size::new(640.0, 240.0);
 
 /// Inside a terminal-colored preview, around its text.
 const TERMINAL_PADDING: f32 = 14.0;
 
-/// What a card's preview shows.
+/// What a page's preview shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Preview {
     /// The window's top left: the title bar, the sidebar's first rows and the focused pane.
     Screen,
-    /// The first few sidebar rows: group headers and workspaces.
+    /// The sidebar's top: the search bar, the first few rows and the New workspace button.
     Sidebar,
     /// The focused pane's tab strip.
     Tabs,
@@ -56,20 +57,10 @@ enum Preview {
     Items,
     /// The focused pane, tabs and all.
     Pane,
-    /// A tab's right-click menu.
-    Menu,
-    /// The title bar (Windows, where macaroni draws it).
-    TitleBar,
-    /// A text field and the small buttons.
-    Controls,
-    /// Lines in the terminal font.
-    Font,
-    /// The interface's text colors.
-    Text,
-    /// The accent colors.
-    Accents,
-    /// The cursor's shape.
-    Cursor,
+    /// A tab's right-click menu, beside a text field and the small buttons.
+    Menus,
+    /// Lines in the terminal font, and the cursor.
+    Terminal,
 }
 
 /// How the dialog frames a preview at the top of its card.
@@ -99,43 +90,34 @@ fn outlined<'a>(c: Chrome, preview: Element<'a, Message>) -> Element<'a, Message
     stack![preview, outline].into()
 }
 
-/// The preview for `section`'s card `group`, if it has one.
-fn preview_for(section: Section, group: &str) -> Option<Preview> {
+/// The preview for `section`'s page, if it has one.
+fn preview_for(section: Section) -> Option<Preview> {
     use Preview::*;
-    Some(match (section, group) {
-        (Section::Appearance, "Interface" | "Theme colors") => Screen,
-        (Section::Appearance, "Terminal colors" | "Terminal font") => Font,
-        (Section::Appearance, "Accent colors") | (Section::Notifications, "Colors") => Accents,
-        (Section::Appearance, "Text colors") => Text,
-        (Section::Appearance, "Window" | "Window colors") if CUSTOM_FRAME => TitleBar,
-        (Section::Appearance, "Window" | "Window colors") => Screen,
-        (Section::Appearance, "Sidebar" | "Workspaces" | "Groups") => Sidebar,
-        (Section::Appearance, "Tabs") => Tabs,
-        (Section::Appearance, "Workspace and tab colors") => Items,
-        (Section::Appearance, "Panes" | "Pane colors") => Pane,
-        (Section::Appearance, "Menus" | "Menu and dialog colors") => Menu,
-        (Section::Appearance, "Buttons, fields and outlines") => Controls,
-        (Section::Appearance, "Effects" | "Glass colors" | "Backdrop colors") => Items,
-        (Section::Theme | Section::Quick, _) => Screen,
-        (Section::Terminal, "Cursor") => Cursor,
-        (Section::Items, "Workspaces") => Sidebar,
-        (Section::Items, "Tabs") | (Section::Agents, "In tabs") => Tabs,
-        (Section::Items, "Colors") => Items,
-        _ => return None,
+    Some(match section {
+        Section::Theme | Section::Window | Section::Quick => Screen,
+        Section::Sidebar => Sidebar,
+        Section::Tabs | Section::Agents => Tabs,
+        Section::Panes => Pane,
+        Section::Menus => Menus,
+        Section::Effects => Items,
+        Section::Terminal => Terminal,
+        Section::General
+        | Section::Notifications
+        | Section::Shortcuts
+        | Section::Browser
+        | Section::VsCode => return None,
     })
 }
 
 impl App {
-    /// The live preview at the top of `section`'s card `group`, if it has one, and how to frame
-    /// it.
+    /// The live preview for `section`'s page, if it has one, and how to frame it.
     pub(super) fn settings_preview(
         &self,
         section: Section,
-        group: &str,
     ) -> Option<(Element<'_, Message>, Frame)> {
         let c = self.chrome;
         let terminal = Frame::Fill(to_iced(self.palette.background, 1.0));
-        let (content, frame): (Element<'_, Message>, Frame) = match preview_for(section, group)? {
+        let (content, frame): (Element<'_, Message>, Frame) = match preview_for(section)? {
             Preview::Screen => (self.screen_preview(), Frame::Padded),
             Preview::Sidebar => (self.sidebar_preview(), Frame::Padded),
             Preview::Tabs => (self.tabs_preview()?, Frame::Padded),
@@ -147,28 +129,19 @@ impl App {
                 Frame::Padded,
             ),
             Preview::Pane => (self.pane_preview(PANE_SIZE)?, Frame::Padded),
-            Preview::Menu => {
+            Preview::Menus => {
                 let tab = self.model.focused_tab().id;
                 (
-                    self.menu_list(MenuTarget::Tab(tab), MenuPage::Main, None),
+                    row![
+                        self.menu_list(MenuTarget::Tab(tab), MenuPage::Main, None),
+                        controls_preview(c),
+                    ]
+                    .spacing(32)
+                    .into(),
                     Frame::Padded,
                 )
             }
-            Preview::TitleBar => (
-                outlined(
-                    c,
-                    container(self.title_bar())
-                        .width(Fill)
-                        .style(move |_| card_style(c.background, c.s.controls.radius))
-                        .into(),
-                ),
-                Frame::Padded,
-            ),
-            Preview::Controls => (controls_preview(c), Frame::Padded),
-            Preview::Font => (self.font_preview(), terminal),
-            Preview::Text => (text_preview(c), Frame::Padded),
-            Preview::Accents => (accents_preview(c), Frame::Padded),
-            Preview::Cursor => (self.cursor_preview(), terminal),
+            Preview::Terminal => (self.terminal_preview(), terminal),
         };
         Some((Inert::new(content).into(), frame))
     }
@@ -200,20 +173,10 @@ impl App {
             .pane_preview(pane_size)
             .or_else(|| self.tabs_preview())
             .unwrap_or_else(|| Space::new().into());
-        let items: Vec<_> = self
-            .sidebar_items(None)
-            .into_iter()
-            .take(PREVIEW_ITEMS)
-            .collect();
-        let searching = self.sidebar_searching();
-        let sidebar = container(
-            column![]
-                .push(searching.then(|| self.sidebar_search(c.s.sidebar.padding)))
-                .push(self.sidebar_list(items, None, searching)),
-        )
-        .width(side)
-        .height(Fill)
-        .style(move |_| card_style(c.sidebar, 0.0));
+        let sidebar = container(self.sidebar_top())
+            .width(side)
+            .height(Fill)
+            .style(move |_| card_style(c.sidebar, 0.0));
         let pane = container(pane).padding(iced::Padding {
             top: gap,
             left: margin,
@@ -247,18 +210,28 @@ impl App {
         )
     }
 
-    /// The first [`PREVIEW_ITEMS`] sidebar rows, as wide and spaced as in the sidebar.
-    fn sidebar_preview(&self) -> Element<'_, Message> {
+    /// The sidebar's top as the sidebar lays it out: the search bar when it's shown, the first
+    /// [`PREVIEW_ITEMS`] rows, and the New workspace button.
+    fn sidebar_top(&self) -> Element<'_, Message> {
         let c = self.chrome;
         let items: Vec<_> = self
             .sidebar_items(None)
             .into_iter()
             .take(PREVIEW_ITEMS)
             .collect();
+        let searching = self.sidebar_searching();
+        column![]
+            .push(searching.then(|| self.sidebar_search(c.s.sidebar.padding)))
+            .push(self.sidebar_list(items, None, searching))
+            .into()
+    }
+
+    /// [`App::sidebar_top`] on the sidebar's color, at its configured width.
+    fn sidebar_preview(&self) -> Element<'_, Message> {
+        let c = self.chrome;
         outlined(
             c,
-            container(column(items).spacing(c.s.sidebar.spacing))
-                .padding(c.s.sidebar.padding)
+            container(self.sidebar_top())
                 // The configured width: the real sidebar may be dragged narrow or folded away.
                 .width(self.config.style.window.sidebar_width)
                 .style(move |_| card_style(c.sidebar, c.s.controls.radius))
@@ -294,8 +267,9 @@ impl App {
         )
     }
 
-    /// A few lines in the terminal font, size, line height and colors.
-    fn font_preview(&self) -> Element<'_, Message> {
+    /// A few lines in the terminal font, size, line height and colors, then a prompt with the
+    /// cursor after it in the configured shape.
+    fn terminal_preview(&self) -> Element<'_, Message> {
         let m = self.metrics;
         let p = &self.palette;
         let shaping = if m.ligatures {
@@ -314,18 +288,6 @@ impl App {
                 .wrapping(text::Wrapping::None)
                 .into()
         });
-        // The frame paints the terminal's background, edge to edge.
-        container(column(lines))
-            .padding(TERMINAL_PADDING)
-            .width(Fill)
-            .clip(true)
-            .into()
-    }
-
-    /// A prompt with the cursor after it, in the configured shape.
-    fn cursor_preview(&self) -> Element<'_, Message> {
-        let m = self.metrics;
-        let p = &self.palette;
         let cell = Size::new(m.cell_width, m.cell_height);
         let cursor = to_iced(p.cursor, 1.0);
         let (width, height) = match self.config.terminal.cursor_style {
@@ -345,9 +307,11 @@ impl App {
             .size(m.font_size)
             .line_height(LineHeight::Absolute(m.cell_height.into()))
             .color(to_iced(p.foreground, 1.0));
-        container(row![prompt, shape].align_y(alignment::Vertical::Center))
+        // The frame paints the terminal's background, edge to edge.
+        container(column(lines).push(row![prompt, shape].align_y(alignment::Vertical::Center)))
             .padding(TERMINAL_PADDING)
             .width(Fill)
+            .clip(true)
             .into()
     }
 }
@@ -372,53 +336,6 @@ fn controls_preview<'a>(c: Chrome) -> Element<'a, Message> {
         icon_button(c, Icon::Down, unsent()),
     ]
     .spacing(10)
-    .align_y(alignment::Vertical::Center)
-    .into()
-}
-
-/// Each of the interface's text colors, named in itself.
-fn text_preview<'a>(c: Chrome) -> Element<'a, Message> {
-    row![
-        one_line("Text", 14.0, c.text),
-        one_line("Labels", 14.0, c.label),
-        one_line("Muted text", 14.0, c.muted),
-        one_line("Faint text", 14.0, c.faint),
-    ]
-    .spacing(24)
-    .into()
-}
-
-/// The accent colors where they show: an attention bell, a working agent, an error and a drop
-/// line.
-fn accents_preview<'a>(c: Chrome) -> Element<'a, Message> {
-    let line = container(
-        Space::new()
-            .width(60)
-            .height(c.s.controls.insertion_line_width),
-    )
-    .style(move |_| card_style(c.insertion, 1.0));
-    let chip = |glyph, label, color| {
-        row![icon(glyph, 15.0, color), one_line(label, 13.0, color)]
-            .spacing(6)
-            .align_y(alignment::Vertical::Center)
-    };
-    let error = container(one_line("Something went wrong", 12.0, c.text))
-        .padding([4, 10])
-        .style(move |_| container::Style {
-            border: Border {
-                color: c.danger,
-                width: 1.0,
-                radius: c.s.controls.radius.into(),
-            },
-            ..container::Style::default()
-        });
-    row![
-        chip(Icon::Bell, "Needs you", c.attention),
-        chip(Icon::Sparkles, "Working", c.working),
-        error,
-        line,
-    ]
-    .spacing(24)
     .align_y(alignment::Vertical::Center)
     .into()
 }
