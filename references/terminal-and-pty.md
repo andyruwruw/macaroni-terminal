@@ -47,6 +47,7 @@ Shift+Enter sends `ESC CR` (Claude Code's newline). Ctrl+letter uses the key, no
 
 - Default: login shell (`new_default_prog`) on macOS/Linux. Windows prefers Git Bash (`bash.exe --login -i`), then `pwsh.exe`, then `powershell.exe`. Never pick `C:\Windows\System32\bash.exe` (WSL's launcher).
 - Bash gets `CHERE_INVOKING=1` (else Git Bash's `/etc/profile` jumps to `$HOME`). On Windows a `PROMPT_COMMAND` emits OSC 7 using bash builtins only (forking per prompt is slow under MSYS) and drops the first prompt's leading newline; a `.bashrc` that replaces `PROMPT_COMMAND` disables both.
+- SSH profiles (`[[ssh]]`, `SshProfile::ssh_args`) are terminals running `ssh` (found on `PATH`; Windows has OpenSSH in System32) through the same `Session`. The app tracks them in `App.ssh_tabs` (session to profile name). When `ssh` exits non-zero the tab stays: `Session::print` writes a dimmed "disconnected" line into the emulator, the session joins `App.disconnected`, and Enter there runs the profile again in the same tab and `SessionId` (`App::reconnect`). Exit code 0 closes the tab as usual.
 - Every session gets `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=macaroni`, plus `SessionConfig::env` (the app adds `MACARONI_SOCKET`, `MACARONI_TAB_ID`; see [`control-api.md`](control-api.md)). Start directory is home unless `SessionConfig::cwd` is set.
 
 ## Windows: bundled ConPTY

@@ -24,6 +24,16 @@
 # program = "powershell.exe"
 # args = ["-NoLogo"]
 
+# SSH profiles: terminals that run ssh to a host, listed in the new-tab menu (right-click a
+# pane's + button). Add one per [[ssh]] table. Only host is required; the rest are optional.
+# [[ssh]]
+# name = "Home server"
+# host = "me@192.168.1.20"   # or a Host from ~/.ssh/config
+# user = "me"                # -l
+# port = 22                  # -p
+# identity_file = "~/.ssh/id_ed25519"   # -i
+# args = ["-A"]              # more ssh arguments
+
 [terminal]
 # Lines of history kept per terminal. Applies to terminals opened after the change.
 # scrollback = 10000
@@ -57,9 +67,6 @@
 # Mark the tab and notify when an agent finishes responding, or when it needs your input.
 # notify_finished = true
 # notify_input = true
-# Show an agent's state and status line (model, context, cost) at the right of its pane's
-# tabs. Off by default: the workspace's detail line already shows what the agent is doing.
-# tab_status = false
 # Give a tab running an agent the sparkles icon.
 # tab_icon = true
 
@@ -106,6 +113,8 @@
 # Show the muted mark.
 # status_icons = true
 # close_button = true
+# Buttons at the right of each tab strip: a terminal, a browser, and VS Code when it's installed.
+# new_buttons = true
 
 # The look of the app around the terminals: sizes, spacing, corner radii, border widths and text
 # sizes, by part of the window. Everything here is also in the settings dialog (Layout and
@@ -242,7 +251,7 @@
 # Solid also has its own: border, search, title_bar_border, sidebar_border, workspace, workspace_active, workspace_hover, workspace_border,
 #   workspace_border_active, workspace_border_hover, tab_strip, tab, tab_active, tab_hover, tab_border,
 #   tab_border_active, tab_border_hover, tab_accent, add_workspace, add_workspace_border, add_tab,
-#   add_tab_border (the settings dialog's Solid Theme page lists them).
+#   add_tab_border (the settings dialog lists them in solid, beside the parts they color).
 # accent = "#009ced"
 # text = "#ffffff"
 

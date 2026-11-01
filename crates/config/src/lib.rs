@@ -15,11 +15,11 @@ mod theme;
 mod watch;
 
 pub use chord::{Chord, ChordError, ChordKey, Modifiers, NamedKey};
-pub use edit::{Value, write_setting};
+pub use edit::{Value, write_setting, write_ssh};
 pub use settings::{
     AgentSettings, BrowserSettings, Config, CursorStyle, FontSettings, LoadError,
-    NotificationSettings, OpenLinks, SessionSettings, ShellSettings, TEMPLATE, TabItemSettings,
-    TerminalSettings, UiTheme, WorkspaceItemSettings, config_dir,
+    NotificationSettings, OpenLinks, SessionSettings, ShellSettings, SshProfile, TEMPLATE,
+    TabItemSettings, TerminalSettings, UiTheme, WorkspaceItemSettings, config_dir,
 };
 pub use style::{
     COLORS, ColorSetting, ColorValue, Colors, NumberSetting, SOLID_DEFAULTS, Style, THEME_COLORS,

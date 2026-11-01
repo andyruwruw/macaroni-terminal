@@ -2,7 +2,8 @@
 //!
 //! A session the model asks for waits in `App.pending` until both its view has reported a
 //! grid size ([`ViewEvent::Resize`]) and the event channel exists ([`App::events_ready`]),
-//! whichever comes last; then [`App::spawn`] starts the shell at that size. Events from the
+//! whichever comes last; then [`App::spawn`] starts the shell at that size. The first one
+//! shown also starts the rest, the hidden tabs', at its size ([`App::start_hidden`]). Events from the
 //! session's threads arrive as [`App::session_event`], and input, selection, scrolling and
 //! clicks from its view as [`App::view_event`]. Programs asking for attention go through
 //! [`App::attention`], whatever the source (OSC 9/777/99, the bell, `macaroni-cli notify`).
@@ -79,7 +80,7 @@ impl App {
             .map(PathBuf::from)
             .filter(|dir| dir.is_dir())
             .or_else(|| folder.map(PathBuf::from).filter(|dir| dir.is_dir()));
-        let (program, args) = self.program_for(id);
+        let (program, args) = self.program_for(id, &restored);
         let config = SessionConfig {
             // Blank means the platform's default shell.
             program: Some(program).filter(|p| !p.trim().is_empty()),
@@ -117,9 +118,21 @@ impl App {
     }
 
     /// What a new terminal runs: the launch command for the first one, else the shell picked
-    /// for its tab, else the configured shell (an empty program for the default shell).
-    fn program_for(&mut self, id: SessionId) -> (String, Vec<String>) {
-        let picked = self.tab_shells.remove(&id);
+    /// for its tab (or the SSH profile a restored tab ran, while it's still in `[[ssh]]`), else
+    /// the configured shell (an empty program for the default shell).
+    fn program_for(
+        &mut self,
+        id: SessionId,
+        restored: &session::SavedTab,
+    ) -> (String, Vec<String>) {
+        let mut picked = self.tab_shells.remove(&id);
+        if picked.is_none()
+            && let Some(name) = &restored.ssh
+            && let Some(profile) = self.config.ssh.iter().find(|p| p.label() == name)
+        {
+            self.ssh_tabs.insert(id, name.clone());
+            picked = Some(crate::update::menus::ssh_shell(profile));
+        }
         self.first_command.take().unwrap_or_else(|| match picked {
             Some(choice) => (choice.program, choice.args),
             None => {
@@ -186,14 +199,57 @@ impl App {
             SessionEvent::Notify(n) => self.attention(id, n.title, n.body),
             SessionEvent::Cwd(path) => self.apply(Command::SetTabCwd(id, Some(path))),
             SessionEvent::ClipboardStore(text) => iced::clipboard::write(text),
-            SessionEvent::Exited(_) => self.apply(Command::SessionExited(id)),
+            SessionEvent::Exited(code) => self.session_exited(id, code),
         }
+    }
+
+    /// A terminal's program exited: its tab closes, except an SSH tab whose `ssh` failed (a
+    /// connection that couldn't be made or was dropped), which stays to show why.
+    fn session_exited(&mut self, id: SessionId, code: Option<u32>) -> Task<Message> {
+        let Some(name) = self.ssh_tabs.get(&id).filter(|_| code != Some(0)).cloned() else {
+            return self.apply(Command::SessionExited(id));
+        };
+        self.disconnected.insert(id);
+        if let Some(r) = self.running.get_mut(&id) {
+            let code = code.map_or_else(String::new, |c| format!(" (exit code {c})"));
+            r.session.print(
+                format!("\r\n\x1b[2m[{name} disconnected{code}. Press Enter to connect again.]\x1b[0m\r\n")
+                    .as_bytes(),
+            );
+            r.snapshot = r.session.snapshot();
+        }
+        self.apply(Command::SetTabTitle(
+            id,
+            Some(format!("{name} (disconnected)")),
+        ))
+    }
+
+    /// Enter in a disconnected SSH tab: runs its profile again in the same tab, at its size.
+    /// The profile is looked up by name, so a removed one closes the tab instead.
+    fn reconnect(&mut self, id: SessionId) -> Task<Message> {
+        self.disconnected.remove(&id);
+        let profile = self
+            .ssh_tabs
+            .get(&id)
+            .and_then(|name| self.config.ssh.iter().find(|p| p.label() == name));
+        let (Some(profile), Some(size)) = (profile, self.running.get(&id).map(|r| r.size)) else {
+            return self.apply(Command::SessionExited(id));
+        };
+        self.tab_shells
+            .insert(id, crate::update::menus::ssh_shell(profile));
+        self.spawn(id, size);
+        self.apply(Command::SetTabTitle(id, None))
     }
 
     /// Handles what a terminal's view reported.
     pub(crate) fn view_event(&mut self, id: SessionId, event: ViewEvent) -> Task<Message> {
         match event {
             ViewEvent::Resize(size) => self.resize_session(id, size),
+            ViewEvent::Write(bytes) if self.disconnected.contains(&id) => {
+                if bytes.contains(&b'\r') {
+                    return self.reconnect(id);
+                }
+            }
             ViewEvent::Write(bytes) => self.write_input(id, &bytes),
             ViewEvent::Select(op) => self.select(id, op),
             ViewEvent::Scroll(scroll) => self.scroll(id, scroll),
@@ -220,6 +276,23 @@ impl App {
                 r.snapshot = r.session.snapshot();
             }
         } else if self.pending.contains_key(&id) {
+            self.spawn(id, size);
+            self.start_hidden(size);
+        }
+    }
+
+    /// Starts every terminal that's waiting with no size, because its tab isn't shown (another
+    /// workspace's, or behind its pane's open tab), at `size`: the size the terminal just shown
+    /// got, the best guess there is. So after a restart every tab's shell runs and its agent
+    /// resumes without the tab being opened first; showing one resizes it to its view.
+    fn start_hidden(&mut self, size: GridSize) {
+        let hidden: Vec<_> = self
+            .pending
+            .iter()
+            .filter(|(_, size)| size.is_none())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in hidden {
             self.spawn(id, size);
         }
     }

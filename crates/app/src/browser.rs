@@ -58,8 +58,13 @@ pub fn shutdown() {
 /// with its own config dir gets its own profile too (`<config dir>/browser`): Chromium allows
 /// one process per profile.
 fn data_dir() -> std::path::PathBuf {
+    local_data("browser")
+}
+
+/// `name` in macaroni's local (not roaming) data folder, as [`data_dir`] picks it.
+pub(crate) fn local_data(name: &str) -> std::path::PathBuf {
     if std::env::var_os("MACARONI_CONFIG_DIR").is_some() {
-        return macaroni_config::config_dir().join("browser");
+        return macaroni_config::config_dir().join(name);
     }
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
@@ -72,7 +77,7 @@ fn data_dir() -> std::path::PathBuf {
     };
     base.unwrap_or_else(std::env::temp_dir)
         .join("macaroni")
-        .join("browser")
+        .join(name)
 }
 
 /// What a browser sends the app.

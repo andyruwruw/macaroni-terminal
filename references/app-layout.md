@@ -70,6 +70,8 @@ One `stack`, in covering order: `window()`, `resize_edges` (custom frame, not ma
 ## Tab strip (`view/tabs.rs`)
 
 - `fit_tabs` estimates natural widths; when they don't fit, tabs share the width equally down to `style.tabs.min_width`, then scroll in a `scrollable` with id `tab_strip_id(pane)`. `+` stays outside it. A wrapping `mouse_area` turns unused wheel events into `Message::TabScroll` (`operation::scroll_by`).
+- New tab buttons (`App::new_tab_buttons`, `[tab_items] new_buttons`) sit at the strip's right end: terminal, browser, and VS Code (a web VS Code tab once downloaded, else the desktop app when `code` is found at launch). A `Fill` spacer pushes them (and the find bar) right; `fit_tabs` subtracts `new_buttons_width` from the tabs' room.
+- Hovering a tab shows `App::tab_tip` after `TIP_DELAY`: its icon and whole title, then its agent's `agent_line` and status-line summary (`style.tabs.status_size`). Left off while anything is dragged.
 - Revealing the open tab: `on_scroll` reports `Message::TabViewport` into `App.tab_views` (only while overflowing). `App::reveal_tab` scrolls via `tab_span` and retries on the next report (`App.tab_reveals`), because a new tab widens the strip only on the next layout.
 
 ## Focus routing
@@ -103,12 +105,13 @@ One `stack`, in covering order: `window()`, `resize_edges` (custom frame, not ma
 
 - `mod.rs` (`Section`, `Settings`, `SettingsMessage`, `Control`, `Setting`, `settings_update`), `list.rs` (`settings_list`), `dialog.rs` (drawing), `preview.rs`, `color_picker.rs`.
 - Rows are rebuilt from `App.config` on every draw. A card is a run of adjacent rows with the same (section, group).
-- **Add a setting**: `Setting::new(section, group, label, description, Control::...)` in the section's builder in `list.rs`. `[style.*]` numbers and `COLORS` appear on their own; other numbers are `NumberSetting`s in `list.rs` (`number_setting`).
+- **Pages**: General, Terminal, Notifications, Keyboard Shortcuts, and under the Integrations heading Agents, Browser and VS Code, are written out in `list.rs` (VS Code only where `vscode::available`). `Section::heading` starts each heading's run. The Appearance pages (Theme, Window, Sidebar, Tabs, Panes, Menus & Controls, Effects) come from the `LOOK` table: per page, cards of keys, each a `COLORS` / `THEME_COLORS` name, a `[style.*]` key, or an `item_rows` key (themes, `[workspace_items]`, `[tab_items]`). Each part's colors sit beside its sizes. Rows the interface doesn't draw are dropped (group "Solid theme" colors in glass, glass-only colors and `GLASS_NUMBERS` in solid).
+- **Add a setting**: `Setting::new(section, group, label, description, Control::...)` in the page's builder in `list.rs`. A new color or `[style.*]` number needs a place in `LOOK`: `every_color_and_number_has_one_card` fails until it has exactly one. Non-style numbers are `NumberSetting`s in `list.rs` (`number_setting`).
 - **The file is the source of truth**: each control writes one key with `macaroni_config::write_setting` (`toml_edit`, keeps comments), and the watcher reloads it. `None` removes the key; `SetMany` writes several.
 - Color drags preview without writing (`App::preview_color` edits `App.config.colors` in memory and rebuilds `Chrome`); the release writes.
-- Search (`Setting::matches`) skips `Setting.repeat` rows. Quick Access scrolls with `CardOffset`, a custom `Operation`.
-- Previews (`preview_for`) reuse real view code inside `inert::Inert`, which forwards no events or operations, so preview widgets never answer for real ones by id. `outlined` stacks a border layer because a container's border is covered by its content.
-- **Dev-only pages**: `Section::Quick` and `Section::Theme` exist only under `cfg!(debug_assertions)` (`Section::shown_in_build`), and `settings_list` omits their rows. Cards: `QUICK_CARD`, `THEME_CARDS`.
+- Search (`Setting::matches`) looks at the section, card, label, description and config key, and skips `Setting.repeat` rows. A result card's title sends `Reveal`, which opens its page and sends `Jump`. Quick Access scrolls with `CardOffset`, a custom `Operation`.
+- **Previews**: one per page (`preview_for(section)`), pinned between the title and the scrolling cards so it stays in view, and outside the scrollable so it never moves a card. Under `PIN_MIN_HEIGHT` it's the first item in the scroll instead. Previews reuse real view code inside `inert::Inert`, which forwards no events or operations, so preview widgets never answer for real ones by id. `outlined` stacks a border layer because a container's border is covered by its content.
+- **Dev-only page**: `Section::Quick` exists only under `cfg!(debug_assertions)` (`Section::shown_in_build`), and `settings_list` omits its rows (`QUICK_CARD`).
 
 ## Icons and shortcuts
 

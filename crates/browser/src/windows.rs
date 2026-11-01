@@ -408,6 +408,17 @@ wrap_life_span_handler! {
             popup_aborted();
         }
 
+        // A panel's page is a child window of the app's. Left to CEF (returning 0), the close
+        // ends with WM_CLOSE sent to the page's top-level window, which is the app's, and the
+        // app quits. Destroying the page's own window finishes the close instead, and
+        // `on_before_close` follows. Popups keep the default: they're top-level themselves.
+        fn do_close(&self, browser: Option<&mut cef::Browser>) -> ::std::os::raw::c_int {
+            if let Some(host) = browser.and_then(|b| b.host()) {
+                platform::destroy(host.window_handle());
+            }
+            1
+        }
+
         // The last callback for this browser. Dropping our reference here lets CEF free it.
         fn on_before_close(&self, _browser: Option<&mut cef::Browser>) {
             lock(&self.shared).browser = None;
@@ -693,8 +704,8 @@ mod platform {
 
     use cef::{CefString, PopupFeatures, RuntimeStyle, WindowInfo, sys::cef_window_handle_t};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SWP_ASYNCWINDOWPOS, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-        SWP_SHOWWINDOW, SetWindowPos, SetWindowTextW,
+        DestroyWindow, SWP_ASYNCWINDOWPOS, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos, SetWindowTextW,
     };
 
     use super::Bounds;
@@ -702,6 +713,15 @@ mod platform {
     /// An app-side window handle (`HWND` as `isize`) as CEF's handle type.
     pub fn handle(window: isize) -> cef_window_handle_t {
         cef::sys::HWND(window as *mut _)
+    }
+
+    /// Destroys a page's window. Call it on CEF's UI thread, which owns the window.
+    pub fn destroy(window: cef_window_handle_t) {
+        // SAFETY: `window` is a page window CEF created on this thread; destroying a handle
+        // that's already gone just fails.
+        unsafe {
+            DestroyWindow(window.0.cast());
+        }
     }
 
     /// Moves and shows the window at `bounds`, or hides it.

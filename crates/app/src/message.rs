@@ -242,6 +242,8 @@ pub(crate) enum Message {
     CloseRequested,
     /// The new-tab menu's shell at an index into `App.shells` was picked for a pane.
     NewTabWith(PaneId, usize),
+    /// The new-tab menu's SSH profile at an index into `[[ssh]]` was picked for a pane.
+    NewSshTab(PaneId, usize),
     /// The Git Bash banner's install button: opens a tab running winget.
     InstallGitBash,
     /// The Git Bash banner's "Not now": hides it for this run.
@@ -264,6 +266,12 @@ pub(crate) enum Message {
     NewBrowserIn(PaneId),
     /// Opens the pane's directory in VS Code.
     OpenVsCode(PaneId),
+    /// Opens VS Code for the web in a browser tab in the pane, at its directory.
+    VsCodeTab(PaneId),
+    /// VS Code's server started listening (`true`) or gave up.
+    VsCodeReady(bool),
+    /// Downloading (`Ok(true)`) or removing (`Ok(false)`) VS Code finished.
+    VsCodeInstalled(Result<bool, String>),
     /// The main window opened: remember it and ask for its native handle and scale.
     WindowOpened(window::Id),
     /// A custom title bar control, or a press on a resize border.

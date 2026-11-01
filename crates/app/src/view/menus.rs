@@ -507,6 +507,17 @@ impl App {
             };
             MenuEntry::item(Icon::Terminal, label, Some(Message::NewTabWith(pane, i)))
         }));
+        if !self.config.ssh.is_empty() {
+            entries.push(MenuEntry::Separator);
+            entries.push(MenuEntry::Header("SSH".to_owned()));
+            entries.extend(self.config.ssh.iter().enumerate().map(|(i, profile)| {
+                MenuEntry::item(
+                    Icon::Server,
+                    profile.label(),
+                    Some(Message::NewSshTab(pane, i)),
+                )
+            }));
+        }
         entries.push(MenuEntry::Separator);
         entries.push(MenuEntry::Header("Other".to_owned()));
         entries.push(MenuEntry::item(
@@ -514,6 +525,13 @@ impl App {
             "Browser",
             Some(Message::NewBrowserIn(pane)),
         ));
+        if self.vscode_web.installed {
+            entries.push(MenuEntry::item(
+                Icon::Code,
+                "VS Code tab",
+                Some(Message::VsCodeTab(pane)),
+            ));
+        }
         if self.vscode.is_some() {
             entries.push(MenuEntry::item(
                 Icon::Code,

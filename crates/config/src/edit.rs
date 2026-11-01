@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::settings::{Config, TEMPLATE};
+use crate::settings::{Config, SshProfile, TEMPLATE};
 
 /// A value to write with [`write_setting`]. Each variant becomes the TOML value of the same
 /// kind.
@@ -77,6 +77,49 @@ fn set(source: &str, key: &str, value: Option<Value>) -> Result<String, String> 
     Ok(doc.to_string())
 }
 
+/// Replaces the `[[ssh]]` profiles in `<dir>/config.toml` with `profiles`, keeping the rest of
+/// the file as it is. Unset fields aren't written. A missing file starts from the template.
+pub fn write_ssh(dir: &Path, profiles: &[SshProfile]) -> Result<(), String> {
+    let path = Config::path(dir);
+    let source = std::fs::read_to_string(&path).unwrap_or_else(|_| TEMPLATE.to_owned());
+    let updated = set_ssh(&source, profiles)?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    std::fs::write(&path, updated).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// [`write_ssh`] on a document in memory.
+fn set_ssh(source: &str, profiles: &[SshProfile]) -> Result<String, String> {
+    let mut doc: toml_edit::DocumentMut = source.parse().map_err(|e| format!("{e}"))?;
+    if profiles.is_empty() {
+        doc.remove("ssh");
+        return Ok(doc.to_string());
+    }
+    let mut tables = toml_edit::ArrayOfTables::new();
+    for profile in profiles {
+        let mut table = toml_edit::Table::new();
+        if !profile.name.trim().is_empty() {
+            table["name"] = toml_edit::value(&profile.name);
+        }
+        table["host"] = toml_edit::value(&profile.host);
+        if let Some(user) = &profile.user {
+            table["user"] = toml_edit::value(user);
+        }
+        if let Some(port) = profile.port {
+            table["port"] = toml_edit::value(i64::from(port));
+        }
+        if let Some(key) = &profile.identity_file {
+            table["identity_file"] = toml_edit::value(key);
+        }
+        if !profile.args.is_empty() {
+            let args: toml_edit::Array = profile.args.iter().map(String::as_str).collect();
+            table["args"] = toml_edit::value(args);
+        }
+        tables.push(table);
+    }
+    doc["ssh"] = toml_edit::Item::ArrayOfTables(tables);
+    Ok(doc.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,6 +139,45 @@ mod tests {
             Some(&crate::ColorValue::Rgba(
                 crate::Rgba::parse("#123456").unwrap()
             ))
+        );
+    }
+
+    #[test]
+    fn ssh_profiles_round_trip() {
+        let profiles = vec![
+            SshProfile {
+                name: "Pi".into(),
+                host: "pi@raspberrypi.local".into(),
+                port: Some(2222),
+                ..SshProfile::default()
+            },
+            SshProfile {
+                host: "work".into(),
+                args: vec!["-A".into()],
+                ..SshProfile::default()
+            },
+        ];
+        let source = set_ssh(TEMPLATE, &profiles).unwrap();
+        assert!(source.contains("# Color theme"));
+        let config = Config::parse(&source, Path::new(".")).unwrap();
+        assert_eq!(config.ssh, profiles);
+        assert_eq!(
+            config.ssh[0].ssh_args(),
+            ["-p", "2222", "pi@raspberrypi.local"]
+        );
+        assert_eq!(config.ssh[1].label(), "work");
+
+        let source = set_ssh(&source, &profiles[1..]).unwrap();
+        assert_eq!(
+            Config::parse(&source, Path::new(".")).unwrap().ssh,
+            profiles[1..]
+        );
+        let source = set_ssh(&source, &[]).unwrap();
+        assert!(
+            Config::parse(&source, Path::new("."))
+                .unwrap()
+                .ssh
+                .is_empty()
         );
     }
 

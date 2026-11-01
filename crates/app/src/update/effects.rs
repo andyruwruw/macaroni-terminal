@@ -102,7 +102,7 @@ impl App {
         let path = session::path(&self.config_dir);
         let saved = session::Saved {
             sidebar: Some(self.sidebar),
-            ..session::capture(&self.model)
+            ..session::capture(&self.model, &self.restored, &self.ssh_tabs)
         };
         if let Err(err) = session::save(&path, &saved) {
             self.config_errors.push(format!(
@@ -151,6 +151,8 @@ impl App {
     fn kill_session(&mut self, id: SessionId) {
         self.pending.remove(&id);
         self.tab_shells.remove(&id);
+        self.ssh_tabs.remove(&id);
+        self.disconnected.remove(&id);
         self.running.remove(&id);
         if let Some(tab) = self.ipc.session_tabs.remove(&id) {
             self.broadcast(macaroni_ipc::Event::TabClosed { tab: tab.0 });
@@ -203,7 +205,12 @@ impl App {
     /// lets CEF finish closing them before `browser::shutdown` runs `cef::shutdown` after the
     /// event loop; it gives up after [`BROWSER_CLOSE_TIMEOUT`].
     pub(crate) fn exit(&mut self) -> Task<Message> {
+        // No saves past this point: while the browsers close, dying agents can still report
+        // (Claude Code's SessionEnd clears the tab's agent), and a save would drop what the
+        // close just saved.
+        self.config.session.restore = false;
         self.browsers.clear();
+        self.vscode_web.stop();
         Task::future(async {
             macaroni_browser::wait_closed(BROWSER_CLOSE_TIMEOUT);
         })

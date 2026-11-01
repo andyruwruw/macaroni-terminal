@@ -1,5 +1,5 @@
-//! Draws the settings dialog: its section sidebar, each page's title row, Quick Access and cards,
-//! the rows, and their controls.
+//! Draws the settings dialog: its section sidebar, each page's title row, its live preview,
+//! Quick Access and cards, the rows, and their controls.
 //!
 //! [`App::settings_view`] is the last layer of `App::view`'s `stack`: a dimmed backdrop that
 //! closes the dialog on a click, and the dialog over it (`opaque`, so clicks inside don't reach
@@ -18,8 +18,8 @@ use super::color_picker::{self, PickerStart};
 use super::list::{format_number, number, theme_label, to_hex};
 use super::preview::Frame;
 use super::{
-    BODY_SCROLL, CUSTOM, Control, SEARCH_INPUT, Section, Setting, Settings, SettingsMessage,
-    group_id,
+    BODY_SCROLL, CUSTOM, Control, SEARCH_INPUT, SSH_HOST, SSH_NAME, Section, Setting, Settings,
+    SettingsMessage, group_id,
 };
 use crate::anim::mix;
 use crate::icons::{Icon, icon};
@@ -115,6 +115,13 @@ const COLOR_FIELD_INSET: f32 = 52.0;
 /// How strongly a reset with nothing to reset shows.
 const RESET_IDLE: f32 = 0.45;
 
+/// The tallest a page's preview gets; a taller one (a long menu) is cut off at the bottom.
+const PREVIEW_MAX_HEIGHT: f32 = 280.0;
+
+/// The shortest dialog that pins the preview over the cards. In a shorter one the preview would
+/// leave the cards no room, so it scrolls with them as the page's first item.
+const PIN_MIN_HEIGHT: f32 = 600.0;
+
 /// How many cards a page needs before it gets Quick Access.
 const QUICK_MIN_GROUPS: usize = 2;
 
@@ -140,7 +147,19 @@ impl App {
         let c = self.chrome;
         // Lowercased once here, since `Setting::matches` expects it.
         let query = settings.query.trim().to_lowercase();
-        let (header, quick, body) = self.settings_body(settings, &query);
+        let size = dialog_size(self.window_size);
+        // Pinned over the cards it stays in view while they scroll, so a color can be watched as
+        // it's dragged. Outside the scrollable it also never moves a card, which `Jump` relies on.
+        let preview = (query.is_empty())
+            .then(|| self.settings_preview(settings.section))
+            .flatten()
+            .map(|(preview, frame)| preview_frame(c, preview, frame));
+        let (pinned, inline) = if size.height >= PIN_MIN_HEIGHT {
+            (preview, None)
+        } else {
+            (None, preview)
+        };
+        let (header, quick, body) = self.settings_body(settings, &query, inline);
         let scroller = scrollable(container(body).padding(iced::Padding {
             top: 14.0,
             right: 28.0,
@@ -161,15 +180,21 @@ impl App {
                     .align_x(alignment::Horizontal::Right),
             );
         }
-        let content = column![
-            container(header).padding(iced::Padding {
-                top: 22.0,
+        let content = column![container(header).padding(iced::Padding {
+            top: 22.0,
+            right: 28.0,
+            bottom: 0.0,
+            left: 28.0,
+        })]
+        .push(pinned.map(|preview| {
+            container(preview).padding(iced::Padding {
+                top: 14.0,
                 right: 28.0,
                 bottom: 0.0,
                 left: 28.0,
-            }),
-            page,
-        ];
+            })
+        }))
+        .push(page);
         // The page comes after the sidebar, so the sidebar's shadow falls over the page's
         // (transparent) background; the line is its right border.
         let edge = container(Space::new().width(1).height(Fill)).style(move |_| container::Style {
@@ -178,7 +203,7 @@ impl App {
         });
         let dialog = dialog_frame(
             c,
-            self.window_size,
+            size,
             row![settings_sidebar(c, settings, &query), edge, content].into(),
         );
         let backdrop = mouse_area(
@@ -204,13 +229,15 @@ impl App {
         Some(stack![backdrop].push(picker).into())
     }
 
-    /// The page: its title row (the section's title, or the search's, and the Quick Access
-    /// button), the Quick Access list while it's open, and its settings in a card per group.
-    /// Searching looks through every section; otherwise the chosen one.
+    /// The page: its title row (the section's title and what it covers, or the search's, and the
+    /// Quick Access button), the Quick Access list while it's open, and its settings in a card
+    /// per group, after `preview` when it isn't pinned. Searching looks through every section;
+    /// otherwise the chosen one.
     fn settings_body<'a>(
         &'a self,
         settings: &'a Settings,
         query: &str,
+        preview: Option<Element<'a, Message>>,
     ) -> (
         Element<'a, Message>,
         Option<Element<'a, Message>>,
@@ -239,16 +266,28 @@ impl App {
             }
         }
         let has_quick = !searching && groups.len() >= QUICK_MIN_GROUPS;
+        let (title, blurb) = if searching {
+            let found: usize = groups.iter().map(|(_, _, rows)| rows.len()).sum();
+            (
+                format!("Results for \u{201c}{}\u{201d}", settings.query.trim()),
+                match found {
+                    0 => String::new(),
+                    1 => "1 setting. Click a card's title to see it on its page.".to_owned(),
+                    n => format!("{n} settings. Click a card's title to see it on its page."),
+                },
+            )
+        } else {
+            (
+                settings.section.title().to_owned(),
+                settings.section.blurb().to_owned(),
+            )
+        };
         // Clipped: a long search would otherwise run the title past the dialog's edge.
-        let title = container(one_line(
-            if searching {
-                format!("Results for \u{201c}{}\u{201d}", settings.query.trim())
-            } else {
-                settings.section.title().to_owned()
-            },
-            TITLE_SIZE,
-            c.text,
-        ))
+        let title = container(
+            column![one_line(title, TITLE_SIZE, c.text)]
+                .push((!blurb.is_empty()).then(|| one_line(blurb, DESCRIPTION_SIZE, c.muted)))
+                .spacing(4),
+        )
         .width(Fill)
         .clip(true);
         let header = row![title]
@@ -257,7 +296,7 @@ impl App {
             .align_y(alignment::Vertical::Center)
             .into();
         let quick = (has_quick && settings.quick).then(|| quick_access(c, &groups));
-        let mut body = column![].spacing(12);
+        let mut body = column![].spacing(14).push(preview);
         if groups.is_empty() {
             body = body.push(text("No settings match.").size(TEXT_SIZE).color(c.muted));
         }
@@ -270,9 +309,9 @@ impl App {
         (header, quick, body.push(column(cards).spacing(14)).into())
     }
 
-    /// A card of settings under its group's name (and section's, when searching across them),
-    /// with a live preview at its top when there's one for it. The header folds the card,
-    /// except while searching, when every result shows.
+    /// A card of settings under its group's name (and section's, when searching across them).
+    /// The header folds the card; while searching, when every result shows, it opens the card's
+    /// page instead.
     fn settings_group<'a>(
         &'a self,
         settings: &'a Settings,
@@ -290,9 +329,18 @@ impl App {
             group.to_owned()
         };
         let header: Element<'a, Message> = if searching {
-            container(one_line(title, SMALL_TEXT_SIZE, c.muted))
-                .padding([4, 4])
-                .into()
+            button(
+                row![
+                    one_line(title, SMALL_TEXT_SIZE, c.label),
+                    icon(Icon::ChevronRight, STEP_ICON_SIZE, c.muted),
+                ]
+                .spacing(6)
+                .align_y(alignment::Vertical::Center),
+            )
+            .on_press(Message::Settings(SettingsMessage::Reveal(section, group)))
+            .style(move |_, status| flat_button(c, status, None))
+            .padding([4, 4])
+            .into()
         } else {
             button(
                 row![
@@ -320,9 +368,6 @@ impl App {
         let mut card = column![header].spacing(6);
         if !collapsed {
             let mut list = column![];
-            if !searching && let Some((preview, frame)) = self.settings_preview(section, group) {
-                list = list.push(preview_frame(c, preview, frame));
-            }
             let count = rows.len();
             for (i, setting) in rows.into_iter().enumerate() {
                 list = list.push(self.setting_row(settings, setting));
@@ -431,6 +476,16 @@ impl App {
             }
             Control::Shortcut(chord) => shortcut(c, chord.clone()),
             Control::Button(label, message) => action_button(c, label.clone(), message.clone()),
+            Control::NewSsh => {
+                let add = Message::Settings(SettingsMessage::AddSsh);
+                let draft = |key| settings.drafts.get(key).map_or("", String::as_str);
+                column![
+                    field(c, "Name (optional)", draft(SSH_NAME), SSH_NAME).on_submit(add.clone()),
+                    field(c, "user@host:port", draft(SSH_HOST), SSH_HOST).on_submit(add),
+                ]
+                .spacing(6)
+                .into()
+            }
         };
         // Shortcut rows have no description and a short control, so they're packed tighter.
         let padding = if matches!(setting.control, Control::Shortcut(_)) {
@@ -531,8 +586,8 @@ fn quick_access<'a>(
         .into()
 }
 
-/// A live preview at the top of a card, set off from the rows under it. Its top corners are
-/// the card's, so its background doesn't poke out past them (a container's clip is square).
+/// A page's live preview, centered on its own rounded card: padded on the interface's background,
+/// or edge to edge on the terminal's. At most [`PREVIEW_MAX_HEIGHT`] tall.
 fn preview_frame<'a>(
     c: Chrome,
     preview: Element<'a, Message>,
@@ -549,47 +604,54 @@ fn preview_frame<'a>(
         ),
         Frame::Fill(color) => (color, 0.0),
     };
-    column![
-        container(preview)
-            .width(Fill)
-            .padding(padding)
-            .style(move |_| container::Style {
-                background: Some(background.into()),
-                border: Border {
-                    radius: iced::border::Radius {
-                        top_left: GROUP_RADIUS,
-                        top_right: GROUP_RADIUS,
-                        bottom_right: 0.0,
-                        bottom_left: 0.0,
-                    },
-                    ..Border::default()
-                },
-                ..container::Style::default()
-            }),
-        separator(c),
-    ]
-    .into()
+    container(container(preview).center_x(Fill).padding(padding))
+        .width(Fill)
+        .max_height(PREVIEW_MAX_HEIGHT)
+        .clip(true)
+        .style(move |_| container::Style {
+            background: Some(background.into()),
+            border: Border {
+                color: c.separator,
+                width: 1.0,
+                radius: GROUP_RADIUS.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
-/// The dialog's left column: the search field, the sections, and Open config.toml.
+/// The dialog's left column: the search field, the sections under their headings (scrolling
+/// when the dialog is short), and Open config.toml.
 fn settings_sidebar<'a>(c: Chrome, settings: &'a Settings, query: &str) -> Element<'a, Message> {
-    let sections = Section::shown().map(|section| {
+    let mut sections = column![].spacing(2);
+    for section in Section::shown() {
+        if let Some(heading) = section.heading() {
+            sections = sections.push(
+                container(one_line(heading, SMALL_TEXT_SIZE, c.muted)).padding(iced::Padding {
+                    top: 14.0,
+                    right: 10.0,
+                    bottom: 4.0,
+                    left: 10.0,
+                }),
+            );
+        }
         let active = query.is_empty() && section == settings.section;
         let color = if active { c.text } else { c.label };
-        button(
-            row![
-                icon(section.icon(), SECTION_ICON_SIZE, color),
-                one_line(section.title(), TEXT_SIZE, color),
-            ]
-            .spacing(10)
-            .align_y(alignment::Vertical::Center),
-        )
-        .on_press(Message::Settings(SettingsMessage::Section(section)))
-        .style(move |_, status| section_style(c, status, active))
-        .width(Fill)
-        .padding(SIDEBAR_ITEM_PADDING)
-        .into()
-    });
+        sections = sections.push(
+            button(
+                row![
+                    icon(section.icon(), SECTION_ICON_SIZE, color),
+                    one_line(section.title(), TEXT_SIZE, color),
+                ]
+                .spacing(10)
+                .align_y(alignment::Vertical::Center),
+            )
+            .on_press(Message::Settings(SettingsMessage::Section(section)))
+            .style(move |_, status| section_style(c, status, active))
+            .width(Fill)
+            .padding(SIDEBAR_ITEM_PADDING),
+        );
+    }
     let open_file = button(
         row![
             icon(Icon::ExternalLink, SMALL_ICON_SIZE, c.muted),
@@ -606,8 +668,7 @@ fn settings_sidebar<'a>(c: Chrome, settings: &'a Settings, query: &str) -> Eleme
     container(
         column![
             settings_search(c, settings),
-            column(sections).spacing(2),
-            Space::new().height(Fill),
+            scrollable(sections).height(Fill),
             open_file
         ]
         .spacing(14),
@@ -694,18 +755,25 @@ fn settings_search<'a>(c: Chrome, settings: &'a Settings) -> Element<'a, Message
     .into()
 }
 
-/// The dialog's card around `content`, sized to `window` within its limits.
+/// The dialog's size in a `window` this big, within its limits. `clamp`, not `min`: below the
+/// minimum the dialog overflows the window rather than squeezing its rows into nothing.
+fn dialog_size(window: iced::Size) -> iced::Size {
+    iced::Size::new(
+        (window.width - DIALOG_MARGIN).clamp(DIALOG_MIN_WIDTH, DIALOG_WIDTH),
+        (window.height - DIALOG_MARGIN).clamp(DIALOG_MIN_HEIGHT, DIALOG_HEIGHT),
+    )
+}
+
+/// The dialog's card around `content`, `size` big.
 fn dialog_frame<'a>(
     c: Chrome,
-    window: iced::Size,
+    size: iced::Size,
     content: Element<'a, Message>,
 ) -> Element<'a, Message> {
     let (alpha, y, blur) = DIALOG_SHADOW;
-    // `clamp`, not `min`: below the minimum the dialog overflows the window rather than
-    // squeezing its rows into nothing.
     container(content)
-        .width((window.width - DIALOG_MARGIN).clamp(DIALOG_MIN_WIDTH, DIALOG_WIDTH))
-        .height((window.height - DIALOG_MARGIN).clamp(DIALOG_MIN_HEIGHT, DIALOG_HEIGHT))
+        .width(size.width)
+        .height(size.height)
         .clip(true)
         .style(move |_| container::Style {
             background: Some(
