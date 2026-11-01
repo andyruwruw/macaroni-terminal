@@ -5,10 +5,10 @@
 //! update [`crate::App::sync_browsers`] moves each browser over its placeholder, or hides it
 //! when its tab isn't on screen. Like terminals, a browser starts the first time it's shown.
 //!
-//! Also here: the process-wide CEF [`RUNTIME`] ([`start`], [`shutdown`]), [`prefer_gl`] (which
-//! `main` must call before iced creates its renderer), the profile directory, the address bar's
-//! [`resolve`], and [`shortcuts`], which lets macaroni's keymap see keys pressed inside a page.
-//! Everything that touches CEF itself is in the `macaroni-browser` crate.
+//! Also here: [`prefer_gl`] (which `main` must call before iced creates its renderer), the
+//! profile directory, the [`engine`] from the config, the address bar's [`resolve`], and
+//! [`shortcuts`], which lets macaroni's keymap see keys pressed inside a page. Everything that
+//! touches a web engine itself is in the `macaroni-browser` crate.
 
 use std::sync::{Arc, Mutex};
 
@@ -17,21 +17,18 @@ use iced::advanced::{Clipboard, Layout, Shell, layout, mouse, renderer};
 use iced::keyboard::key::{Code, Named, Physical};
 use iced::keyboard::{Key, Modifiers};
 use iced::{Element, Event, Length, Rectangle, Size, Theme, window};
-use macaroni_browser::{Bounds, KeyPress, Runtime};
+use macaroni_browser::{Bounds, Engine, KeyPress};
+use macaroni_config::BrowserEngine;
 use macaroni_core::BrowserId;
 
 use crate::keymap::{Action, Keymap};
 
-/// CEF, started on first use. Lives until [`shutdown`], after the window closes.
-static RUNTIME: Mutex<Option<Result<Runtime, String>>> = Mutex::new(None);
-
-/// Starts CEF if it isn't running yet, with the profile in [`data_dir`]. A failure is kept and
-/// returned again on every later call, so a second macaroni on the same profile shows the same
-/// error in each tab instead of retrying.
-pub fn start() -> Result<(), String> {
-    let mut runtime = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
-    let runtime = runtime.get_or_insert_with(|| Runtime::start(&data_dir()));
-    runtime.as_ref().map(|_| ()).map_err(Clone::clone)
+/// The engine `[browser] engine` picks for pages opened from now on.
+pub fn engine(setting: BrowserEngine) -> Engine {
+    match setting {
+        BrowserEngine::System => Engine::System,
+        BrowserEngine::Chromium => Engine::Chromium,
+    }
 }
 
 /// Browsers are child windows, and on Windows DWM draws a DX12 or Vulkan (flip model) swap chain
@@ -47,17 +44,11 @@ pub fn prefer_gl() {
     }
 }
 
-/// Closes every browser and stops CEF (`cef::shutdown`, on the calling thread). Call on the main
-/// thread once the iced event loop has exited.
-pub fn shutdown() {
-    RUNTIME.lock().unwrap_or_else(|e| e.into_inner()).take();
-}
-
 /// Cookies and cache: `%LOCALAPPDATA%\macaroni\browser` on Windows, `~/Library/Application
 /// Support/macaroni/browser` elsewhere (the temp dir if neither variable is set). A test run
 /// with its own config dir gets its own profile too (`<config dir>/browser`): Chromium allows
 /// one process per profile.
-fn data_dir() -> std::path::PathBuf {
+pub fn data_dir() -> std::path::PathBuf {
     local_data("browser")
 }
 
@@ -173,8 +164,8 @@ pub fn resolve(input: &str) -> String {
 }
 
 /// The handler a browser calls for keys pressed in the page: macaroni's shortcuts win, except
-/// copy, paste and find, which belong to the page. Runs on CEF's UI thread, so the keymap is
-/// shared behind a lock (`App.shared_keymap`, replaced on config reload) and a match goes back
+/// copy, paste and find, which belong to the page. Chromium runs it on its own UI thread, so the
+/// keymap is shared behind a lock (`App.shared_keymap`, replaced on config reload) and a match goes back
 /// through `send`. Returns whether the key was taken, so the page doesn't also see it.
 pub fn shortcuts(
     keymap: Arc<Mutex<Keymap>>,

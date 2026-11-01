@@ -131,6 +131,9 @@ pub struct TerminalSettings {
     pub scroll_lines: u32,
     /// Copy text to the clipboard as soon as it's selected.
     pub copy_on_select: bool,
+    /// Where terminals start in a workspace without a folder of its own; blank is the home
+    /// folder, and a leading `~` stands for it.
+    pub default_dir: String,
 }
 
 impl Default for TerminalSettings {
@@ -140,6 +143,7 @@ impl Default for TerminalSettings {
             cursor_style: CursorStyle::Block,
             scroll_lines: 3,
             copy_on_select: false,
+            default_dir: String::new(),
         }
     }
 }
@@ -230,6 +234,16 @@ pub enum OpenLinks {
     System,
 }
 
+/// `[browser] engine`: what renders browser tabs (`"system"` or `"chromium"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserEngine {
+    /// The system's web view: Edge's WebView2 on Windows, Safari's WebKit on macOS.
+    System,
+    /// Chromium, embedded (CEF). Windows only; elsewhere the system engine is used.
+    Chromium,
+}
+
 /// `[browser]`: browser tabs.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -238,6 +252,8 @@ pub struct BrowserSettings {
     pub home: String,
     /// Where links clicked in a terminal open.
     pub open_links: OpenLinks,
+    /// What renders newly opened pages.
+    pub engine: BrowserEngine,
 }
 
 impl Default for BrowserSettings {
@@ -245,6 +261,7 @@ impl Default for BrowserSettings {
         Self {
             home: "https://www.google.com/".to_owned(),
             open_links: OpenLinks::Panel,
+            engine: BrowserEngine::System,
         }
     }
 }

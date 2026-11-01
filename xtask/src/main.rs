@@ -3,10 +3,15 @@
 //! - `bundle`: release build packaged for the current OS. macOS gets `macaroni.app` (macOS only
 //!   delivers notifications for bundled apps); Windows and Linux get a folder with the executable,
 //!   the bundled ConPTY on Windows, and third-party licenses. `macaroni-cli` ships alongside.
+//!   Chromium's runtime isn't bundled: the app downloads it when asked.
 //! - `dev`: debug build, rebuilt and restarted on every save (see `dev.rs`).
+//! - `install`: `bundle`, then install it as the everyday macaroni and start it (see
+//!   `install.rs`).
 
 /// `cargo xtask dev`: the rebuild-and-restart loop.
 mod dev;
+/// `cargo xtask install`: install the bundle and start it.
+mod install;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,12 +23,13 @@ const BUNDLE_ID: &str = "dev.macaroni.terminal";
 
 /// Runs the task named by the first argument; prints usage and fails for anything else.
 fn main() -> ExitCode {
-    let task = std::env::args().nth(1);
-    let result = match task.as_deref() {
+    let mut args = std::env::args().skip(1);
+    let result = match args.next().as_deref() {
         Some("bundle") => bundle().map(|path| println!("bundled: {}", path.display())),
         Some("dev") => dev::run(&root()),
+        Some("install") => install::run(&root(), args),
         _ => {
-            eprintln!("usage: cargo xtask bundle | dev");
+            eprintln!("usage: cargo xtask bundle | dev | install [--no-build | --uninstall]");
             return ExitCode::FAILURE;
         }
     };
@@ -108,39 +114,46 @@ fn bundle() -> Result<PathBuf, String> {
     }
 
     let release = root.join("target").join("release");
+    let out = bundle_path(&root);
     let (exe, cli) = if cfg!(windows) {
         ("macaroni.exe", "macaroni-cli.exe")
     } else {
         ("macaroni", "macaroni-cli")
     };
 
-    let out = if cfg!(target_os = "macos") {
-        let app = release.join("bundle").join("macaroni.app");
-        let contents = app.join("Contents");
-        recreate(&app)?;
+    if cfg!(target_os = "macos") {
+        let contents = out.join("Contents");
+        recreate(&out)?;
         fs::create_dir_all(contents.join("MacOS")).map_err(io)?;
         fs::create_dir_all(contents.join("Resources")).map_err(io)?;
         copy(&release.join(exe), &contents.join("MacOS").join(exe))?;
         copy(&release.join(cli), &contents.join("MacOS").join(cli))?;
         fs::write(contents.join("Info.plist"), info_plist()).map_err(io)?;
         copy_licenses(&root, &contents.join("Resources"))?;
-        app
     } else {
-        let dir = release.join("dist").join("macaroni");
-        recreate(&dir)?;
-        copy(&release.join(exe), &dir.join(exe))?;
-        copy(&release.join(cli), &dir.join(cli))?;
+        recreate(&out)?;
+        copy(&release.join(exe), &out.join(exe))?;
+        copy(&release.join(cli), &out.join(cli))?;
         if cfg!(windows) {
             // build.rs already placed these next to the release executable.
             for file in ["conpty.dll", "OpenConsole.exe"] {
-                copy(&release.join(file), &dir.join(file))?;
+                copy(&release.join(file), &out.join(file))?;
             }
-            copy_cef_runtime(&release, &dir)?;
         }
-        copy_licenses(&root, &dir)?;
-        dir
-    };
+        copy_licenses(&root, &out)?;
+    }
     Ok(out)
+}
+
+/// Where [`bundle`] puts the package: `target/release/bundle/macaroni.app` on macOS, else
+/// `target/release/dist/macaroni`.
+fn bundle_path(root: &Path) -> PathBuf {
+    let release = root.join("target").join("release");
+    if cfg!(target_os = "macos") {
+        release.join("bundle").join("macaroni.app")
+    } else {
+        release.join("dist").join("macaroni")
+    }
 }
 
 /// The app bundle's `Info.plist`, versioned from this crate's version (the workspace version).
@@ -206,33 +219,11 @@ fn copy_licenses(root: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Chromium's runtime (libcef.dll, resources, locales), which macaroni-browser's build.rs copied
-/// next to the release executable.
-fn copy_cef_runtime(release: &Path, dest: &Path) -> Result<(), String> {
-    for entry in fs::read_dir(release).map_err(io)? {
-        let path = entry.map_err(io)?.path();
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        let runtime = [".dll", ".pak", ".dat", ".bin", ".json"]
-            .iter()
-            .any(|ext| name.ends_with(ext))
-            && name != "archive.json";
-        if path.is_file() && runtime {
-            copy(&path, &dest.join(&*name))?;
-        }
-    }
-    let locales = dest.join("locales");
-    fs::create_dir_all(&locales).map_err(io)?;
-    for entry in fs::read_dir(release.join("locales")).map_err(io)? {
-        let path = entry.map_err(io)?.path();
-        copy(&path, &locales.join(path.file_name().unwrap_or_default()))?;
-    }
-    Ok(())
-}
-
-/// The CEF distribution the build used: `target/cef/<version>/cef_windows_<arch>`, found by its
-/// `CREDITS.html`.
+/// The CEF distribution the build used: `<CEF_PATH>/<version>/cef_windows_<arch>`, found by its
+/// `CREDITS.html`. `CEF_PATH` is `target/cef` unless overridden (CI keeps it outside `target/`).
 fn cef_dir(root: &Path) -> Result<PathBuf, String> {
-    let base = root.join("target").join("cef");
+    let base = std::env::var_os("CEF_PATH")
+        .map_or_else(|| root.join("target").join("cef"), |path| root.join(path));
     fs::read_dir(&base)
         .map_err(|e| format!("reading {}: {e}", base.display()))?
         .filter_map(|e| e.ok())

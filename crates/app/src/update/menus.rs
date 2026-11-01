@@ -12,7 +12,7 @@ use macaroni_term::shell::{self, ShellOption};
 
 use crate::message::{ColorTarget, GroupAction, Message, TabAction, WorkspaceAction};
 use crate::state::{Menu, MenuPage, MenuTarget, Submenu};
-use crate::{App, home_dir, open_vscode, theme, vscode};
+use crate::{App, chromium, home_dir, open_vscode, theme, vscode};
 
 /// What a terminal runs for an `[[ssh]]` profile.
 pub(crate) fn ssh_shell(profile: &macaroni_config::SshProfile) -> ShellOption {
@@ -347,6 +347,27 @@ impl App {
             self.vscode_web.error = Some(error.clone());
         }
         self.vscode_web.installed = vscode::installed();
+        Task::none()
+    }
+
+    /// Downloads (`true`) or removes Chromium on a thread; [`Message::ChromiumInstalled`]
+    /// reports.
+    pub(crate) fn chromium_install(&mut self, install: bool) -> Task<Message> {
+        if self.chromium.busy {
+            return Task::none();
+        }
+        self.chromium.busy = true;
+        self.chromium.error = None;
+        Task::future(chromium::Chromium::work(install)).map(Message::ChromiumInstalled)
+    }
+
+    /// A Chromium download or removal finished.
+    pub(crate) fn chromium_installed(&mut self, result: Result<bool, String>) -> Task<Message> {
+        self.chromium.busy = false;
+        if let Err(error) = result {
+            self.chromium.error = Some(error);
+        }
+        self.chromium.installed = chromium::installed();
         Task::none()
     }
 

@@ -66,9 +66,10 @@ impl App {
             .tab_for_session(id)
             .and_then(|tab| self.restored.remove(&tab))
             .unwrap_or_default();
-        // A restored tab reopens where it was; a new one starts in its workspace's folder. A
-        // directory that's gone (deleted, an unplugged drive) would make the spawn fail, so
-        // each falls back to the next, and then to the home directory.
+        // A restored tab reopens where it was; a new one starts in its workspace's folder, or
+        // `[terminal] default_dir` for a workspace without one. A directory that's gone
+        // (deleted, an unplugged drive) would make the spawn fail, so each falls back to the
+        // next, and then to the home directory.
         let folder = self
             .model
             .tab_for_session(id)
@@ -79,7 +80,12 @@ impl App {
             .as_ref()
             .map(PathBuf::from)
             .filter(|dir| dir.is_dir())
-            .or_else(|| folder.map(PathBuf::from).filter(|dir| dir.is_dir()));
+            .or_else(|| folder.map(PathBuf::from).filter(|dir| dir.is_dir()))
+            .or_else(|| {
+                self.default_folder()
+                    .map(PathBuf::from)
+                    .filter(|dir| dir.is_dir())
+            });
         let (program, args) = self.program_for(id, &restored);
         let config = SessionConfig {
             // Blank means the platform's default shell.

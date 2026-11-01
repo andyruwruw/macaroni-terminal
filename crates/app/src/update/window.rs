@@ -63,11 +63,7 @@ impl App {
     /// A click in macaroni's own UI takes keyboard focus back from the page that had it, by
     /// focusing the main window natively.
     pub(crate) fn reclaim_focus(&mut self) -> Task<Message> {
-        if self.page_focus.take().is_some()
-            && let Some(parent) = self.parent
-        {
-            macaroni_browser::focus_window(parent);
-        }
+        self.blur_page();
         Task::none()
     }
 

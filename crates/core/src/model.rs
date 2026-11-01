@@ -48,7 +48,8 @@ pub struct Workspace {
     pub color: Option<String>,
     /// The group the workspace is shown under, if any. Always a group in [`Model::groups`].
     pub group: Option<GroupId>,
-    /// The workspace's folder: where its new terminals start. `None` is the home directory.
+    /// The workspace's folder: where its new terminals start. `None` leaves it to the app's
+    /// default (`[terminal] default_dir`, else the home directory).
     /// The model doesn't check it exists; the app does when it spawns.
     pub cwd: Option<String>,
 }

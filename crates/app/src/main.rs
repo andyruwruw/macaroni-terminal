@@ -56,6 +56,7 @@ mod anim;
 mod backdrop;
 mod bell;
 mod browser;
+mod chromium;
 mod drag_area;
 mod fonts;
 mod gap_line;
@@ -134,7 +135,7 @@ fn main() -> iced::Result {
     // Before anything creates a wgpu instance: CEF on Windows needs iced on the GL backend.
     browser::prefer_gl();
     // Chromium's renderer, GPU and utility processes are this executable too.
-    if let Some(code) = macaroni_browser::helper_process() {
+    if let Some(code) = macaroni_browser::helper_process(&chromium::dir()) {
         std::process::exit(code);
     }
     fonts::load();
@@ -147,7 +148,7 @@ fn main() -> iced::Result {
         .exit_on_close_request(false)
         .run();
     // After the event loop: `App::exit` has already closed every browser window.
-    browser::shutdown();
+    macaroni_browser::shutdown();
     result
 }
 
@@ -289,6 +290,8 @@ struct App {
     browsers: BTreeMap<BrowserId, Panel>,
     /// VS Code in browser tabs: whether it's downloaded, and its server.
     vscode_web: vscode::WebVsCode,
+    /// Chromium for browser tabs: whether it's downloaded, and a download in progress.
+    chromium: chromium::Chromium,
     /// Where browsers send their events; `None` until [`Message::BrowserEventsReady`].
     browser_events: Option<UnboundedSender<(BrowserId, BrowserMessage)>>,
     /// The main window, once it has opened.
@@ -418,6 +421,7 @@ impl App {
             offer_git_bash: false,
             browsers: BTreeMap::new(),
             vscode_web: vscode::WebVsCode::new(),
+            chromium: chromium::Chromium::new(),
             browser_events: None,
             window: None,
             maximized: false,
@@ -606,6 +610,7 @@ impl App {
             Message::VsCodeTab(pane) => self.vscode_tab(pane),
             Message::VsCodeReady(listening) => self.vscode_ready(listening),
             Message::VsCodeInstalled(result) => self.vscode_installed(result),
+            Message::ChromiumInstalled(result) => self.chromium_installed(result),
             Message::InstallGitBash => self.install_git_bash(),
             Message::DismissShellOffer => {
                 self.offer_git_bash = false;
@@ -890,12 +895,13 @@ fn browser_events() -> impl Stream<Item = Message> {
     })
 }
 
-/// The window's `HWND` on Windows, which browsers are parented to; `None` on other platforms
-/// or if the handle isn't available.
+/// The window's `HWND` on Windows or its content `NSView` on macOS, which browsers are parented
+/// to; `None` on other platforms or if the handle isn't available.
 fn native_handle(window: &dyn window::Window) -> Option<isize> {
     use window::raw_window_handle::RawWindowHandle;
     match window.window_handle().ok()?.as_raw() {
         RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+        RawWindowHandle::AppKit(handle) => Some(handle.ns_view.as_ptr() as isize),
         _ => None,
     }
 }

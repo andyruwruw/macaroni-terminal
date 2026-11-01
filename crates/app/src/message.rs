@@ -272,6 +272,8 @@ pub(crate) enum Message {
     VsCodeReady(bool),
     /// Downloading (`Ok(true)`) or removing (`Ok(false)`) VS Code finished.
     VsCodeInstalled(Result<bool, String>),
+    /// Downloading (`Ok(true)`) or removing (`Ok(false)`) Chromium finished.
+    ChromiumInstalled(Result<bool, String>),
     /// The main window opened: remember it and ask for its native handle and scale.
     WindowOpened(window::Id),
     /// A custom title bar control, or a press on a resize border.

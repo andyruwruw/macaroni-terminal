@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*", "xtask"]
 
 [workspace.package]
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -28,6 +28,8 @@ clap = { version = "4", features = ["derive"] }
 macaroni-ipc = { path = "crates/ipc" }
 macaroni-browser = { path = "crates/browser" }
 cef = { version = "=156.1.0", default-features = false }
+wry = { version = "0.57", default-features = false, features = ["devtools"] }
+webview2-com = "0.39"
 cef-dll-sys = { version = "=156.1.0", default-features = false }
 windows-sys = "0.61"
 rfd = "0.15"

@@ -1,8 +1,14 @@
-//! The CEF implementation (Windows).
+//! The Chromium engine, via CEF (Windows).
+//!
+//! Chromium doesn't ship with the app: `libcef.dll` is delay-loaded (the app's build script
+//! links it with `/DELAYLOAD`), so nothing loads it until a Chromium page opens or a helper
+//! process starts. [`load`] then finds the runtime with [`runtime_dir`]: the app's download of
+//! exactly this build's CEF ([`ARCHIVE`], marked by [`VERSION_FILE`]), else the files a
+//! development build has next to the executable.
 //!
 //! Lifecycle: [`helper_process`] runs first in `main` and exits for Chromium's helper processes.
-//! The app starts [`Runtime`] lazily, the first time a browser tab is shown, then calls
-//! [`Browser::open`] per tab. Creation is asynchronous: CEF hands the new browser to
+//! [`start`] initializes CEF the first time a Chromium page opens, then [`Browser::open`] runs per
+//! tab; [`shutdown`] stops CEF after the app's event loop. Creation is asynchronous: CEF hands the new browser to
 //! `on_after_created` on its own UI thread, and [`Shared`] carries state (bounds, the drop flag)
 //! across that gap. Dropping a [`Browser`] asks CEF to close it and its popups; `on_before_close`
 //! counts it down in [`LIVE`], which [`wait_closed`] waits on before the app's window goes away.
@@ -20,9 +26,9 @@
 //! The handlers are `wrap_*!` structs from the `cef` crate: [`PanelClient`] and its handlers for
 //! a tab's page, [`PopupClient`] for real popup windows (`window.open` with features).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use cef::*;
@@ -39,13 +45,87 @@ type Shortcuts = Arc<dyn Fn(KeyPress) -> bool + Send + Sync>;
 /// decremented in `on_before_close`.
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 
+/// The CEF archive this build links against, on Spotify's CEF CDN; empty if the build couldn't
+/// tell. Only a runtime from exactly this archive works.
+pub const ARCHIVE: &str = env!("MACARONI_CEF_ARCHIVE");
+
+/// [`ARCHIVE`]'s SHA-1, to check a download against.
+pub const ARCHIVE_SHA1: &str = env!("MACARONI_CEF_SHA1");
+
+/// The file in a downloaded runtime's folder that names the archive it came from.
+const VERSION_FILE: &str = crate::CHROMIUM_VERSION_FILE;
+
+/// The message for a Chromium page when no runtime is found.
+const NOT_DOWNLOADED: &str = "Chromium isn't downloaded. Get it in Settings > Integrations > \
+                              Browser, or set the engine to System.";
+
+/// The runtime [`load`] loaded, or why it couldn't; set once per process.
+static LOADED: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+
+/// Where Chromium's runtime is: `download` when it holds this build's CEF ([`VERSION_FILE`]
+/// names [`ARCHIVE`]), else the executable's folder when `libcef.dll` is there (development
+/// builds); `None` when neither has it.
+pub fn runtime_dir(download: &Path) -> Option<PathBuf> {
+    let current = std::fs::read_to_string(download.join(VERSION_FILE))
+        .is_ok_and(|name| !ARCHIVE.is_empty() && name.trim() == ARCHIVE);
+    if current && download.join("libcef.dll").is_file() {
+        return Some(download.to_path_buf());
+    }
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    exe_dir.join("libcef.dll").is_file().then_some(exe_dir)
+}
+
+/// Loads `libcef.dll` from [`runtime_dir`] (once per process), fixes CEF's API version, and
+/// returns the runtime's folder. Must run before any other CEF call: the delay-load would
+/// otherwise look for the library next to the executable, and CEF stops the process at a check
+/// if anything comes before the API version.
+fn load(download: &Path) -> Result<PathBuf, String> {
+    LOADED
+        .get_or_init(|| {
+            let dir = runtime_dir(download).ok_or_else(|| NOT_DOWNLOADED.to_owned())?;
+            platform::load_library(&dir)?;
+            // The hash itself is unused.
+            let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
+            Ok(dir)
+        })
+        .clone()
+}
+
+/// Whether this process has loaded Chromium, which keeps its files in use until it exits.
+pub fn loaded() -> bool {
+    LOADED.get().is_some_and(Result::is_ok)
+}
+
+/// CEF, started on first use by [`start`]. Lives until [`shutdown`], after the window closes. A
+/// failure is kept, so a second macaroni on the same profile shows the same error in each tab
+/// instead of retrying.
+static RUNTIME: Mutex<Option<Result<Runtime, String>>> = Mutex::new(None);
+
+/// Starts CEF with its profile in `data_dir` and its runtime from [`runtime_dir`]`(download)`,
+/// if it isn't running yet. Call on the main thread.
+pub fn start(data_dir: &Path, download: &Path) -> Result<(), String> {
+    let mut runtime = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
+    let runtime = runtime.get_or_insert_with(|| Runtime::start(data_dir, &load(download)?));
+    runtime.as_ref().map(|_| ()).map_err(Clone::clone)
+}
+
+/// Waits for closing browsers and stops CEF (`cef::shutdown`, on the calling thread), if it ran.
+pub fn shutdown() {
+    RUNTIME.lock().unwrap_or_else(|e| e.into_inner()).take();
+}
+
 /// If this process is a CEF helper, runs it to completion and returns its exit code.
 ///
 /// Chromium starts its renderer, GPU and utility processes as this same executable with a
-/// `--type=...` argument. Returns `None` in the main process (no `--type`), which carries on.
-pub fn helper_process() -> Option<i32> {
-    // CEF requires the API version to be fixed before any other call; the hash itself is unused.
-    let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
+/// `--type=...` argument; they load the runtime from the same `download` folder as the app.
+/// Returns `None` in the main process (no `--type`), which carries on without loading Chromium.
+pub fn helper_process(download: &Path) -> Option<i32> {
+    if !std::env::args().any(|arg| arg.starts_with("--type=")) {
+        return None;
+    }
+    if load(download).is_err() {
+        return Some(1);
+    }
     let args = args::Args::new();
     // -1 means "not a helper, this is the browser process".
     let code = execute_process(Some(args.as_main_args()), None, std::ptr::null_mut());
@@ -54,15 +134,18 @@ pub fn helper_process() -> Option<i32> {
 
 /// CEF, initialized. Dropping it waits (up to 3 seconds) for browsers to finish closing and
 /// shuts CEF down; do that on the thread that started it, after the app's event loop has ended.
-pub struct Runtime(());
+struct Runtime(());
 
 impl Runtime {
-    /// Starts CEF with its profile (cookies, cache) in `data_dir`. Call on the main thread.
+    /// Starts CEF with its profile (cookies, cache) in `data_dir` and its resources (`.pak`
+    /// files, locales) in `runtime`. Call on the main thread, after [`load`].
     ///
     /// Fails, with a message for the tab, when Chromium won't initialize. The usual cause is
     /// another process already using the same profile: Chromium allows one per profile.
-    pub fn start(data_dir: &Path) -> Result<Self, String> {
+    fn start(data_dir: &Path, runtime: &Path) -> Result<Self, String> {
         let data = data_dir.to_string_lossy();
+        let resources = runtime.to_string_lossy();
+        let locales = runtime.join("locales");
         // No sandbox: it needs a separate sandbox-enabled bootstrap executable. The multi-threaded
         // message loop gives CEF its own UI thread (Windows only), so iced's loop stays untouched
         // and nothing has to pump CEF messages.
@@ -73,6 +156,8 @@ impl Runtime {
             cache_path: CefString::from(data.as_ref()),
             persist_session_cookies: 1,
             log_severity: LogSeverity::WARNING,
+            resources_dir_path: CefString::from(resources.as_ref()),
+            locales_dir_path: CefString::from(locales.to_string_lossy().as_ref()),
             ..Default::default()
         };
         let args = args::Args::new();
@@ -95,7 +180,8 @@ impl Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         wait_closed(Duration::from_secs(3));
-        shutdown();
+        // Spelled out: this module's own `shutdown` (which drops this) would shadow it.
+        cef::shutdown();
     }
 }
 
@@ -159,7 +245,7 @@ impl Browser {
     ///
     /// Returns at once; the page appears once CEF has created it, at `bounds` (or hidden). Every
     /// [`Event`] goes to `on_event`, and each keydown is offered to `shortcut` first, both on CEF's
-    /// UI thread. The runtime must already be started ([`Runtime::start`]).
+    /// UI thread. CEF must already be started ([`start`]).
     pub fn open(
         parent: isize,
         url: &str,
@@ -237,6 +323,15 @@ impl Browser {
         }
     }
 
+    /// Gives keyboard focus back to the app's window. Call it on the thread that owns that
+    /// window.
+    pub fn blur(&self) {
+        // Not under the lock: SetFocus sends the page's window WM_KILLFOCUS and waits for CEF's
+        // UI thread, whose handlers take the same lock.
+        let parent = lock(&self.shared).parent;
+        platform::focus(parent);
+    }
+
     /// The page's visible text, delivered to `done` on CEF's UI thread. `done` gets an empty
     /// string at once (on the caller's thread) when the page doesn't exist yet.
     pub fn read_text(&self, done: impl FnOnce(String) + Send + 'static) {
@@ -278,12 +373,6 @@ impl Drop for Browser {
             }
         }
     }
-}
-
-/// Gives keyboard focus back to the app's own window (an `HWND` on Windows), away from a page.
-/// Call it on the thread that owns `window`.
-pub fn focus_window(window: isize) {
-    platform::focus(window);
 }
 
 /// The [`Browser::read_text`] callback. The `Option` lets the visitor call it at most once,
@@ -699,16 +788,54 @@ wrap_keyboard_handler! {
 // Placing the browser window takes Win32 calls on its handle.
 #[allow(unsafe_code)]
 mod platform {
-    //! The Win32 side: window handles, placement, focus and titles, and the [`WindowInfo`]s for
-    //! popups and DevTools. The only unsafe code in the crate.
+    //! The Win32 side: loading the runtime, window handles, placement, focus and titles, and the
+    //! [`WindowInfo`]s for popups and DevTools.
+
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
 
     use cef::{CefString, PopupFeatures, RuntimeStyle, WindowInfo, sys::cef_window_handle_t};
+    use windows_sys::Win32::System::LibraryLoader::{
+        LOAD_WITH_ALTERED_SEARCH_PATH, LoadLibraryExW, SetDllDirectoryW,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DestroyWindow, SWP_ASYNCWINDOWPOS, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
         SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos, SetWindowTextW,
     };
 
     use super::Bounds;
+
+    /// `path` as a NUL-terminated UTF-16 string for Win32.
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    /// Loads `libcef.dll` from `dir`, and makes `dir` where later libraries (Chromium's GPU and
+    /// graphics DLLs) are looked for. With the library loaded, the delay-load finds it by name.
+    pub fn load_library(dir: &Path) -> Result<(), String> {
+        let (dir_w, lib_w) = (wide(dir), wide(&dir.join("libcef.dll")));
+        // SAFETY: both strings are NUL-terminated and outlive the calls. The altered search path
+        // resolves libcef's own imports (chrome_elf.dll) from its folder.
+        let module = unsafe {
+            SetDllDirectoryW(dir_w.as_ptr());
+            LoadLibraryExW(
+                lib_w.as_ptr(),
+                std::ptr::null_mut(),
+                LOAD_WITH_ALTERED_SEARCH_PATH,
+            )
+        };
+        if module.is_null() {
+            let err = std::io::Error::last_os_error();
+            return Err(format!(
+                "Chromium didn't load from {}: {err}",
+                dir.display()
+            ));
+        }
+        Ok(())
+    }
 
     /// An app-side window handle (`HWND` as `isize`) as CEF's handle type.
     pub fn handle(window: isize) -> cef_window_handle_t {

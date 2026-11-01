@@ -43,6 +43,9 @@
 # scroll_lines = 3
 # Copy text to the clipboard as soon as it's selected.
 # copy_on_select = false
+# Where terminals start in a workspace that has no folder of its own. Blank is your home
+# folder; ~ stands for it ("~/code").
+# default_dir = ""
 
 [notifications]
 # Programs can ask for attention (OSC 9, OSC 777, OSC 99): the tab, pane and workspace are
@@ -76,6 +79,9 @@
 # Where links you Ctrl+click (Cmd+click on macOS) in a terminal open: "panel" for a browser
 # split next to the terminal, "system" for your default browser.
 # open_links = "panel"
+# What shows pages: "system" for Edge's WebView2 on Windows or Safari's WebKit on macOS,
+# "chromium" for embedded Chromium (Windows only). Applies to pages opened afterwards.
+# engine = "system"
 
 [workspace_items]
 # What each workspace's row in the sidebar shows. Text settings are templates: placeholders in

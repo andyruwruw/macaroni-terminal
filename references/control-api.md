@@ -34,7 +34,7 @@ Request `{"id": 1, "method": "<name>", "params": {...}}`; response `{"id": 1, "r
 - Commands go through `run`, which keeps the iced `Task` the reducer returns in `IpcState.tasks`; `ipc_message` answers first, then returns them. This is what lets closing the last workspace over the socket quit the app.
 - `send_text` and `read_screen` need a running terminal. Terminals start lazily when first shown, so a tab in a never-displayed workspace returns an error.
 - `notify` takes the same path as an OSC notification (`App::attention`), including muting and the "user is looking at it" check. Agent gating is in [`claude-code.md`](claude-code.md).
-- Browser methods given a terminal tab act on that workspace's browser. `read_page` is answered asynchronously (handled in `ipc_message`, not `call`) once Chromium delivers the text; `browse` and `read_page` need the browser started.
+- Browser methods given a terminal tab act on that workspace's browser. `read_page` is answered asynchronously (handled in `ipc_message`, not `call`) once the page delivers the text; `browse` and `read_page` need the browser started.
 
 ## Adding a method
 

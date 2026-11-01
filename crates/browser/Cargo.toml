@@ -5,11 +5,17 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+wry.workspace = true
+serde_json.workspace = true
+
 [target.'cfg(windows)'.dependencies]
+# The same version wry uses, for WebView2's accelerator key event.
+webview2-com.workspace = true
 cef.workspace = true
 # Direct dependency so build.rs receives the CEF distribution directory (DEP_CEF_DLL_WRAPPER_CEF_DIR).
 cef-dll-sys.workspace = true
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [lints]
 workspace = true

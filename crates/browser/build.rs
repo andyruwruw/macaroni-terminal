@@ -1,5 +1,7 @@
-//! Copies the CEF runtime (libcef.dll, resources, locales) next to the executables, where
-//! Chromium looks for it. Files already there with the same size are skipped.
+//! Copies the CEF runtime (libcef.dll, resources, locales) next to the executables, where a
+//! development build finds it, and records which CEF archive the build links against
+//! (`MACARONI_CEF_ARCHIVE`, `MACARONI_CEF_SHA1`, from the distribution's `archive.json`), so the
+//! app can download exactly that runtime. Files already there with the same size are skipped.
 //!
 //! `cef-dll-sys` downloads the CEF distribution (into `CEF_PATH`, set to `target/cef` by
 //! `.cargo/config.toml`) and exports its directory as `DEP_CEF_DLL_WRAPPER_CEF_DIR`, which only
@@ -19,6 +21,15 @@ fn main() {
         return;
     };
     let cef_dir = PathBuf::from(cef_dir);
+    let archive = std::fs::read_to_string(cef_dir.join("archive.json")).unwrap_or_default();
+    println!(
+        "cargo:rustc-env=MACARONI_CEF_ARCHIVE={}",
+        json_field(&archive, "name")
+    );
+    println!(
+        "cargo:rustc-env=MACARONI_CEF_SHA1={}",
+        json_field(&archive, "sha1")
+    );
     // OUT_DIR is target/<profile>/build/<crate>-<hash>/out; the executables live in
     // target/<profile>.
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
@@ -29,6 +40,17 @@ fn main() {
     if let Err(err) = copy_runtime(&cef_dir, profile_dir) {
         println!("cargo:warning=could not copy the CEF runtime next to the executable: {err}");
     }
+}
+
+/// The string value of `field` in the small, flat JSON object `json`; empty if it isn't there.
+/// `archive.json` holds only plain strings, so no JSON parser is needed.
+fn json_field(json: &str, field: &str) -> String {
+    let key = format!("\"{field}\"");
+    json.split_once(&key)
+        .and_then(|(_, rest)| rest.split_once(':'))
+        .and_then(|(_, rest)| rest.split('"').nth(1))
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// Copies the runtime files in `from` (and its `locales` directory) into `to`.

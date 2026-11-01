@@ -180,15 +180,13 @@ impl App {
     /// Closes a browser, giving keyboard focus back to macaroni if its page had it. Tells
     /// subscribers its tab closed.
     fn close_browser(&mut self, id: BrowserId) {
+        // While the page still exists: it hands the keyboard back to macaroni's window.
+        if self.page_focus == Some(id) {
+            self.blur_page();
+        }
         self.browsers.remove(&id);
         if let Some(tab) = self.ipc.browser_tabs.remove(&id) {
             self.broadcast(macaroni_ipc::Event::TabClosed { tab: tab.0 });
-        }
-        if self.page_focus == Some(id) {
-            self.page_focus = None;
-            if let Some(parent) = self.parent {
-                macaroni_browser::focus_window(parent);
-            }
         }
     }
 
@@ -202,8 +200,8 @@ impl App {
     }
 
     /// Closes the browsers, waits (off the UI thread) for them to finish, then quits. The wait
-    /// lets CEF finish closing them before `browser::shutdown` runs `cef::shutdown` after the
-    /// event loop; it gives up after [`BROWSER_CLOSE_TIMEOUT`].
+    /// lets Chromium finish closing them before `macaroni_browser::shutdown` runs `cef::shutdown`
+    /// after the event loop; it gives up after [`BROWSER_CLOSE_TIMEOUT`].
     pub(crate) fn exit(&mut self) -> Task<Message> {
         // No saves past this point: while the browsers close, dying agents can still report
         // (Claude Code's SessionEnd clears the tab's agent), and a save would drop what the

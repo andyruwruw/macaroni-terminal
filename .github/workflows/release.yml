@@ -1,0 +1,94 @@
+name: Release
+
+# Every push to main whose Cargo.toml version has no `v<version>` tag yet is a release: the
+# bundle is built on each OS, and a GitHub release (which creates the tag on the pushed commit)
+# is published with the zipped bundles and that version's CHANGELOG section. A version with a
+# pre-release part (`0.1.0-alpha.2`) is marked as a pre-release. Pushes that don't change the
+# version do nothing.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      new: ${{ steps.check.outputs.new }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "v$version is already released"
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  bundle:
+    needs: version
+    if: needs.version.outputs.new == 'true'
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+          - os: macos-latest
+            platform: macos-arm64
+    runs-on: ${{ matrix.os }}
+    env:
+      ASSET: macaroni-${{ needs.version.outputs.version }}-${{ matrix.platform }}.zip
+    steps:
+      - uses: actions/checkout@v4
+      # CEF outside `target/`, as in ci.yml.
+      - run: echo "CEF_PATH=${{ runner.temp }}/cef" >> "$GITHUB_ENV"
+        shell: bash
+      - if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/cef
+          key: cef-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - run: cargo xtask bundle
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/release/dist/macaroni -DestinationPath $env:ASSET
+      # Ad-hoc signed: unsigned bundles downloaded from the web are reported as damaged, while
+      # ad-hoc signed ones can be allowed in Privacy & Security.
+      - if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - target/release/bundle/macaroni.app
+          ditto -c -k --keepParent target/release/bundle/macaroni.app "$ASSET"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: ${{ env.ASSET }}
+
+  release:
+    needs: [version, bundle]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          awk -v head="## [$VERSION]" '
+            /^## \[/ { if (found) exit; if (index($0, head) == 1) { found = 1; next } }
+            found
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "no CHANGELOG section for $VERSION"; exit 1; }
+          prerelease=
+          case "$VERSION" in *-*) prerelease=--prerelease ;; esac
+          gh release create "v$VERSION" dist/*.zip --target "$GITHUB_SHA" \
+            --title "macaroni $VERSION" --notes-file notes.md $prerelease

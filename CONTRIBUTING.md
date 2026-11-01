@@ -8,7 +8,11 @@ Thanks for helping out. This page covers how to build, what has to pass before a
 - Windows: Visual Studio Build Tools with "Desktop development with C++", plus CMake and Ninja on `PATH`. Visual Studio ships both under `Common7\IDE\CommonExtensions\Microsoft\CMake`. The first build downloads Chromium (CEF, about 170 MB) into `target/cef`; see [`references/browser.md`](references/browser.md) if it fails.
 - macOS: Xcode Command Line Tools.
 
-`cargo xtask dev` rebuilds and restarts the app on every save, with its own settings folder and socket so it runs beside an everyday macaroni.
+`cargo xtask dev` rebuilds and restarts the app on every save, with its own settings folder and socket so it runs beside an everyday macaroni. `./install` installs a release build as your everyday macaroni.
+
+## Releasing
+
+Bump `version` in the root `Cargo.toml` and move the changelog's Unreleased entries under the new version. When that reaches `main`, the release workflow builds the bundles on Windows and macOS and publishes them on GitHub Releases, tagged `v<version>`, with that changelog section; a version like `0.1.0-alpha.2` becomes a pre-release. Pushes to `main` that keep an already released version don't publish anything.
 
 ## Checks
 

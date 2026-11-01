@@ -9,8 +9,9 @@
 
 use iced::Color;
 use macaroni_config::{
-    COLORS, Chord, ChordKey, ColorSetting, ColorValue, Config, CursorStyle, NamedKey,
-    NumberSetting, OpenLinks, Rgba, Style, THEME_COLORS, Theme, ThemeColor, UiTheme, Unit, Value,
+    BrowserEngine, COLORS, Chord, ChordKey, ColorSetting, ColorValue, Config, CursorStyle,
+    NamedKey, NumberSetting, OpenLinks, Rgba, Style, THEME_COLORS, Theme, ThemeColor, UiTheme,
+    Unit, Value,
 };
 
 use super::{Control, Section, Setting, SettingsMessage};
@@ -505,7 +506,7 @@ impl App {
     fn browser_settings(&self) -> Vec<Setting> {
         use Section::Browser;
         let config = &self.config;
-        vec![
+        let mut list = vec![
             Setting::new(
                 Browser,
                 "Browser",
@@ -534,7 +535,72 @@ impl App {
                     placeholder: "https://www.google.com/",
                 },
             ),
-        ]
+        ];
+        // Chromium is only an option on Windows.
+        if cfg!(windows) {
+            let engine = match config.browser.engine {
+                BrowserEngine::System => "system",
+                BrowserEngine::Chromium => "chromium",
+            };
+            let engines = vec![
+                ("System (Edge)".into(), str_value("system")),
+                ("Chromium".into(), str_value("chromium")),
+            ];
+            list.insert(
+                1,
+                Setting::new(
+                    Browser,
+                    "Browser",
+                    "Engine",
+                    "What shows pages: Edge's WebView2, built into Windows, or Chromium once \
+                     it's downloaded below. Applies to pages opened afterwards.",
+                    choice("browser.engine", engines, &str_value(engine)),
+                ),
+            );
+        }
+        if crate::chromium::available() {
+            list.push(self.chromium_setting());
+        }
+        list
+    }
+
+    /// The Chromium download: its state, and a button to download or remove it.
+    fn chromium_setting(&self) -> Setting {
+        let state = &self.chromium;
+        let (mut description, button, message) = if state.busy {
+            (
+                "Working\u{2026}".to_owned(),
+                "Please wait",
+                SettingsMessage::Chromium(true),
+            )
+        } else if state.installed {
+            (
+                format!(
+                    "Downloaded to {}. Set the engine to Chromium to use it.",
+                    crate::chromium::dir().display()
+                ),
+                "Remove",
+                SettingsMessage::Chromium(false),
+            )
+        } else {
+            (
+                "Embedded Chromium, for pages that need Chrome's engine. Downloads the Chromium \
+                 Embedded Framework build this version of macaroni uses (about 175 MB)."
+                    .to_owned(),
+                "Download",
+                SettingsMessage::Chromium(true),
+            )
+        };
+        if let Some(error) = &state.error {
+            description = format!("{description}\n{error}");
+        }
+        Setting::new(
+            Section::Browser,
+            "Chromium",
+            "Chromium",
+            &description,
+            Control::Button(button.to_owned(), Message::Settings(message)),
+        )
     }
 
     /// VS Code: download or remove it, and its server while it runs. Nothing where browser
@@ -757,6 +823,18 @@ impl App {
                     key: "shell.args",
                     value: config.shell.args.clone(),
                     placeholder: "None",
+                },
+            ),
+            Setting::new(
+                Terminal,
+                "Shell",
+                "Default folder",
+                "Where terminals start in a workspace without a folder of its own. Empty is your \
+                 home folder; ~ stands for it. Press Enter to apply.",
+                Control::Text {
+                    key: "terminal.default_dir",
+                    value: terminal.default_dir.clone(),
+                    placeholder: "Home folder",
                 },
             ),
             Setting::new(

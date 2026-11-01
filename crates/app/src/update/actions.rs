@@ -89,13 +89,26 @@ impl App {
         Task::batch(tasks)
     }
 
-    /// The workspace's folder: its own, else the home directory.
+    /// The workspace's folder: its own, else `[terminal] default_dir`, else the home directory.
     pub(crate) fn workspace_folder(&self, ws: WorkspaceId) -> String {
         self.model
             .workspace(ws)
             .and_then(|w| w.cwd.clone())
+            .or_else(|| self.default_folder())
             .or_else(|| home_dir().map(|h| h.to_string_lossy().into_owned()))
             .unwrap_or_default()
+    }
+
+    /// `[terminal] default_dir` with a leading `~` expanded; `None` when it's blank.
+    pub(crate) fn default_folder(&self) -> Option<String> {
+        let dir = self.config.terminal.default_dir.trim();
+        let rest = dir.strip_prefix('~');
+        match (rest, home_dir()) {
+            (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
+                Some(format!("{}{rest}", home.to_string_lossy()))
+            }
+            _ => Some(dir.to_owned()).filter(|d| !d.is_empty()),
+        }
     }
 
     /// Whether `cd` can be typed into `tab` now: a terminal whose shell is likely at its prompt,

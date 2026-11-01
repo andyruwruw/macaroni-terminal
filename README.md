@@ -8,7 +8,7 @@ I work on many projects at once, and want them split into workspaces, and to all
 
 This terminal seeks to provide that. Run your agent, dev server, code and browser all in one spot.
 
-> macaroni is an early alpha (0.1.0-alpha.1): expect rough edges, and settings and the control API may still change.
+> macaroni is an early alpha (0.1.0-alpha.2): expect rough edges, and settings and the control API may still change.
 
 - **Native and fast.** Rust on the GPU, not a web view, so it keeps up with whatever your agents print.
 - **Made for agents.** Claude Code's live state shows in every pane and in the sidebar, and you get a ping the moment one needs you.
@@ -26,7 +26,7 @@ This terminal seeks to provide that. Run your agent, dev server, code and browse
 
 <p align="center"><img src="docs/screenshots/browser.png" alt="An embedded browser tab beside a terminal"></p>
 
-- **Browser tabs** (Windows). Embedded Chromium with an address bar and DevTools. Ctrl+click a terminal link to open it in a split.
+- **Browser tabs.** The system's web view (Edge on Windows, Safari's engine on macOS) with an address bar and developer tools, or Chromium on Windows, an optional download in Settings. Ctrl+click (Cmd+click on macOS) a terminal link to open it in a split.
 - **VS Code tabs** (Windows, opt-in). Download VS Code for the web from settings and open it in a tab at the pane's folder.
 
 <p align="center"><img src="docs/screenshots/scriptable.png" alt="macaroni-cli and a live-reloading config.toml"></p>
@@ -39,11 +39,18 @@ This terminal seeks to provide that. Run your agent, dev server, code and browse
 
 ## Get started
 
+Download the zip for your platform from [Releases](https://github.com/andyruwruw/macaroni-terminal/releases). On Windows, unzip the `macaroni` folder anywhere and run `macaroni.exe`. On macOS, move `macaroni.app` to Applications. The builds aren't signed yet, so the first launch needs a click past a warning: on Windows choose More info > Run anyway; on macOS open it, then allow it in System Settings > Privacy & Security.
+
+Or build and install from source, which needs [rustup](https://rustup.rs) plus the platform build tools (see [CONTRIBUTING.md](CONTRIBUTING.md#setup)):
+
 ```sh
-cargo run -p macaroni --release
+./install              # build, install, start; run again to update
+./install --uninstall  # remove the app (settings are kept)
 ```
 
-You need [rustup](https://rustup.rs) plus the platform build tools (see [CONTRIBUTING.md](CONTRIBUTING.md#setup)). Then hook up Claude Code:
+The same command works in macOS's Terminal and in PowerShell, cmd or Git Bash on Windows (`.\install` in PowerShell and cmd). It installs to `/Applications` on macOS, or `%LOCALAPPDATA%\Programs\macaroni` with a Start menu shortcut on Windows.
+
+Then hook up Claude Code from Settings > Integrations > Agents, or with:
 
 ```sh
 macaroni-cli setup claude
@@ -82,4 +89,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the dev loop and the checks, a
 
 ## License
 
-[MIT](LICENSE). Bundled fonts, icons, ConPTY and Chromium keep their own licenses.
+[MIT](LICENSE). Bundled fonts, icons and ConPTY, and the optional Chromium download, keep their own licenses.

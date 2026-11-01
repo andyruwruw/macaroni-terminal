@@ -39,7 +39,7 @@ One `stack`, in covering order: `window()`, `resize_edges` (custom frame, not ma
   - `tabs_flush`: with `tabs.gap` 0 and a pane border, each tab is a border taller so its bottom border lands on the card's, and `App::pane` stacks the strip over the card (a `tabs.height` spacer above it) instead of a column. `tab_spacing` goes negative by a border with `tabs.spacing` 0.
   - `sidebar_edge`: the sidebar's last pixels, or over the panes' left border when `panes_gap` is 0.
   - `with_title_line` / `TitleLine`: the title bar's own last pixels with a gap, else over the sidebar's first pixels and under the pane area, so tab top borders lie on it.
-- **Browser bounds**: a page is a native CEF child window. `BrowserHost` (in `browser_body`) reports its bounds as `Message::BrowserBounds`; `App::sync_browsers` (`update/browser.rs`) moves or hides each page after every message. Nothing iced draws can cover a page, so pages hide under menus (`menu_bounds`), modals and tab drags. A new overlay must be added to `place_browsers`' `covered` check.
+- **Browser bounds**: a page is a native child window (WebView2, WKWebView or CEF). `BrowserHost` (in `browser_body`) reports its bounds as `Message::BrowserBounds`; `App::sync_browsers` (`update/browser.rs`) moves or hides each page after every message. Nothing iced draws can cover a page, so pages hide under menus (`menu_bounds`), modals and tab drags. A new overlay must be added to `place_browsers`' `covered` check.
 - **Padding and borders never depend on focus**: a size change resizes the PTY and the shell reflows. Rings are borders, which iced draws over padding without taking room.
 
 ## Chrome: colors and sizes
@@ -57,7 +57,7 @@ One `stack`, in covering order: `window()`, `resize_edges` (custom frame, not ma
 - Trap: each primitive takes a uniform slot (`SLOTS`, freed in `Pipeline::trim`); past that, sheets draw without backdrop.
 - Trap: don't draw sheets with canvas meshes; iced's wgpu renderer misplaces them when several canvases are on screen.
 - Selected workspace items lift by layout, not transform: `glass::lift_padding` splits padding into outer and inner parts that sum to the same slot. `float` would draw over menus and escape the sidebar's clip.
-- The window can't be transparent: CEF forces wgpu's GL backend on Windows, whose surfaces are opaque. Terminals skip their default background in glass (`TerminalView::transparent`).
+- The window can't be transparent: browser pages force wgpu's GL backend on Windows, whose surfaces are opaque. Terminals skip their default background in glass (`TerminalView::transparent`).
 
 ## Sidebar (`view/sidebar.rs`, `update/sidebar.rs`)
 
@@ -129,4 +129,4 @@ One `stack`, in covering order: `window()`, `resize_edges` (custom frame, not ma
 
 ## Driving the UI from a script (Windows)
 
-There's no UI test harness. Prefer `macaroni-cli` ([`control-api.md`](control-api.md)); it needs no focus. With `SendInput`, confirm macaroni is the foreground window before every chord: Windows often refuses `SetForegroundWindow` and input lands in whatever is in front. Chromium helpers are also `macaroni.exe`, so find the window by title (ending in "- macaroni") across all of them. `PrintWindow` misses browser pages; capture a browser tab from the screen with the window in front.
+There's no UI test harness. Prefer `macaroni-cli` ([`control-api.md`](control-api.md)); it needs no focus. With `SendInput`, confirm macaroni is the foreground window before every chord: Windows often refuses `SetForegroundWindow` and input lands in whatever is in front. With the Chromium engine its helpers are also `macaroni.exe`, so find the window by title (ending in "- macaroni") across all of them. `PrintWindow` misses browser pages; capture a browser tab from the screen with the window in front.

@@ -1,10 +1,10 @@
 //! Browser tabs: placing their windows over their panes, their events, and the address bar.
 //!
-//! A browser page is a native CEF child window laid over its pane, not something iced draws.
+//! A browser page is a native child view laid over its pane, not something iced draws.
 //! So after every update [`App::sync_browsers`] moves each window to its pane's last reported
 //! bounds ([`Message::BrowserBounds`]) or hides it, starts the ones shown for the first time,
 //! and moves keyboard focus between macaroni and the page as the focused tab changes. Events
-//! from CEF arrive as [`Message::Browser`]. See `references/browser.md`.
+//! from the page arrive as [`Message::Browser`]. See `references/browser.md`.
 
 use iced::{Rectangle, Task};
 use macaroni_config::OpenLinks;
@@ -19,13 +19,13 @@ impl App {
     /// and moves keyboard focus into a page when its tab becomes the focused one. Does nothing
     /// until the main window's native handle is known.
     ///
-    /// Side effects: moves, shows, hides and focuses native windows, and may start CEF.
+    /// Side effects: moves, shows, hides and focuses native windows, and may start a web engine.
     pub(crate) fn sync_browsers(&mut self) {
         let Some(parent) = self.parent else {
             return;
         };
         self.place_browsers(parent);
-        self.follow_focused_tab(parent);
+        self.follow_focused_tab();
     }
 
     /// Puts each browser over its pane, or hides it while its tab is off screen or covered.
@@ -56,6 +56,12 @@ impl App {
                 .bounds
                 .filter(|b| visible && !covered(b))
                 .map(|b| browser::physical(b, self.scale));
+            // A page hidden while it holds the keyboard hands it back first: WebView2 takes
+            // focus back into a page hidden with it, and the page would pull its tab forward.
+            if want.is_none() && self.page_focus == Some(id) {
+                self.blur_page();
+            }
+            let panel = &self.browsers[&id];
             if panel.browser.is_none() && panel.error.is_none() && want.is_some() {
                 self.start_browser(id, parent, want);
             } else if let Some(b) = &panel.browser {
@@ -67,7 +73,7 @@ impl App {
     /// When the focused tab changes, gives the keyboard to its page, or back to macaroni. Only
     /// on a change: clicking into macaroni's UI while a browser tab stays focused is handled by
     /// [`App::reclaim_focus`], and a page not yet started takes focus in `start_browser`.
-    fn follow_focused_tab(&mut self, parent: isize) {
+    fn follow_focused_tab(&mut self) {
         let focused = self.model.focused_tab();
         let (focused_id, focused_kind) = (focused.id, focused.kind.clone());
         if self.last_focused_tab == Some(focused_id) {
@@ -81,17 +87,22 @@ impl App {
                     self.page_focus = Some(id);
                 }
             }
-            TabKind::Terminal(_) => {
-                if self.page_focus.take().is_some() {
-                    macaroni_browser::focus_window(parent);
-                }
-            }
+            TabKind::Terminal(_) => self.blur_page(),
         }
     }
 
-    /// Opens the browser window for a panel, at its tab's address (or the home page). Starts CEF
-    /// on first use; if that fails, the panel keeps the error and shows it instead. Does nothing
-    /// until the browser event channel exists.
+    /// Gives the keyboard back to macaroni from the page that has it, if any.
+    pub(crate) fn blur_page(&mut self) {
+        if let Some(id) = self.page_focus.take()
+            && let Some(b) = self.browsers.get(&id).and_then(|p| p.browser.as_ref())
+        {
+            b.blur();
+        }
+    }
+
+    /// Opens the browser window for a panel, at its tab's address (or the home page), with the
+    /// configured engine. If the engine can't start, the panel keeps the error and shows it
+    /// instead. Does nothing until the browser event channel exists.
     fn start_browser(
         &mut self,
         id: BrowserId,
@@ -120,12 +131,11 @@ impl App {
         let Some(panel) = self.browsers.get_mut(&id) else {
             return;
         };
-        if let Err(err) = browser::start() {
-            panel.error = Some(err);
-            return;
-        }
         let keys = events.clone();
-        panel.browser = Some(macaroni_browser::Browser::open(
+        let opened = macaroni_browser::Browser::open(
+            browser::engine(self.config.browser.engine),
+            &browser::data_dir(),
+            &crate::chromium::dir(),
             parent,
             &url,
             bounds,
@@ -135,9 +145,17 @@ impl App {
             browser::shortcuts(self.shared_keymap.clone(), move |action| {
                 let _ = keys.unbounded_send((id, BrowserMessage::Action(action)));
             }),
-        ));
+        );
+        let browser = match opened {
+            Ok(b) => panel.browser.insert(b),
+            Err(err) => {
+                panel.error = Some(err);
+                return;
+            }
+        };
         // A browser started by switching to its tab takes the keyboard, like an existing one.
         if self.model.focused_tab().kind == TabKind::Browser(id) {
+            browser.focus();
             self.page_focus = Some(id);
         }
     }
@@ -281,9 +299,10 @@ impl App {
 
     /// Opens a link from a terminal in a browser pane (see [`App::open_in_browser_pane`]), or in
     /// the system browser with `[browser] open_links = "system"` and on platforms without
-    /// browser tabs (everything but Windows).
+    /// browser tabs (everything but Windows and macOS).
     pub(crate) fn open_link(&mut self, url: String) -> Task<Message> {
-        if self.config.browser.open_links == OpenLinks::System || !cfg!(windows) {
+        let tabs = cfg!(any(windows, target_os = "macos"));
+        if self.config.browser.open_links == OpenLinks::System || !tabs {
             open_url(&url);
             return Task::none();
         }

@@ -6,9 +6,25 @@ All notable changes to macaroni are recorded here. The format follows [Keep a Ch
 
 ### Added
 
+- Browser tabs on macOS, with Safari's engine.
+- A default folder (`[terminal] default_dir`, or Settings > Terminal): where terminals start in a workspace that has no folder of its own.
+- `[browser] engine` (Settings > Integrations > Browser, Windows): pages use the system's web view by default, Edge's WebView2 on Windows; `"chromium"` keeps embedded Chromium.
+
+### Changed
+
+- Browser tabs use the system's web view by default instead of Chromium. A `window.open` popup (a sign-in window, say) opens as a tab with it.
+- Chromium no longer ships with macaroni, so the Windows download is about 40 MB instead of 400. Download it in Settings > Integrations > Browser (about 175 MB) to use the Chromium engine.
+
+## [0.1.0-alpha.2] - 2026-10-31
+
+VS Code and SSH tabs, reorganized settings, and more reliable session restore.
+
+### Added
+
 - Buttons at the right of each tab strip open a terminal, a browser tab or VS Code. Turn them off in Settings > Tabs.
 - VS Code tabs (Windows): an opt-in download in Settings > Integrations > VS Code runs VS Code for the web in a browser tab, opened at the pane's folder from the + menu or the tab strip. It's served only to this machine, with a private token, and restored tabs reconnect after a restart.
-
+- Downloads for Windows (x64) and macOS (Apple silicon) on GitHub Releases.
+- `./install` builds macaroni from source, installs it and starts it, on macOS and Windows; `--uninstall` removes it.
 - SSH profiles: `[[ssh]]` entries in config.toml, or Settings > Terminal > SSH profiles. Each opens from the new-tab menu (right-click a pane's +) as a terminal running `ssh` to that host, and reconnects when the session is restored. A connection that fails or drops leaves the tab open with the error; Enter connects again.
 
 ### Changed
