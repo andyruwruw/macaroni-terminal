@@ -187,11 +187,19 @@ pub fn available() -> Vec<ShellOption> {
     shells
 }
 
+/// The program's name without its folder or extension. Both `/` and `\` count as separators on
+/// every platform: `Path` only knows its own, and a config can name a Windows path anywhere.
+fn program_name(program: &str) -> &str {
+    let file = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    match file.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem,
+        _ => file,
+    }
+}
+
 /// Whether `program` is a bash (including Git Bash), which gets macaroni's prompt integration.
 pub fn is_bash(program: &str) -> bool {
-    Path::new(program)
-        .file_stem()
-        .is_some_and(|s| s.eq_ignore_ascii_case("bash"))
+    program_name(program).eq_ignore_ascii_case("bash")
 }
 
 /// Bash's prompt command outside Windows: the last command's exit code (OSC 133 `D`), the
@@ -208,9 +216,8 @@ const PROMPT_PS1: &str = include_str!("prompt.ps1");
 
 /// Whether `program` is PowerShell: Windows PowerShell (`powershell`) or PowerShell 7 (`pwsh`).
 pub fn is_powershell(program: &str) -> bool {
-    Path::new(program)
-        .file_stem()
-        .is_some_and(|s| s.eq_ignore_ascii_case("pwsh") || s.eq_ignore_ascii_case("powershell"))
+    let name = program_name(program);
+    name.eq_ignore_ascii_case("pwsh") || name.eq_ignore_ascii_case("powershell")
 }
 
 /// Arguments that start an interactive PowerShell with [`PROMPT_PS1`] run after the profile:
@@ -231,9 +238,7 @@ fn powershell_args() -> Vec<String> {
 
 /// Whether `program` is a zsh.
 pub fn is_zsh(program: &str) -> bool {
-    Path::new(program)
-        .file_stem()
-        .is_some_and(|s| s.eq_ignore_ascii_case("zsh"))
+    program_name(program).eq_ignore_ascii_case("zsh")
 }
 
 /// The folder zsh is pointed at (`ZDOTDIR`), with [`ZSHENV`] written in it; `None` if it can't
@@ -365,6 +370,10 @@ mod tests {
         assert!(is_bash("/bin/bash"));
         assert!(!is_bash("pwsh.exe"));
         assert!(!is_bash("/bin/zsh"));
+        // Either separator, on any platform.
+        assert!(is_bash(r"C:\Program Files\Git\bin\bash.exe"));
+        assert!(is_zsh("/usr/local/bin/zsh"));
+        assert!(!is_bash(".bash"));
     }
 
     #[test]
