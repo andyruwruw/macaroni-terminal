@@ -4,6 +4,10 @@ All notable changes to macaroni are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] - 2026-11-02
+
+Multiple windows, agent tools (a dashboard, an inbox, answering permission prompts), prompt marks, triggers, inline images, scrollback that survives a restart, find and zoom in browser pages, and the solid look by default.
+
 ### Added
 
 - Multiple windows, each with its own sidebar of workspaces and groups. Ctrl+Alt+Shift+N (Cmd+Shift+N on macOS, `new_window`) opens one; `close_window` closes the focused one.
@@ -11,17 +15,6 @@ All notable changes to macaroni are recorded here. The format follows [Keep a Ch
 - Drag a tab or workspace onto another window to move it there, or out onto the desktop to open a new window with it.
 - Every window comes back after a restart, where it was and at its size. Closing one of several windows closes what's in it.
 - `macaroni-cli new-window` opens a window.
-
-### Changed
-
-- `macaroni-cli list` (and the control API's `list`) shows every window's workspaces, grouped under `window N`; each workspace reports its window and whether that window is focused.
-
-## [0.1.0-alpha.3] - 2026-11-02
-
-Agent tools (a dashboard, an inbox, answering permission prompts), prompt marks, triggers, inline images, scrollback that survives a restart, find and zoom in browser pages, and the solid look by default.
-
-### Added
-
 - Browser tabs on macOS, with Safari's engine.
 - Rearrange panes: `swap_left`, `swap_right`, `swap_up` and `swap_down` (Ctrl+Alt+Shift+arrows, Cmd+Option+Shift+arrows on macOS) swap the focused pane with its neighbour, `rotate_panes` moves every pane one place along, and `equalize_panes` gives side-by-side panes equal room.
 - `{sync}` in `[workspace_items]` templates shows how far a workspace's branch is ahead of and behind its upstream (`↑2↓1`); Settings > Sidebar > Detail > Git branch includes it.
@@ -52,6 +45,7 @@ Agent tools (a dashboard, an inbox, answering permission prompts), prompt marks,
 
 ### Changed
 
+- `macaroni-cli list` (and the control API's `list`) shows every window's workspaces, grouped under `window N`; each workspace reports its window and whether that window is focused.
 - A terminal's find bar takes the place of the new tab buttons while it's open, and narrows in a narrow pane instead of running off the edge.
 
 - The solid interface (flat greys) is the default. Set `ui_theme = "glass"`, or pick Glass in Settings > Theme, for the translucent one.
