@@ -266,7 +266,7 @@ impl App {
         let mut previous = None;
         // A group's members are contiguous in the model's order, so a header goes before the
         // first workspace whose group differs from the one before it.
-        for (i, ws) in self.model.workspaces().iter().enumerate() {
+        for (i, ws) in self.shown().workspaces.iter().enumerate() {
             if !self.workspace_matches(ws, query) {
                 continue;
             }
@@ -453,7 +453,7 @@ impl App {
             c,
             bar,
             c.s.controls.radius,
-            self.window_size,
+            self.window_size(),
             c.s.effects.glass_idle,
         );
         container(bar)
@@ -500,15 +500,13 @@ impl App {
         {
             return group_rename_field(c, id, value);
         }
-        let members: Vec<&Workspace> = self
-            .model
-            .workspaces()
+        let shown = self.shown();
+        let members: Vec<&Workspace> = shown
+            .workspaces
             .iter()
             .filter(|w| w.group == Some(id))
             .collect();
-        let holds_active = members
-            .iter()
-            .any(|w| w.id == self.model.active_workspace().id);
+        let holds_active = members.iter().any(|w| w.id == shown.active);
         // Collapsed, the header stands in for the workspaces it hides.
         let lit = group.collapsed && holds_active;
         // Anything dropped into the group marks it, not just a drop onto the header.

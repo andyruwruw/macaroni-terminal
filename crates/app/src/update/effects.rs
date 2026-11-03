@@ -37,6 +37,7 @@ impl App {
                 | Command::ClosePane
                 | Command::CloseWorkspace(_)
                 | Command::CloseActiveWorkspace
+                | Command::CloseWindow(_)
         );
         let closing = if closable {
             self.closing_tabs()
@@ -69,7 +70,7 @@ impl App {
     /// [`App::remember_closed`] keeps those that are gone afterwards.
     fn closing_tabs(&self) -> Vec<(TabId, crate::ClosedTab)> {
         let mut tabs = Vec::new();
-        for ws in self.model.workspaces() {
+        for ws in self.model.all_workspaces() {
             for pane in ws.layout.leaves() {
                 for &tab in self
                     .model
@@ -199,7 +200,7 @@ impl App {
             return;
         }
         let path = session::path(&self.config_dir);
-        let saved = session::Saved {
+        let mut saved = session::Saved {
             sidebar: Some(self.sidebar),
             ..session::capture(
                 &self.model,
@@ -208,6 +209,13 @@ impl App {
                 &self.scrollback_files,
             )
         };
+        // The model knows each window's active workspace; where it is on screen is ours.
+        for (window, placed) in saved.windows.iter_mut().zip(self.saved_windows()) {
+            *window = session::SavedWindow {
+                active: window.active,
+                ..placed
+            };
+        }
         if let Err(err) = session::save(&path, &saved) {
             self.config_errors.push(format!(
                 "couldn't save the session to {}: {err}",
@@ -218,14 +226,19 @@ impl App {
         self.session_dirty = false;
     }
 
-    /// Carries out what the model asked for. Only quitting returns a task.
+    /// Carries out what the model asked for. Opening, closing or raising a window, and
+    /// quitting, return tasks.
     pub(crate) fn run_effects(&mut self, effects: Vec<Effect>) -> Task<Message> {
+        let mut tasks = Vec::new();
         for effect in effects {
             match effect {
                 Effect::SpawnSession(id) => self.session_requested(id),
                 Effect::KillSession(id) => self.kill_session(id),
                 Effect::OpenBrowser(id) => self.browser_requested(id),
                 Effect::CloseBrowser(id) => self.close_browser(id),
+                Effect::OpenWindow(w) => tasks.push(self.open_window(w, None)),
+                Effect::CloseWindow(w) => tasks.push(self.close_window(w)),
+                Effect::FocusWindow(w) => tasks.push(self.raise_window(w)),
                 Effect::Quit => {
                     // The model lists `Quit` last (after killing every session and closing
                     // every browser), so returning here skips nothing. Turning `restore` off
@@ -237,7 +250,7 @@ impl App {
                 }
             }
         }
-        Task::none()
+        Task::batch(tasks)
     }
 
     /// Queues a terminal to start once its view has a size, and tells subscribers its tab
@@ -342,10 +355,10 @@ fn open_tabs(model: &Model) -> Vec<(PaneId, TabId)> {
         .collect()
 }
 
-/// Every workspace's id and name, to compare before and after a command.
+/// Every workspace's id and name, in every window, to compare before and after a command.
 fn workspace_names(model: &Model) -> Vec<(WorkspaceId, String)> {
     model
-        .workspaces()
+        .all_workspaces()
         .iter()
         .map(|w| (w.id, w.name.clone()))
         .collect()

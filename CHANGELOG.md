@@ -4,6 +4,18 @@ All notable changes to macaroni are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Added
+
+- Multiple windows, each with its own sidebar of workspaces and groups. Ctrl+Alt+Shift+N (Cmd+Shift+N on macOS, `new_window`) opens one; `close_window` closes the focused one.
+- Move workspaces and tabs between windows: a workspace's Move menu has To New Window and To Window N (`move_to_new_window` for the active one), and a tab's Move menu has New window and the other windows' workspaces. Running terminals and browser pages move with them.
+- Drag a tab or workspace onto another window to move it there, or out onto the desktop to open a new window with it.
+- Every window comes back after a restart, where it was and at its size. Closing one of several windows closes what's in it.
+- `macaroni-cli new-window` opens a window.
+
+### Changed
+
+- `macaroni-cli list` (and the control API's `list`) shows every window's workspaces, grouped under `window N`; each workspace reports its window and whether that window is focused.
+
 ## [0.1.0-alpha.3] - 2026-11-02
 
 Agent tools (a dashboard, an inbox, answering permission prompts), prompt marks, triggers, inline images, scrollback that survives a restart, find and zoom in browser pages, and the solid look by default.

@@ -47,6 +47,10 @@ pub enum Action {
     JumpToPane,
     /// Bring back the most recently closed tab.
     ReopenTab,
+    /// Close the focused window and everything in it.
+    CloseWindow,
+    /// Move the active workspace to a new window.
+    WorkspaceToNewWindow,
     /// Save the focused terminal's text to a file.
     SaveScrollback,
     /// Search the scrollback of every terminal (`true`) or the active workspace's.
@@ -84,6 +88,7 @@ const DEFAULTS_MAC: &[(&str, &str)] = &[
     ("cmd+alt+shift+down", "swap_down"),
     ("cmd+shift+enter", "maximize_pane"),
     ("cmd+n", "new_workspace"),
+    ("cmd+shift+n", "new_window"),
     ("cmd+shift+]", "next_workspace"),
     ("cmd+shift+[", "previous_workspace"),
     ("cmd+1", "workspace_1"),
@@ -134,6 +139,7 @@ const DEFAULTS_OTHER: &[(&str, &str)] = &[
     ("ctrl+alt+shift+down", "swap_down"),
     ("ctrl+shift+enter", "maximize_pane"),
     ("ctrl+shift+n", "new_workspace"),
+    ("ctrl+alt+shift+n", "new_window"),
     ("ctrl+shift+pagedown", "next_workspace"),
     ("ctrl+shift+pageup", "previous_workspace"),
     ("ctrl+shift+1", "workspace_1"),
@@ -186,6 +192,8 @@ pub fn action(name: &str) -> Option<Action> {
         "agent_dashboard" => return Some(Action::AgentDashboard),
         "jump_to_pane" => return Some(Action::JumpToPane),
         "reopen_tab" => return Some(Action::ReopenTab),
+        "close_window" => return Some(Action::CloseWindow),
+        "move_to_new_window" => return Some(Action::WorkspaceToNewWindow),
         "save_scrollback" => return Some(Action::SaveScrollback),
         "search_workspace" => return Some(Action::SearchScrollback(false)),
         "search_all" => return Some(Action::SearchScrollback(true)),
@@ -217,6 +225,7 @@ pub fn action(name: &str) -> Option<Action> {
         "swap_down" => Command::SwapPane(Direction::Down),
         "next_waiting" => Command::NextWaiting,
         "new_workspace" => Command::NewWorkspace,
+        "new_window" => Command::NewWindow,
         "close_workspace" => Command::CloseActiveWorkspace,
         "next_workspace" => Command::NextWorkspace,
         "previous_workspace" => Command::PreviousWorkspace,
@@ -238,6 +247,9 @@ pub const NAMES: &[&str] = &[
     "new_tab",
     "close_tab",
     "reopen_tab",
+    "new_window",
+    "close_window",
+    "move_to_new_window",
     "next_tab",
     "previous_tab",
     "split_right",

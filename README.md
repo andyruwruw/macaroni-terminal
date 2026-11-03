@@ -19,7 +19,7 @@ This terminal seeks to provide that. Run your agent, dev server, code and browse
 
 <p align="center"><img src="docs/screenshots/attention.png" alt="Agent attention: pane ring, sidebar badge and OS notification"></p>
 
-- **Workspaces** in a vertical sidebar, with groups, pins, icons, colors and drag-and-drop.
+- **Workspaces** in a vertical sidebar, with groups, pins, icons, colors and drag-and-drop, in as many windows as you like.
 - **Split panes with tabs in every pane.** Drag a tab to another pane, or onto an edge to split it.
 - **Agent attention.** OSC 9, 777 and 99 light up the waiting tab, pane and workspace, then send an OS notification if you can't see it.
 - **Claude Code integration.** One command adds hooks and a status line; sessions resume in the same tab after a restart.
@@ -66,6 +66,7 @@ It shows the change to `~/.claude/settings.json` and asks first; `--remove` undo
 | Split right / down | Ctrl+Shift+D / Ctrl+Shift+E | Cmd+D / Cmd+Shift+D |
 | New tab / close tab | Ctrl+Shift+T / Ctrl+Shift+W | Cmd+T / Cmd+W |
 | New workspace, switch | Ctrl+Shift+N, Ctrl+Shift+1..9 | Cmd+N, Cmd+1..9 |
+| New window | Ctrl+Alt+Shift+N | Cmd+Shift+N |
 | Move focus | Ctrl+Alt+arrows | Cmd+Alt+arrows |
 | Find, search every tab | Ctrl+F, Ctrl+Shift+G | Cmd+F, Cmd+Option+F |
 | Command palette | Ctrl+Shift+P | Cmd+Shift+P |

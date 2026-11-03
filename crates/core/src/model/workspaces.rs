@@ -104,7 +104,8 @@ impl Model {
         id
     }
 
-    /// Closes the workspace and everything in it, or quits if it's the last one.
+    /// Closes the workspace and everything in it. Its window's last workspace closes the
+    /// window instead, or, in the only window, quits.
     ///
     /// Quitting leaves the model untouched and emits a kill or close for every tab, then
     /// [`Effect::Quit`]. Ignored when the workspace doesn't exist.
@@ -113,6 +114,9 @@ impl Model {
             return;
         };
         if self.workspaces.len() == 1 {
+            if self.close_last_workspace(effects) {
+                return;
+            }
             effects.extend(self.sessions().map(Effect::KillSession));
             effects.extend(self.browsers().map(Effect::CloseBrowser));
             effects.push(Effect::Quit);

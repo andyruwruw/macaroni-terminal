@@ -3,10 +3,10 @@
 //! [`Model::check`] is the contract every command must keep, and the randomized test in
 //! `tests.rs` asserts it after each step. It verifies:
 //!
-//! - Workspaces: there is at least one, the active one exists, and pinned ones come before
-//!   unpinned ones.
-//! - Groups: every group has at least one workspace, its workspaces are contiguous and all
-//!   pinned or all unpinned, and every workspace's group exists.
+//! - Windows: the focused one isn't also parked, and in each window there is at least one
+//!   workspace, its active one is among them, and pinned ones come before unpinned ones.
+//! - Groups, per window: every group has at least one workspace, its workspaces are contiguous
+//!   and all pinned or all unpinned, and every workspace's group exists in its window.
 //! - Layouts: every workspace focuses a leaf of its own layout, every leaf is a pane in the model
 //!   and appears in only one layout, no pane is outside every layout, and every split ratio is
 //!   strictly between 0 and 1.
@@ -15,7 +15,7 @@
 
 use std::collections::BTreeSet;
 
-use super::Model;
+use super::{Model, WindowView};
 use crate::layout::SplitNode;
 
 impl Model {
@@ -24,73 +24,22 @@ impl Model {
     ///
     /// Returns `Err` with a short description of the first violation found.
     pub fn check(&self) -> Result<(), String> {
-        self.check_workspaces()?;
-        self.check_groups()?;
+        if self.parked.contains_key(&self.window) {
+            return Err("the focused window is also parked".into());
+        }
+        for window in self.window_views() {
+            check_workspaces(&window)?;
+            check_groups(&window)?;
+        }
         self.check_layouts()?;
         self.check_panes()
-    }
-
-    /// There are workspaces, the active one exists, and pinned ones come first.
-    fn check_workspaces(&self) -> Result<(), String> {
-        if self.workspaces.is_empty() {
-            return Err("no workspaces".into());
-        }
-        if self.workspace(self.active).is_none() {
-            return Err("active workspace missing".into());
-        }
-        if let Some(ws) = self
-            .workspaces
-            .iter()
-            .find(|w| w.maximized.is_some_and(|p| p != w.focused))
-        {
-            return Err(format!(
-                "workspace {:?} maximizes a pane it hasn't focused",
-                ws.id
-            ));
-        }
-        // `false < true`, so sorting by "not pinned" means every pinned workspace comes first.
-        if !self.workspaces.is_sorted_by_key(|w| !w.pinned) {
-            return Err("a pinned workspace after an unpinned one".into());
-        }
-        Ok(())
-    }
-
-    /// Every group's workspaces are together and all pinned or all not, and every workspace's
-    /// group exists.
-    fn check_groups(&self) -> Result<(), String> {
-        for group in &self.groups {
-            let members: Vec<usize> = (0..self.workspaces.len())
-                .filter(|&i| self.workspaces[i].group == Some(group.id))
-                .collect();
-            let (Some(&first), Some(&last)) = (members.first(), members.last()) else {
-                return Err(format!("{:?} is empty", group.id));
-            };
-            // Contiguous exactly when the span from first to last member holds only members.
-            if last - first + 1 != members.len() {
-                return Err(format!("{:?} is split up", group.id));
-            }
-            if members
-                .iter()
-                .any(|&i| self.workspaces[i].pinned != self.workspaces[first].pinned)
-            {
-                return Err(format!("{:?} is partly pinned", group.id));
-            }
-        }
-        if let Some(w) = self
-            .workspaces
-            .iter()
-            .find(|w| w.group.is_some_and(|g| self.group(g).is_none()))
-        {
-            return Err(format!("{:?} is in a missing group", w.id));
-        }
-        Ok(())
     }
 
     /// Every pane is in exactly one layout, each layout focuses one of its own panes, and every
     /// ratio is in range.
     fn check_layouts(&self) -> Result<(), String> {
         let mut seen_panes = BTreeSet::new();
-        for w in &self.workspaces {
+        for w in self.all_workspaces() {
             let leaves = w.layout.leaves();
             if !leaves.contains(&w.focused) {
                 return Err(format!("{:?} focuses a pane outside its layout", w.id));
@@ -142,6 +91,63 @@ impl Model {
         }
         Ok(())
     }
+}
+
+/// A window has workspaces, its active one is among them, none maximizes a pane it hasn't
+/// focused, and pinned ones come first.
+fn check_workspaces(window: &WindowView<'_>) -> Result<(), String> {
+    let workspaces = window.workspaces;
+    if workspaces.is_empty() {
+        return Err(format!("{:?} has no workspaces", window.id));
+    }
+    if !workspaces.iter().any(|w| w.id == window.active) {
+        return Err(format!("{:?} has its active workspace missing", window.id));
+    }
+    if let Some(ws) = workspaces
+        .iter()
+        .find(|w| w.maximized.is_some_and(|p| p != w.focused))
+    {
+        return Err(format!(
+            "workspace {:?} maximizes a pane it hasn't focused",
+            ws.id
+        ));
+    }
+    // `false < true`, so sorting by "not pinned" means every pinned workspace comes first.
+    if !workspaces.is_sorted_by_key(|w| !w.pinned) {
+        return Err("a pinned workspace after an unpinned one".into());
+    }
+    Ok(())
+}
+
+/// In a window, every group's workspaces are together and all pinned or all not, and every
+/// workspace's group exists there.
+fn check_groups(window: &WindowView<'_>) -> Result<(), String> {
+    let workspaces = window.workspaces;
+    for group in window.groups {
+        let members: Vec<usize> = (0..workspaces.len())
+            .filter(|&i| workspaces[i].group == Some(group.id))
+            .collect();
+        let (Some(&first), Some(&last)) = (members.first(), members.last()) else {
+            return Err(format!("{:?} is empty", group.id));
+        };
+        // Contiguous exactly when the span from first to last member holds only members.
+        if last - first + 1 != members.len() {
+            return Err(format!("{:?} is split up", group.id));
+        }
+        if members
+            .iter()
+            .any(|&i| workspaces[i].pinned != workspaces[first].pinned)
+        {
+            return Err(format!("{:?} is partly pinned", group.id));
+        }
+    }
+    if let Some(w) = workspaces.iter().find(|w| {
+        w.group
+            .is_some_and(|g| !window.groups.iter().any(|x| x.id == g))
+    }) {
+        return Err(format!("{:?} is in a missing group", w.id));
+    }
+    Ok(())
 }
 
 /// Every split ratio in the tree is strictly between 0 and 1.

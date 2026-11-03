@@ -307,7 +307,8 @@
 #          copy, paste, find, zoom_in, zoom_out, reset_zoom, open_settings, open_config,
 #          toggle_sidebar, command_palette, show_waiting, next_waiting, new_worktree,
 #          previous_prompt, next_prompt, copy_output, agent_dashboard, jump_to_pane,
-#          reopen_tab, save_scrollback, search_workspace, search_all.
+#          reopen_tab, save_scrollback, search_workspace, search_all, new_window,
+#          close_window, move_to_new_window.
 #
 # "ctrl+shift+t" = "none"
 # "alt+t" = "new_tab"

@@ -93,9 +93,9 @@ use std::time::{Duration, Instant};
 
 use iced::futures::channel::mpsc::{UnboundedSender, unbounded};
 use iced::futures::{SinkExt, Stream, StreamExt};
-use iced::{Event, Size, Subscription, Task, event, mouse, window};
+use iced::{Event, Point, Size, Subscription, Task, event, mouse, window};
 use macaroni_config::Config;
-use macaroni_core::{BrowserId, Model, PaneId, SessionId, TabId, TabKind, WorkspaceId};
+use macaroni_core::{BrowserId, Model, PaneId, SessionId, TabId, TabKind, WindowId, WorkspaceId};
 use macaroni_term::shell::{self, ShellOption};
 use macaroni_term::{GridSize, SessionEvent, Snapshot, is_openable};
 
@@ -160,24 +160,34 @@ fn main() -> iced::Result {
     }
     notifications::register();
     fonts::load();
-    let result = iced::application(App::new, App::update, App::view)
+    // A daemon, which can have any number of windows; it only exits through `App::exit`.
+    let result = iced::daemon(App::new, App::update, App::view)
         .title(App::title)
         .subscription(App::subscription)
-        .theme(|app: &App| app.iced_theme.clone())
-        .window(window_settings())
-        // Close requests become `Message::CloseRequested`, so the session is saved first.
-        .exit_on_close_request(false)
+        .theme(|app: &App, _| app.iced_theme.clone())
         .run();
     // After the event loop: `App::exit` has already closed every browser window.
     macaroni_browser::shutdown();
     result
 }
 
-/// The main window's settings. On Windows macaroni draws its own title bar (`view::title_bar`),
-/// so the window has no system frame, only the shadow and rounded corners.
-fn window_settings() -> window::Settings {
+/// A window's settings, where and how big `saved` says (else the default size, where the system
+/// puts it). On Windows macaroni draws its own title bar (`view::title_bar`), so the window has
+/// no system frame, only the shadow and rounded corners.
+fn window_settings(saved: Option<&session::SavedWindow>) -> window::Settings {
+    let size = saved
+        .and_then(|s| s.size)
+        .map_or(DEFAULT_WINDOW_SIZE, |(w, h)| Size::new(w, h));
+    let position = saved
+        .and_then(|s| s.position)
+        .map_or(window::Position::Default, |(x, y)| {
+            window::Position::Specific(Point::new(x, y))
+        });
     let settings = window::Settings {
-        size: DEFAULT_WINDOW_SIZE,
+        size,
+        position,
+        // Close requests become `Message::CloseRequested`, so the session is saved first.
+        exit_on_close_request: false,
         decorations: !view::CUSTOM_FRAME,
         // The taskbar's and Alt+Tab's icon. The exe's own (Explorer, pinned shortcuts) is the
         // .ico that build.rs embeds; both are drawn from the same `app-icon.svg`.
@@ -194,6 +204,25 @@ fn window_settings() -> window::Settings {
         ..settings
     };
     settings
+}
+
+/// One OS window and what's known about it.
+#[derive(Debug, Clone, Copy)]
+struct Win {
+    /// The model's window it shows.
+    model: WindowId,
+    /// Its size in logical pixels, for laying out menus and drop targets.
+    size: Size,
+    /// Its top-left corner on screen, in logical pixels, once it has moved, for the session.
+    position: Option<Point>,
+    /// Whether it's maximized, refreshed on every resize (no resize borders then).
+    maximized: bool,
+    /// Its native handle (`HWND`, or the `NSView` on macOS), the parent of its browser windows.
+    parent: Option<isize>,
+    /// Its scale factor, for placing browser windows in physical pixels.
+    scale: f32,
+    /// Whether it has keyboard focus.
+    focused: bool,
 }
 
 /// The whole application state: the model, everything running for it, and the UI state around
@@ -237,8 +266,8 @@ struct App {
     empty: Snapshot,
     /// The divider being dragged, if any.
     drag: Option<Drag>,
-    /// Whether the window has keyboard focus (kept `true` while a browser page has it), for
-    /// deciding whether a notification needs the user's attention.
+    /// Whether one of macaroni's windows has keyboard focus (kept `true` while a browser page
+    /// has it), for deciding whether a notification needs the user's attention.
     window_focused: bool,
     /// The item being renamed in place and the name typed so far.
     renaming: Option<(Renaming, String)>,
@@ -304,8 +333,6 @@ struct App {
     tab_reveals: Vec<PaneId>,
     /// The custom `#rrggbb` field on a workspace's, group's or tab's color menu.
     color_input: String,
-    /// The window's size in logical pixels, for laying out menus and drop targets.
-    window_size: Size,
     /// The open find bar.
     search: Option<Search>,
     /// The control API's connections, subscribers and endpoint.
@@ -343,14 +370,15 @@ struct App {
     chromium: chromium::Chromium,
     /// Where browsers send their events; `None` until [`Message::BrowserEventsReady`].
     browser_events: Option<UnboundedSender<(BrowserId, BrowserMessage)>>,
-    /// The main window, once it has opened.
-    window: Option<window::Id>,
-    /// Whether the window is maximized, refreshed on every resize (no resize borders then).
-    maximized: bool,
-    /// The main window's native handle (`HWND`), the parent of every browser window.
-    parent: Option<isize>,
-    /// The window's scale factor, for placing browser windows in physical pixels.
-    scale: f32,
+    /// Every open window, by its iced id. Added when it's asked to open, so effects can find it
+    /// before it has.
+    wins: BTreeMap<window::Id, Win>,
+    /// The window `App::view` is drawing, so the view code (which only gets `&self`) shows that
+    /// window's sidebar, not the focused one's. Cleared at the start of every update.
+    viewing: std::cell::Cell<Option<window::Id>>,
+    /// Where on screen the next window to open goes: where a tab or workspace was dropped
+    /// outside every window. Taken by `App::open_window`.
+    next_window_at: Option<Point>,
     /// Points added to the configured font size by zooming, for this run only.
     zoom: f32,
     /// The browser holding keyboard focus, when a page rather than macaroni has it.
@@ -371,7 +399,7 @@ impl App {
     ///
     /// Side effects: writes the config template on first run and queues the first sessions and
     /// browsers. The control socket and the session channel come later, from subscriptions.
-    fn new() -> Self {
+    fn new() -> (Self, Task<Message>) {
         let mut args = std::env::args().skip(1);
         let first_command = args.next().map(|program| (program, args.collect()));
         let config_dir = macaroni_config::config_dir();
@@ -384,6 +412,10 @@ impl App {
             .then(|| session::load(&session::path(&config_dir)))
             .flatten();
         let sidebar = saved.as_ref().and_then(|s| s.sidebar);
+        let saved_windows = saved
+            .as_ref()
+            .map(|s| s.windows.clone())
+            .unwrap_or_default();
         let (model, effects, restored) = restore::startup(saved);
         let mut app = Self::with_defaults(model, restored, first_command, config_dir);
         // Read from the loaded config, since `app.config` is still the default until `apply_config`.
@@ -401,7 +433,20 @@ impl App {
         // Startup effects only queue sessions and browsers; none of them quits, so there's no
         // task to keep.
         let _ = app.run_effects(effects);
-        app
+        // A window for each of the model's, where it was; the focused one opens last, so it
+        // ends up in front.
+        let focused = app.model.focused_window();
+        let mut windows = app.model.windows();
+        windows.sort_by_key(|w| *w == focused);
+        let all = app.model.windows();
+        let opens: Vec<_> = windows
+            .into_iter()
+            .map(|w| {
+                let index = all.iter().position(|x| *x == w).unwrap_or(0);
+                app.open_window(w, saved_windows.get(index))
+            })
+            .collect();
+        (app, Task::batch(opens))
     }
 
     /// The app around `model` with the default config, before the real one applies. Probes the
@@ -467,7 +512,6 @@ impl App {
             tab_views: BTreeMap::new(),
             tab_reveals: Vec::new(),
             color_input: String::new(),
-            window_size: DEFAULT_WINDOW_SIZE,
             search: None,
             ipc: ipc::IpcState::new(macaroni_ipc::endpoint()),
             restored,
@@ -485,10 +529,9 @@ impl App {
             vscode_web: vscode::WebVsCode::new(),
             chromium: chromium::Chromium::new(),
             browser_events: None,
-            window: None,
-            maximized: false,
-            parent: None,
-            scale: 1.0,
+            wins: BTreeMap::new(),
+            viewing: std::cell::Cell::new(None),
+            next_window_at: None,
             zoom: 0.0,
             page_focus: None,
             last_focused_tab: None,
@@ -498,17 +541,32 @@ impl App {
         }
     }
 
-    /// The window title: the focused tab's label, else the active workspace's name.
-    fn title(&self) -> String {
-        match self.model.focused_tab().label() {
+    /// A window's title: the label of its focused tab, else its active workspace's name.
+    fn title(&self, id: window::Id) -> String {
+        let Some(ws) = self
+            .wins
+            .get(&id)
+            .and_then(|w| self.model.window(w.model))
+            .and_then(|w| self.model.workspace(w.active))
+        else {
+            return APP_NAME.to_owned();
+        };
+        let tab = self
+            .model
+            .pane(ws.focused)
+            .and_then(|p| self.model.tab(p.active))
+            .and_then(|t| t.label());
+        match tab {
             Some(title) => format!("{title} - {APP_NAME}"),
-            None => format!("{} - {APP_NAME}", self.model.active_workspace().name),
+            None => format!("{} - {APP_NAME}", ws.name),
         }
     }
 
     /// iced's update function: handles `message`, then brings the native browser windows and
     /// the fades in line with the new state.
     fn update(&mut self, message: Message) -> Task<Message> {
+        // Outside the view, "the window" is the focused one.
+        self.viewing.set(None);
         let task = self.handle(message);
         // Both run after every message, whichever handler ran: browser windows aren't drawn by
         // iced, so any change to the model, a menu, a drag or the settings dialog may have to
@@ -521,22 +579,29 @@ impl App {
     /// Sets each workspace's and tab's fade targets (selected, hovered) from the current state.
     /// The view reads the eased levels, and `window::frames` runs while any is still moving.
     fn sync_fades(&mut self) {
-        let active = self.model.active_workspace().id;
+        // Each window's active workspace is selected in its own sidebar.
+        let active: Vec<WorkspaceId> = self
+            .model
+            .windows()
+            .into_iter()
+            .filter_map(|w| self.model.window(w))
+            .map(|w| w.active)
+            .collect();
         let hovered_ws = match self.sidebar_hover {
             Some((SidebarHover::Workspace(ws), _)) => Some(ws),
             _ => None,
         };
         let model = &self.model;
         let hovered_tab = self.hovered_tab;
-        let workspaces = model.workspaces().iter().map(|ws| {
+        let all = model.all_workspaces();
+        let workspaces = all.iter().map(|ws| {
             (
                 anim::Item::Workspace(ws.id),
-                ws.id == active,
+                active.contains(&ws.id),
                 hovered_ws == Some(ws.id),
             )
         });
-        let tabs = model
-            .workspaces()
+        let tabs = all
             .iter()
             .flat_map(|ws| ws.layout.leaves())
             .filter_map(|p| model.pane(p))
@@ -588,26 +653,43 @@ impl App {
 
             Message::WindowOpened(id) => self.window_opened(id),
             Message::Window(op) => self.window_op(op),
-            Message::WindowResized(size) => self.window_resized(size),
-            Message::WindowFocused(focused) => self.set_window_focused(focused),
-            Message::Maximized(maximized) => {
-                self.maximized = maximized;
+            Message::WindowResized(id, size) => self.window_resized(id, size),
+            Message::WindowMoved(id, at) => {
+                if let Some(win) = self.wins.get_mut(&id) {
+                    win.position = Some(at);
+                    self.session_dirty = true;
+                }
                 Task::none()
             }
-            Message::WindowHandle(handle) => {
-                self.parent = handle;
+            Message::WindowFocused(id, focused) => self.set_window_focused(id, focused),
+            Message::Maximized(id, maximized) => {
+                if let Some(win) = self.wins.get_mut(&id) {
+                    win.maximized = maximized;
+                }
                 Task::none()
             }
-            Message::Rescaled(scale) => {
-                self.scale = scale;
+            Message::WindowHandle(id, handle) => {
+                if let Some(win) = self.wins.get_mut(&id) {
+                    win.parent = handle;
+                }
+                Task::none()
+            }
+            Message::Rescaled(id, scale) => {
+                if let Some(win) = self.wins.get_mut(&id) {
+                    win.scale = scale;
+                }
                 Task::none()
             }
             Message::ReclaimFocus => self.reclaim_focus(),
-            Message::CloseRequested => self.close_requested(),
+            Message::CloseRequested(id) => self.close_requested(id),
 
             Message::DragStart(workspace, divider) => self.divider_press(workspace, divider),
-            Message::DragMove(position) if self.sidebar_drag => self.sidebar_drag_move(position.x),
-            Message::DragMove(position) => self.divider_move(position),
+            // Drags happen in the focused window; another window's coordinates mean nothing here.
+            Message::DragMove(id, _) if !self.is_focused_window(id) => Task::none(),
+            Message::DragMove(_, position) if self.sidebar_drag => {
+                self.sidebar_drag_move(position.x)
+            }
+            Message::DragMove(_, position) => self.divider_move(position),
             Message::DragEnd => {
                 self.drag = None;
                 self.sidebar_drag = false;
@@ -634,7 +716,8 @@ impl App {
 
             Message::TabPress(tab) => self.tab_press(tab),
             Message::WorkspacePress(ws) => self.workspace_press(ws),
-            Message::ItemDragMove(at) => self.item_drag_move(at),
+            Message::ItemDragMove(id, _) if !self.is_focused_window(id) => Task::none(),
+            Message::ItemDragMove(_, at) => self.item_drag_move(at),
             Message::ItemDragEnd => self.item_drag_end(),
             Message::TabHover(pane, index, entered) => self.tab_hover(pane, index, entered),
             Message::TabZone(pane, index, zone) => self.tab_zone(pane, index, zone),
@@ -829,7 +912,7 @@ impl App {
             window::open_events().map(Message::WindowOpened),
             reclaim,
             shortcuts,
-            iced::window::close_requests().map(|_| Message::CloseRequested),
+            iced::window::close_requests().map(Message::CloseRequested),
             event::listen_with(window_focus_events),
             // Clicking the search field focuses it and clicking anything else blurs it, and
             // neither reaches the app any other way.
@@ -844,19 +927,21 @@ impl App {
 }
 
 /// Cursor moves and the left button's release, while a divider is dragged.
-fn drag_events(event: Event, _: event::Status, _: window::Id) -> Option<Message> {
+fn drag_events(event: Event, _: event::Status, id: window::Id) -> Option<Message> {
     match event {
-        Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Message::DragMove(position)),
+        Event::Mouse(mouse::Event::CursorMoved { position }) => {
+            Some(Message::DragMove(id, position))
+        }
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::DragEnd),
         _ => None,
     }
 }
 
 /// Cursor moves and the left button's release, while a tab or workspace is pressed or dragged.
-fn item_drag_events(event: Event, _: event::Status, _: window::Id) -> Option<Message> {
+fn item_drag_events(event: Event, _: event::Status, id: window::Id) -> Option<Message> {
     match event {
         Event::Mouse(mouse::Event::CursorMoved { position }) => {
-            Some(Message::ItemDragMove(position))
+            Some(Message::ItemDragMove(id, position))
         }
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
             Some(Message::ItemDragEnd)
@@ -963,13 +1048,14 @@ fn clicks(event: Event, _: event::Status, _: window::Id) -> Option<Message> {
     }
 }
 
-/// The window gaining or losing focus, being rescaled, or being resized.
-fn window_focus_events(event: Event, _: event::Status, _: window::Id) -> Option<Message> {
+/// A window gaining or losing focus, being rescaled, resized or moved.
+fn window_focus_events(event: Event, _: event::Status, id: window::Id) -> Option<Message> {
     match event {
-        Event::Window(window::Event::Focused) => Some(Message::WindowFocused(true)),
-        Event::Window(window::Event::Unfocused) => Some(Message::WindowFocused(false)),
-        Event::Window(window::Event::Rescaled(scale)) => Some(Message::Rescaled(scale)),
-        Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(size)),
+        Event::Window(window::Event::Focused) => Some(Message::WindowFocused(id, true)),
+        Event::Window(window::Event::Unfocused) => Some(Message::WindowFocused(id, false)),
+        Event::Window(window::Event::Rescaled(scale)) => Some(Message::Rescaled(id, scale)),
+        Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(id, size)),
+        Event::Window(window::Event::Moved(at)) => Some(Message::WindowMoved(id, at)),
         _ => None,
     }
 }

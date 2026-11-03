@@ -11,6 +11,8 @@
 //! - `panes`: splitting, closing, focusing and resizing panes.
 //! - `tabs`: creating, ordering, pinning, moving and closing tabs.
 //! - `events`: what running programs report (titles, directories, notices, agents, pages).
+//! - `windows`: opening, closing and focusing windows, routing a command to the window holding
+//!   what it names, and moving workspaces and tabs between windows.
 //! - `check`: the invariants [`Model::check`] verifies after every command in debug builds.
 
 mod check;
@@ -18,11 +20,12 @@ mod events;
 mod groups;
 mod panes;
 mod tabs;
+mod windows;
 mod workspaces;
 
 use std::collections::BTreeMap;
 
-use crate::ids::{BrowserId, GroupId, PaneId, SessionId, TabId, WorkspaceId};
+use crate::ids::{BrowserId, GroupId, PaneId, SessionId, TabId, WindowId, WorkspaceId};
 use crate::layout::{Axis, Direction, Divider, MIN_RATIO, Rect, Side, SplitNode};
 use events::non_blank;
 
@@ -198,6 +201,9 @@ pub enum MoveTo {
         /// Which side of `pane` the new pane goes on.
         direction: Direction,
     },
+    /// A new window, in a new workspace there. Ignored when the tab is alone in the only
+    /// workspace of its window.
+    NewWindow,
     /// A new pane along an edge of a whole workspace, as tall or wide as the workspace.
     SplitWorkspace {
         /// The workspace whose whole layout is wrapped in a 50/50 split with the new pane; it
@@ -253,6 +259,44 @@ pub struct WorkspaceSpec {
     /// Index of the focused pane, counting panes left to right / top to bottom; clamped on
     /// restore.
     pub focused: usize,
+    /// Which window it's in, counting windows from 0; restore puts it in the last one past
+    /// the end.
+    pub window: usize,
+}
+
+/// A whole model as plain data ([`Model::spec`], [`Model::restore`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spec {
+    /// Every workspace, each window's in its sidebar order, windows in order.
+    pub workspaces: Vec<WorkspaceSpec>,
+    /// For each window, the index in `workspaces` of its active workspace.
+    pub windows: Vec<usize>,
+    /// Which window has focus.
+    pub focused: usize,
+}
+
+/// One window's sidebar, for drawing it ([`Model::window`]).
+#[derive(Debug, Clone, Copy)]
+pub struct WindowView<'a> {
+    /// The window.
+    pub id: WindowId,
+    /// Its workspaces in sidebar order.
+    pub workspaces: &'a [Workspace],
+    /// Its groups.
+    pub groups: &'a [Group],
+    /// Its active workspace.
+    pub active: WorkspaceId,
+}
+
+/// A window's sidebar while another window has focus ([`Model::parked`]).
+#[derive(Debug, Clone)]
+struct Parked {
+    /// Its workspaces in sidebar order.
+    workspaces: Vec<Workspace>,
+    /// Its groups.
+    groups: Vec<Group>,
+    /// Its active workspace.
+    active: WorkspaceId,
 }
 
 /// What a coding agent in a tab is doing, as its hooks report it.
@@ -301,6 +345,26 @@ pub struct Notice {
 /// create or close tabs produce effects; everything else is pure bookkeeping.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    /// Opens a window with one workspace holding one new terminal, and focuses it. Emits
+    /// [`Effect::OpenWindow`] then [`Effect::SpawnSession`].
+    NewWindow,
+    /// Closes the window and everything in it, as closing each of its workspaces would; the
+    /// last window quits instead (see [`Command::CloseWorkspace`]). Emits
+    /// [`Effect::CloseWindow`].
+    CloseWindow(WindowId),
+    /// The window got focus: commands without a target now act on its sidebar. Ignored for a
+    /// missing window.
+    FocusWindow(WindowId),
+    /// Moves a workspace, running, to another window's sidebar (`Some`) or a new window
+    /// (`None`), out of any group, where it becomes active and the window focused. A window it
+    /// leaves empty closes ([`Effect::CloseWindow`]). Ignored for its own window, a missing one,
+    /// or a new window when it's alone in its own.
+    MoveWorkspaceToWindow {
+        /// The workspace to move.
+        workspace: WorkspaceId,
+        /// Where to, or `None` for a new window ([`Effect::OpenWindow`]).
+        window: Option<WindowId>,
+    },
     /// Appends a workspace named "Workspace N" holding one new terminal, and makes it active.
     /// Emits [`Effect::SpawnSession`].
     NewWorkspace,
@@ -577,6 +641,12 @@ pub enum Effect {
     /// The last workspace was closed: exit the app. The model is left as it was, and the kills
     /// and closes for every tab come before this in the same batch.
     Quit,
+    /// A window was created: open one for it. It has focus.
+    OpenWindow(WindowId),
+    /// A window was closed (its tabs' kills and closes come before this): close it.
+    CloseWindow(WindowId),
+    /// A command moved focus to this window: bring it to the front.
+    FocusWindow(WindowId),
 }
 
 /// The whole app state: workspaces, their split trees, panes and tabs.
@@ -585,14 +655,21 @@ pub enum Effect {
 /// rearranging the layout never touches a running shell.
 #[derive(Debug, Clone)]
 pub struct Model {
-    /// Every workspace in sidebar order: pinned ones first, each group's members contiguous.
+    /// The focused window's workspaces in sidebar order: pinned ones first, each group's
+    /// members contiguous. Other windows' are in `parked`.
     workspaces: Vec<Workspace>,
-    /// Every group; each has at least one workspace (empty ones are dropped after each command).
+    /// The focused window's groups; each has at least one workspace (empty ones are dropped
+    /// after each command).
     groups: Vec<Group>,
     /// How many groups were ever made, for the "Group N" default name.
     groups_created: u64,
-    /// The workspace on screen; always one of `workspaces`.
+    /// The focused window's workspace on screen; always one of `workspaces`.
     active: WorkspaceId,
+    /// The focused window, whose sidebar is `workspaces`, `groups` and `active`.
+    window: WindowId,
+    /// Every other window's sidebar. A command naming something in one swaps it in first
+    /// (`windows.rs`), so the sidebar code only ever deals with the focused window's.
+    parked: BTreeMap<WindowId, Parked>,
     /// Every pane, each a leaf of exactly one workspace's layout.
     panes: BTreeMap<PaneId, Pane>,
     /// Every tab, each in exactly one pane.
@@ -611,43 +688,58 @@ impl Model {
             groups: Vec::new(),
             groups_created: 0,
             active: WorkspaceId(0),
+            window: WindowId(0),
+            parked: BTreeMap::new(),
             panes: BTreeMap::new(),
             tabs: BTreeMap::new(),
             next_id: 1,
             workspaces_created: 0,
         };
+        model.window = WindowId(model.next_id());
         let mut effects = Vec::new();
         model.add_workspace(&mut effects);
         (model, effects)
     }
 
-    /// The layout as plain data, plus the tabs in the same order [`Model::restore`] returns
-    /// them (workspace order, then panes left to right / top to bottom, then tab order).
-    ///
-    /// Returns the workspace specs, the active workspace's index, and the tabs. The app saves
-    /// the specs and pairs the tabs with their per-tab details (agent, directory, name, pinned).
-    pub fn spec(&self) -> (Vec<WorkspaceSpec>, usize, Vec<TabId>) {
+    /// The windows and layouts as plain data, plus the tabs in the same order
+    /// [`Model::restore`] returns them (windows in order, each one's workspaces in sidebar
+    /// order, then panes left to right / top to bottom, then tab order). The app saves the spec
+    /// and pairs the tabs with their per-tab details (agent, directory, name, pinned); its
+    /// workspaces come in the same order as [`Model::all_workspaces`].
+    pub fn spec(&self) -> (Spec, Vec<TabId>) {
         let mut tabs = Vec::new();
-        let workspaces = self
-            .workspaces
-            .iter()
-            .map(|ws| WorkspaceSpec {
-                name: ws.name.clone(),
-                layout: self.spec_of(&ws.layout, &mut tabs),
-                focused: ws
-                    .layout
-                    .leaves()
-                    .iter()
-                    .position(|p| *p == ws.focused)
-                    .unwrap_or(0),
-            })
-            .collect();
-        let active = self
-            .workspaces
-            .iter()
-            .position(|w| w.id == self.active)
-            .unwrap_or(0);
-        (workspaces, active, tabs)
+        let mut spec = Spec {
+            workspaces: Vec::new(),
+            windows: Vec::new(),
+            focused: 0,
+        };
+        for (index, window) in self.window_views().into_iter().enumerate() {
+            if window.id == self.window {
+                spec.focused = index;
+            }
+            let first = spec.workspaces.len();
+            for ws in window.workspaces {
+                if ws.id == window.active {
+                    spec.windows.push(spec.workspaces.len());
+                }
+                spec.workspaces.push(WorkspaceSpec {
+                    name: ws.name.clone(),
+                    layout: self.spec_of(&ws.layout, &mut tabs),
+                    focused: ws
+                        .layout
+                        .leaves()
+                        .iter()
+                        .position(|p| *p == ws.focused)
+                        .unwrap_or(0),
+                    window: index,
+                });
+            }
+            // The active workspace is always in its sidebar; this only keeps the lists aligned.
+            if spec.windows.len() == index {
+                spec.windows.push(first);
+            }
+        }
+        (spec, tabs)
     }
 
     /// The spec of one layout subtree, appending its tabs to `tabs` in leaf order.
@@ -694,18 +786,23 @@ impl Model {
 
     /// Rebuilds a saved layout with fresh ids and a new terminal or browser per tab.
     ///
-    /// Out-of-range values are clamped: `active`, each workspace's `focused`, each pane's
-    /// `active` and each split ratio (see [`LayoutSpec::Split::ratio`]). A pane with no tabs gets
-    /// one terminal, and an empty list gives the default single terminal ([`Model::new`]).
-    /// Returns the model, one [`Effect::SpawnSession`] or [`Effect::OpenBrowser`] per tab, and
-    /// the new tabs in the same order as [`Model::spec`].
-    pub fn restore(
-        workspaces: Vec<WorkspaceSpec>,
-        active: usize,
-    ) -> (Self, Vec<Effect>, Vec<TabId>) {
+    /// Out-of-range values are clamped: each window's active workspace (one outside it means
+    /// its first), the focused window, each workspace's window and `focused`, each pane's
+    /// `active` and each split ratio (see [`LayoutSpec::Split::ratio`]). Windows left with no
+    /// workspaces are dropped. A pane with no tabs gets one terminal, and no workspaces at all
+    /// gives the default single terminal ([`Model::new`]). Returns the model, one
+    /// [`Effect::SpawnSession`] or [`Effect::OpenBrowser`] per tab, and the new tabs in the
+    /// same order as [`Model::spec`]. No [`Effect::OpenWindow`]: the app opens one window per
+    /// [`Model::windows`] itself.
+    pub fn restore(spec: Spec) -> (Self, Vec<Effect>, Vec<TabId>) {
+        let Spec {
+            workspaces,
+            windows,
+            focused,
+        } = spec;
         if workspaces.is_empty() {
             let (model, effects) = Self::new();
-            let tabs = model.spec().2;
+            let tabs = model.spec().1;
             return (model, effects, tabs);
         }
         let mut model = Self {
@@ -713,6 +810,8 @@ impl Model {
             groups: Vec::new(),
             groups_created: 0,
             active: WorkspaceId(0),
+            window: WindowId(0),
+            parked: BTreeMap::new(),
             panes: BTreeMap::new(),
             tabs: BTreeMap::new(),
             next_id: 1,
@@ -720,7 +819,11 @@ impl Model {
         };
         let mut effects = Vec::new();
         let mut tabs = Vec::new();
+        let last_window = windows.len().saturating_sub(1);
+        // Each workspace's new id and window, in spec order.
+        let mut placed: Vec<(WorkspaceId, usize)> = Vec::new();
         for spec in workspaces {
+            let window = spec.window.min(last_window);
             let layout = model.build(&spec.layout, &mut effects, &mut tabs);
             let leaves = layout.leaves();
             let focused = leaves[spec.focused.min(leaves.len() - 1)];
@@ -746,8 +849,9 @@ impl Model {
                 startup: None,
                 maximized: None,
             });
+            placed.push((id, window));
         }
-        model.active = model.workspaces[active.min(model.workspaces.len() - 1)].id;
+        model.place_restored(&placed, &windows, focused);
         debug_assert_eq!(model.check(), Ok(()));
         (model, effects, tabs)
     }
@@ -806,12 +910,20 @@ impl Model {
         }
     }
 
-    /// Every workspace in sidebar order.
+    /// The focused window's workspaces in sidebar order.
     pub fn workspaces(&self) -> &[Workspace] {
         &self.workspaces
     }
 
-    /// The workspace on screen.
+    /// Every workspace in every window: windows in order, each one's in sidebar order.
+    pub fn all_workspaces(&self) -> Vec<&Workspace> {
+        self.window_views()
+            .into_iter()
+            .flat_map(|w| w.workspaces.iter())
+            .collect()
+    }
+
+    /// The focused window's workspace on screen.
     ///
     /// # Panics
     ///
@@ -826,14 +938,20 @@ impl Model {
         &self.groups
     }
 
-    /// The group with this id, if it still exists.
+    /// The group with this id, in any window, if it still exists.
     pub fn group(&self, id: GroupId) -> Option<&Group> {
-        self.groups.iter().find(|g| g.id == id)
+        self.groups
+            .iter()
+            .chain(self.parked.values().flat_map(|p| &p.groups))
+            .find(|g| g.id == id)
     }
 
-    /// The workspace with this id, if it still exists.
+    /// The workspace with this id, in any window, if it still exists.
     pub fn workspace(&self, id: WorkspaceId) -> Option<&Workspace> {
-        self.workspaces.iter().find(|w| w.id == id)
+        self.workspaces
+            .iter()
+            .chain(self.parked.values().flat_map(|p| &p.workspaces))
+            .find(|w| w.id == id)
     }
 
     /// The pane with this id, if it still exists.
@@ -890,17 +1008,22 @@ impl Model {
             .map(|t| t.id)
     }
 
-    /// Whether the tab is on screen: the active tab of a pane in the active workspace.
+    /// Whether the tab is on screen: the active tab of a pane shown in some window's active
+    /// workspace.
     pub fn tab_visible(&self, tab: TabId) -> bool {
-        let ws = self.active_workspace();
-        let shown = match ws.maximized {
-            Some(pane) => vec![pane],
-            None => ws.layout.leaves(),
-        };
-        shown
-            .iter()
-            .filter_map(|p| self.panes.get(p))
-            .any(|p| p.active == tab)
+        self.window_views().into_iter().any(|window| {
+            let Some(ws) = self.workspace(window.active) else {
+                return false;
+            };
+            let shown = match ws.maximized {
+                Some(pane) => vec![pane],
+                None => ws.layout.leaves(),
+            };
+            shown
+                .iter()
+                .filter_map(|p| self.panes.get(p))
+                .any(|p| p.active == tab)
+        })
     }
 
     /// Whether any tab in the pane is waiting for the user.
@@ -950,12 +1073,55 @@ impl Model {
     /// groups left with no workspaces are dropped, and debug builds assert [`Model::check`].
     pub fn apply(&mut self, command: Command) -> Vec<Effect> {
         let mut effects = Vec::new();
-        match command {
-            Command::NewWorkspace => {
-                self.add_workspace(&mut effects);
+        // The tab `NextWaiting` picks can be in any window, so it's a routed `SelectTab`.
+        let command = match command {
+            Command::NextWaiting => match self.next_waiting() {
+                Some(tab) => Command::SelectTab(tab),
+                None => return effects,
+            },
+            other => other,
+        };
+        let home = self.window;
+        let Some(target) = self.window_for(&command) else {
+            return effects;
+        };
+        self.swap_to(target);
+        let follows = matches!(
+            command,
+            Command::SelectWorkspace(_) | Command::SelectTab(_) | Command::FocusPane(_)
+        );
+        self.run(command, &mut effects);
+        // Back to the window that had focus, unless the command was about showing something
+        // there or closed it; a command that opened or moved to a window keeps it focused.
+        let chosen = effects
+            .iter()
+            .any(|e| matches!(e, Effect::OpenWindow(_) | Effect::FocusWindow(_)));
+        if self.window != home && !chosen {
+            if !follows && self.parked.contains_key(&home) {
+                self.swap_to(home);
+            } else {
+                effects.push(Effect::FocusWindow(self.window));
             }
-            Command::CloseWorkspace(id) => self.close_workspace(id, &mut effects),
-            Command::CloseActiveWorkspace => self.close_workspace(self.active, &mut effects),
+        }
+        self.tidy();
+        debug_assert_eq!(self.check(), Ok(()));
+        effects
+    }
+
+    /// Runs one command on the window it's for, now the focused one.
+    fn run(&mut self, command: Command, effects: &mut Vec<Effect>) {
+        match command {
+            Command::NewWindow => self.new_window(effects),
+            Command::CloseWindow(id) => self.close_window(id, effects),
+            Command::FocusWindow(_) => {}
+            Command::MoveWorkspaceToWindow { workspace, window } => {
+                self.move_workspace_to_window(workspace, window, effects)
+            }
+            Command::NewWorkspace => {
+                self.add_workspace(effects);
+            }
+            Command::CloseWorkspace(id) => self.close_workspace(id, effects),
+            Command::CloseActiveWorkspace => self.close_workspace(self.active, effects),
             Command::SelectWorkspace(id) => self.select_workspace(id),
             Command::SelectWorkspaceIndex(index) => self.select_workspace_index(index),
             Command::NextWorkspace => self.cycle_workspace(1),
@@ -997,8 +1163,8 @@ impl Model {
             Command::ShiftGroup(id, shift) => self.shift_group(id, shift),
             Command::Ungroup(id) => self.ungroup(id),
 
-            Command::SplitPane(direction) => self.split(direction, &mut effects),
-            Command::ClosePane => self.close_focused_pane(&mut effects),
+            Command::SplitPane(direction) => self.split(direction, effects),
+            Command::ClosePane => self.close_focused_pane(effects),
             Command::FocusPane(pane) => self.focus_pane(pane),
             Command::FocusDirection(direction) => self.focus_direction(direction),
             Command::ToggleMaximize => self.toggle_maximize(),
@@ -1007,30 +1173,21 @@ impl Model {
             }
             Command::SwapPane(direction) => self.swap_pane(direction),
             Command::RotatePanes => self.rotate_panes(),
-            Command::NextWaiting => {
-                let waiting = self.waiting_tabs();
-                let focused = self.focused_tab().id;
-                let next = match waiting.iter().position(|t| *t == focused) {
-                    Some(at) => waiting.get(at + 1).or(waiting.first()),
-                    None => waiting.first(),
-                };
-                if let Some(&tab) = next {
-                    self.select_tab(tab);
-                }
-            }
+            // `apply` turns it into a `SelectTab`.
+            Command::NextWaiting => {}
             Command::SetSplitRatio {
                 workspace,
                 path,
                 ratio,
             } => self.set_split_ratio(workspace, &path, ratio),
 
-            Command::NewTab => self.new_tab(&mut effects),
-            Command::OpenBrowser { url, split } => self.open_browser(&url, split, &mut effects),
+            Command::NewTab => self.new_tab(effects),
+            Command::OpenBrowser { url, split } => self.open_browser(&url, split, effects),
             Command::OpenBrowserBeside { beside, url } => {
-                self.open_browser_beside(beside, &url, &mut effects)
+                self.open_browser_beside(beside, &url, effects)
             }
-            Command::CloseTab(tab) => self.close_tab(tab, &mut effects),
-            Command::CloseActiveTab => self.close_tab(self.focused_tab().id, &mut effects),
+            Command::CloseTab(tab) => self.close_tab(tab, effects),
+            Command::CloseActiveTab => self.close_tab(self.focused_tab().id, effects),
             Command::SelectTab(tab) => self.select_tab(tab),
             Command::RenameTab(tab, name) => self.edit_tab(tab, |t| {
                 t.name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty())
@@ -1039,7 +1196,11 @@ impl Model {
             Command::SetTabPinned(tab, pinned) => self.set_pinned(tab, pinned),
             Command::SetTabIcon(tab, icon) => self.edit_tab(tab, |t| t.icon = icon),
             Command::SetTabColor(tab, color) => self.edit_tab(tab, |t| t.color = color),
-            Command::MoveTab { tab, to } => self.move_tab(tab, to),
+            Command::MoveTab { tab, to } => {
+                if !self.move_tab_between_windows(tab, to, effects) {
+                    self.move_tab(tab, to);
+                }
+            }
             Command::NextTab => self.cycle_tab(1),
             Command::PreviousTab => self.cycle_tab(-1),
 
@@ -1076,7 +1237,7 @@ impl Model {
             }
             Command::SessionExited(session) => {
                 if let Some(tab) = self.tab_for_session(session) {
-                    self.close_tab(tab, &mut effects);
+                    self.close_tab(tab, effects);
                 }
             }
             Command::SetBrowserUrl(browser, url) => {
@@ -1087,22 +1248,23 @@ impl Model {
             }
             Command::BrowserClosed(browser) => {
                 if let Some(tab) = self.tab_for_browser(browser) {
-                    self.close_tab(tab, &mut effects);
+                    self.close_tab(tab, effects);
                 }
             }
         }
-        // Closing or moving a group's last workspace can leave the group empty; dropping it here
-        // keeps every command from having to.
+    }
+
+    /// What every command leaves to be cleaned up. Closing or moving a group's last workspace
+    /// can leave the group empty; dropping it here keeps every command from having to. Likewise
+    /// a maximized pane ends whenever focus leaves it (a focus move, a split, a close, a tab
+    /// dragged elsewhere), so no command has to undo it.
+    fn tidy(&mut self) {
         self.drop_empty_groups();
-        // Likewise a maximized pane ends whenever focus leaves it (a focus move, a split, a
-        // close, a tab dragged elsewhere), so no command has to undo it.
         for ws in &mut self.workspaces {
             if ws.maximized != Some(ws.focused) {
                 ws.maximized = None;
             }
         }
-        debug_assert_eq!(self.check(), Ok(()));
-        effects
     }
 
     /// Takes the next value from the shared id counter. Every id kind draws from it, so no two
@@ -1125,10 +1287,11 @@ impl Model {
             .expect("the workspace is in the model")
     }
 
-    /// The workspace whose layout holds the pane, if the pane exists.
+    /// The workspace whose layout holds the pane, in any window, if the pane exists.
     pub fn workspace_of_pane(&self, pane: PaneId) -> Option<WorkspaceId> {
         self.workspaces
             .iter()
+            .chain(self.parked.values().flat_map(|p| &p.workspaces))
             .find(|w| w.layout.contains(pane))
             .map(|w| w.id)
     }

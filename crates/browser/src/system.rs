@@ -237,6 +237,21 @@ impl Browser {
         let _ = self.view.evaluate_script_with_callback(&script, callback);
     }
 
+    /// Moves the web view into another window. Windows only: WebView2's controller takes a new
+    /// parent; `wry` on macOS wants an `NSWindow`, not the view the app has.
+    pub fn reparent(&self, parent: isize) -> bool {
+        #[cfg(windows)]
+        {
+            use wry::WebViewExtWindows;
+            self.view.reparent(parent).is_ok()
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = parent;
+            false
+        }
+    }
+
     /// Clears the match `find` left selected.
     pub fn stop_find(&self) {
         let _ = self

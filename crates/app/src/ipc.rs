@@ -384,17 +384,27 @@ impl App {
         })
     }
 
-    /// Every workspace, pane and tab, as `list` reports them.
+    /// Every workspace, pane and tab in every window, as `list` reports them.
     fn tree(&self) -> Tree {
-        let active = self.model.active_workspace().id;
+        let focused = self.model.focused_window();
         let workspaces = self
             .model
-            .workspaces()
-            .iter()
-            .map(|ws| WorkspaceInfo {
+            .windows()
+            .into_iter()
+            .filter_map(|w| self.model.window(w))
+            .enumerate()
+            .flat_map(|(number, window)| {
+                window
+                    .workspaces
+                    .iter()
+                    .map(move |ws| (number as u64 + 1, window, ws))
+            })
+            .map(|(number, window, ws)| WorkspaceInfo {
                 id: ws.id.0,
                 name: ws.name.clone(),
-                active: ws.id == active,
+                active: ws.id == window.active,
+                window: number,
+                focused_window: window.id == focused,
                 panes: ws
                     .layout
                     .leaves()
@@ -426,6 +436,10 @@ impl App {
                 Ok(json!({ "subscribed": true }))
             }
             Call::NewWorkspace { name } => self.new_workspace(name),
+            Call::NewWindow => {
+                self.run(Command::NewWindow);
+                Ok(self.focused_ids())
+            }
             Call::SelectWorkspace { workspace } => {
                 self.workspace_command(Some(workspace), Command::SelectWorkspace)
             }

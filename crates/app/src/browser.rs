@@ -104,6 +104,9 @@ pub struct Panel {
     pub error: Option<String>,
     /// The page's zoom, 1.0 for 100% (one of [`PAGE_ZOOMS`]).
     pub zoom: f64,
+    /// The native window the page was opened in or moved to; a tab moved to another window
+    /// moves its page when this differs.
+    pub parent: Option<isize>,
 }
 
 /// The zoom steps `zoom_in` and `zoom_out` move a page through, as browsers have them.
@@ -142,6 +145,7 @@ impl Panel {
             bounds: None,
             error: None,
             zoom: 1.0,
+            parent: None,
         }
     }
 }

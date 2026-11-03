@@ -381,6 +381,19 @@ impl Browser {
         done(true);
     }
 
+    /// Moves the page's window into another of the app's windows, which then owns its popups.
+    pub fn reparent(&self, parent: isize) -> bool {
+        let mut shared = lock(&self.shared);
+        shared.parent = parent;
+        if let Some(host) = shared.browser.as_ref().and_then(|b| b.host()) {
+            platform::reparent(host.window_handle(), parent);
+            // Placed again from scratch in the new window.
+            shared.placed = None;
+            shared.apply_bounds();
+        }
+        true
+    }
+
     /// Ends `find`, clearing its selection and highlights.
     pub fn stop_find(&self) {
         if let Some(host) = self.with(|b| b.host()).flatten() {
@@ -835,7 +848,7 @@ mod platform {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DestroyWindow, SWP_ASYNCWINDOWPOS, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos, SetWindowTextW,
+        SWP_NOZORDER, SWP_SHOWWINDOW, SetParent, SetWindowPos, SetWindowTextW,
     };
 
     use super::Bounds;
@@ -875,6 +888,14 @@ mod platform {
     /// An app-side window handle (`HWND` as `isize`) as CEF's handle type.
     pub fn handle(window: isize) -> cef_window_handle_t {
         cef::sys::HWND(window as *mut _)
+    }
+
+    /// Makes `parent` (an app window's `HWND`) the page window's parent.
+    pub fn reparent(window: cef_window_handle_t, parent: isize) {
+        // SAFETY: both are live windows of this process; a stale handle just fails.
+        unsafe {
+            SetParent(window.0.cast(), parent as _);
+        }
     }
 
     /// Destroys a page's window. Call it on CEF's UI thread, which owns the window.

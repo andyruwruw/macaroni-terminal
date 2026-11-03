@@ -66,7 +66,7 @@ impl App {
     /// ring wins over it.
     pub(super) fn workspace(&self, size: Size) -> Element<'_, Message> {
         let c = self.chrome;
-        let ws = self.model.active_workspace();
+        let ws = self.shown_workspace();
         let area = pane_area(c, size);
 
         let panes = ws.shown_panes(area);
@@ -133,8 +133,8 @@ impl App {
         let template = &self.config.workspace_items.pane_badge;
         if !template.trim().is_empty() {
             let index = self
-                .model
-                .workspaces()
+                .shown()
+                .workspaces
                 .iter()
                 .position(|w| w.id == ws.id)
                 .unwrap_or(0);

@@ -218,6 +218,13 @@ impl Browser {
         each!(self, b => b.stop_find())
     }
 
+    /// Moves the page into another of the app's windows (`parent`, as for [`Browser::open`]),
+    /// keeping it running. Returns false where that isn't supported (macOS), and the caller
+    /// opens the page again there instead.
+    pub fn reparent(&self, parent: isize) -> bool {
+        each!(self, b => b.reparent(parent))
+    }
+
     /// The page's visible text, delivered to `done`, possibly on another thread. `done` gets an
     /// empty string when the page can't be read.
     pub fn read_text(&self, done: impl FnOnce(String) + Send + 'static) {

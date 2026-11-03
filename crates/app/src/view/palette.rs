@@ -222,7 +222,7 @@ impl App {
     fn scrollbacks(&self, everywhere: bool) -> Vec<Scrollback> {
         let active = self.model.active_workspace().id;
         let mut found = Vec::new();
-        for ws in self.model.workspaces() {
+        for ws in self.model.all_workspaces() {
             if !everywhere && ws.id != active {
                 continue;
             }
@@ -352,7 +352,8 @@ impl App {
                 icon: Icon::Forward,
             })
             .collect();
-        for ws in self.model.workspaces() {
+        // Every window's: going to one in another window brings that window up.
+        for ws in self.model.all_workspaces() {
             items.push(Item {
                 target: Target::Workspace(ws.id),
                 label: ws.name.clone(),
@@ -360,7 +361,7 @@ impl App {
                 icon: Icon::Terminal,
             });
         }
-        for ws in self.model.workspaces() {
+        for ws in self.model.all_workspaces() {
             for pane in ws.layout.leaves() {
                 let Some(pane) = self.model.pane(pane) else {
                     continue;
@@ -482,7 +483,7 @@ impl App {
         }
         let card = container(column![field, list].spacing(8))
             .padding(10)
-            .width((self.window_size.width - MARGIN).clamp(280.0, WIDTH))
+            .width((self.window_size().width - MARGIN).clamp(280.0, WIDTH))
             .style(move |_| container::Style {
                 background: Some(
                     if c.glass.is_some() {

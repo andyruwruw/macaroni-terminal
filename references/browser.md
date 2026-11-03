@@ -2,7 +2,7 @@
 
 ## Mental model
 
-A browser tab is `TabKind::Browser(BrowserId)` with its address in `Tab.url`. The page is a **native child view** of macaroni's window. iced never draws it; iced lays out an empty `BrowserHost` placeholder and the app moves the page over it.
+A browser tab is `TabKind::Browser(BrowserId)` with its address in `Tab.url`. The page is a **native child view** of the macaroni window its tab is in. iced never draws it; iced lays out an empty `BrowserHost` placeholder and the app moves the page over it.
 
 Two engines sit behind `macaroni_browser::Browser` (an enum over both), picked per page by `[browser] engine` when the page starts:
 
@@ -18,6 +18,8 @@ every update ──► sync_browsers():
 engine callbacks ──► handler/shortcut closures ──► (BrowserId, BrowserMessage) channel ──► Message::Browser
 Effect::CloseBrowser(id) ──► drop Panel ──► Browser::drop closes it
 ```
+
+- **Windows.** `place_browsers` finds each page's window (`model.window_of_tab`), its native handle and scale in `App.wins`, and waits while the handle isn't known yet. Menus and dialogs only cover pages in the focused window. `Panel.parent` remembers the window a page lives in; when its tab moves to another window, `Browser::reparent` moves it (WebView2's controller takes a new parent; CEF's window gets `SetParent`, and its popups' owner changes). Where that isn't supported (macOS: `wry` wants an `NSWindow`), the page is dropped and opens again there at its tab's address. The page's bounds are kept across the move: the new window has usually reported them already and only reports changes.
 
 - **Lazy.** A browser starts the first time its tab is shown, at its real size. `Browser::open` returns an error (shown in the tab) if the engine can't start.
 - **Threads.** System pages are created, moved and called on the main thread, and their handlers run there (`Rc`, no locks). CEF runs its own UI thread (`multi_threaded_message_loop`); its placement uses `SetWindowPos` with `SWP_ASYNCWINDOWPOS` so the iced thread never waits on it, and state is shared through `Shared` behind a mutex. Both skip redundant placements and hide in place (keeping the size).

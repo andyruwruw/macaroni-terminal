@@ -65,7 +65,7 @@ impl App {
         let Some(menu) = self.menu else {
             return Vec::new();
         };
-        let window = self.window_size;
+        let window = self.window_size();
         let main = self.menu_entries(menu.target, MenuPage::Main);
         let height = c.s.menus.padding * 2.0 + main.iter().map(|e| e.height(c)).sum::<f32>();
         // Slid left to stay in the window, but never past its left margin. Vertically it flips
@@ -158,9 +158,28 @@ impl App {
                     }
                     None => self.block_room(|w| w.id == id),
                 };
-                move_entries(up, down, |shift| {
+                let mut entries = move_entries(up, down, |shift| {
                     Message::Workspace(id, WorkspaceAction::Shift(shift))
-                })
+                });
+                entries.push(MenuEntry::Separator);
+                // Alone in its window, a new window would change nothing.
+                entries.push(MenuEntry::item(
+                    Icon::Plus,
+                    "To New Window",
+                    (self.model.workspaces().len() > 1)
+                        .then_some(Message::Workspace(id, WorkspaceAction::ToWindow(None))),
+                ));
+                for window in self.other_windows() {
+                    entries.push(MenuEntry::item(
+                        Icon::Forward,
+                        format!("To {}", self.window_label(window)),
+                        Some(Message::Workspace(
+                            id,
+                            WorkspaceAction::ToWindow(Some(window)),
+                        )),
+                    ));
+                }
+                entries
             }
             MenuPage::Icon => vec![
                 icon_grid(
@@ -614,11 +633,17 @@ impl App {
         let split = |direction| {
             pane.and_then(|pane| move_to(MoveTo::SplitPane { pane, direction }, !alone))
         };
+        let alone_in_window = alone && only_pane && self.model.workspaces().len() == 1;
         let mut entries = vec![
             MenuEntry::item(
                 Icon::Plus,
                 "New workspace",
                 move_to(MoveTo::NewWorkspace, !(alone && only_pane)),
+            ),
+            MenuEntry::item(
+                Icon::Plus,
+                "New window",
+                move_to(MoveTo::NewWindow, !alone_in_window),
             ),
             MenuEntry::item(Icon::Forward, "Split right", split(Direction::Right)),
             MenuEntry::item(Icon::Down, "Split down", split(Direction::Down)),
@@ -639,7 +664,50 @@ impl App {
                 move_to(MoveTo::Workspace(ws.id), true),
             ));
         }
+        // Then other windows' workspaces, under each window's name.
+        for window in self.other_windows() {
+            let Some(view) = self.model.window(window) else {
+                continue;
+            };
+            entries.push(MenuEntry::Header(self.window_label(window)));
+            for ws in view.workspaces {
+                entries.push(MenuEntry::item(
+                    Icon::Terminal,
+                    ws.name.clone(),
+                    move_to(MoveTo::Workspace(ws.id), true),
+                ));
+            }
+        }
         entries
+    }
+
+    /// Every window but the focused one, in the order they opened.
+    fn other_windows(&self) -> Vec<macaroni_core::WindowId> {
+        let focused = self.model.focused_window();
+        self.model
+            .windows()
+            .into_iter()
+            .filter(|w| *w != focused)
+            .collect()
+    }
+
+    /// How menus name a window: "Window N" (counting in the order they opened) and its
+    /// active workspace.
+    fn window_label(&self, window: macaroni_core::WindowId) -> String {
+        let number = self
+            .model
+            .windows()
+            .iter()
+            .position(|w| *w == window)
+            .map_or(0, |i| i + 1);
+        match self
+            .model
+            .window(window)
+            .and_then(|w| self.model.workspace(w.active))
+        {
+            Some(ws) => format!("Window {number} ({})", ws.name),
+            None => format!("Window {number}"),
+        }
     }
 
     /// One of a menu's lists; `open` is the submenu showing, whose item stays highlighted.
@@ -670,7 +738,7 @@ impl App {
                         item
                     }
                 }
-                MenuEntry::Separator => menu_separator(c, self.scale),
+                MenuEntry::Separator => menu_separator(c, self.scale()),
                 MenuEntry::Header(label) => menu_header(c, label),
                 MenuEntry::Grid(cells) => menu_grid(c, cells),
                 MenuEntry::Palette(cells) => menu_palette(c, cells),

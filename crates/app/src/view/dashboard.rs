@@ -65,11 +65,11 @@ impl App {
         }
     }
 
-    /// Every tab with an agent, needing input first, then working, then idle; within each, in
-    /// sidebar order.
+    /// Every tab with an agent, in every window, needing input first, then working, then
+    /// idle; within each, in window then sidebar order.
     fn dashboard_agents(&self) -> Vec<TabId> {
         let mut agents: Vec<(u8, usize, TabId)> = Vec::new();
-        for (at, ws) in self.model.workspaces().iter().enumerate() {
+        for (at, ws) in self.model.all_workspaces().into_iter().enumerate() {
             for pane in ws.layout.leaves() {
                 for &tab in self
                     .model
@@ -128,8 +128,8 @@ impl App {
         };
         let card = container(column![header, body].spacing(14))
             .padding(18)
-            .width((self.window_size.width - MARGIN).clamp(300.0, WIDTH))
-            .max_height((self.window_size.height - TOP * 2.0).max(200.0))
+            .width((self.window_size().width - MARGIN).clamp(300.0, WIDTH))
+            .max_height((self.window_size().height - TOP * 2.0).max(200.0))
             .style(move |_| container::Style {
                 background: Some(
                     if c.glass.is_some() {

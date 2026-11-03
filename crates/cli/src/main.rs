@@ -50,8 +50,10 @@ enum Side {
 /// else the app's focused tab.
 #[derive(Subcommand)]
 enum Cmd {
-    /// Show workspaces, panes and tabs.
+    /// Show workspaces, panes and tabs (every window's).
     List,
+    /// Open a window with a new workspace.
+    NewWindow,
     /// Create a workspace (and switch to it).
     NewWorkspace {
         /// Name for the new workspace.
@@ -283,6 +285,7 @@ fn browser_call(cmd: &BrowserCmd) -> Call {
 fn call(cmd: &Cmd) -> Call {
     match cmd {
         Cmd::List => Call::List,
+        Cmd::NewWindow => Call::NewWindow,
         Cmd::NewWorkspace { name } => Call::NewWorkspace { name: name.clone() },
         Cmd::SelectWorkspace { workspace } => Call::SelectWorkspace {
             workspace: *workspace,
@@ -328,9 +331,17 @@ fn call(cmd: &Cmd) -> Call {
 }
 
 /// Prints `list`'s result as an indented outline: `*` marks the active workspace, `>` each
-/// pane's selected tab, with attention and agent state in brackets.
+/// pane's selected tab, with attention and agent state in brackets. With more than one window,
+/// each window's workspaces come under a `window N` line, `(focused)` on the focused one.
 fn print_tree(tree: &Tree) {
+    let windows = tree.workspaces.iter().map(|w| w.window).max().unwrap_or(1);
+    let mut window = 0;
     for ws in &tree.workspaces {
+        if windows > 1 && ws.window != window {
+            window = ws.window;
+            let focus = if ws.focused_window { " (focused)" } else { "" };
+            println!("window {window}{focus}");
+        }
         let marker = if ws.active { "*" } else { " " };
         println!("{marker} workspace {}  {}", ws.id, ws.name);
         for pane in &ws.panes {
@@ -430,6 +441,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         }
         // Commands that create or show a tab print its id, so scripts can capture it.
         Cmd::NewWorkspace { .. }
+        | Cmd::NewWindow
         | Cmd::Split { .. }
         | Cmd::NewTab { .. }
         | Cmd::Focus { .. }

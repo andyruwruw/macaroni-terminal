@@ -227,6 +227,10 @@ impl App {
             WorkspaceAction::Combine(from) => {
                 self.apply(Command::CombineWorkspaces { into: ws, from })
             }
+            WorkspaceAction::ToWindow(window) => self.apply(Command::MoveWorkspaceToWindow {
+                workspace: ws,
+                window,
+            }),
         }
     }
 

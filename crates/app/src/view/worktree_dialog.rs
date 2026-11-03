@@ -202,7 +202,7 @@ impl App {
         );
         let card = container(content)
             .padding(20)
-            .width((self.window_size.width - DIALOG_MARGIN).clamp(280.0, DIALOG_WIDTH))
+            .width((self.window_size().width - DIALOG_MARGIN).clamp(280.0, DIALOG_WIDTH))
             .style(move |_| container::Style {
                 background: Some(
                     if c.glass.is_some() {

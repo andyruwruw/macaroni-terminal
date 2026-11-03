@@ -456,11 +456,10 @@ fn spec_and_restore_round_trip() {
     });
     model.apply(Command::SelectWorkspaceIndex(0));
 
-    let (spec, active, tabs) = model.spec();
-    let (restored, effects, new_tabs) = Model::restore(spec.clone(), active);
+    let (spec, tabs) = model.spec();
+    let (restored, effects, new_tabs) = Model::restore(spec.clone());
     assert_eq!(restored.check(), Ok(()));
     assert_eq!(restored.spec().0, spec);
-    assert_eq!(restored.spec().1, active);
     assert_eq!(new_tabs.len(), tabs.len());
     assert_eq!(
         spawned(&effects).len(),
@@ -492,14 +491,157 @@ fn restore_clamps_bad_input() {
             }),
         },
         focused: 42,
+        window: 3,
     }];
-    let (model, _, tabs) = Model::restore(spec, 7);
+    let (model, _, tabs) = Model::restore(Spec {
+        workspaces: spec,
+        windows: vec![7],
+        focused: 5,
+    });
     assert_eq!(model.check(), Ok(()));
     assert_eq!(tabs.len(), 3);
     assert_eq!(model.active_workspace().name, "Workspace 1");
-    let (empty, effects, tabs) = Model::restore(Vec::new(), 0);
+    assert_eq!(model.windows().len(), 1);
+    let (empty, effects, tabs) = Model::restore(Spec {
+        workspaces: Vec::new(),
+        windows: Vec::new(),
+        focused: 0,
+    });
     assert_eq!(empty.check(), Ok(()));
     assert_eq!((spawned(&effects).len(), tabs.len()), (1, 1));
+}
+
+/// The windows `effects` opens, closes and focuses, in order.
+fn window_effects(effects: &[Effect]) -> Vec<Effect> {
+    effects
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                Effect::OpenWindow(_) | Effect::CloseWindow(_) | Effect::FocusWindow(_)
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn windows_open_with_their_own_sidebar_and_close() {
+    let (mut model, _) = Model::new();
+    let first = model.focused_window();
+    let first_ws = model.active_workspace().id;
+    let effects = model.apply(Command::NewWindow);
+    let second = model.focused_window();
+    assert_ne!(first, second);
+    assert_eq!(window_effects(&effects), [Effect::OpenWindow(second)]);
+    assert_eq!(spawned(&effects).len(), 1);
+    assert_eq!(model.workspaces().len(), 1);
+    assert_ne!(model.active_workspace().id, first_ws);
+    assert_eq!(model.window(first).unwrap().active, first_ws);
+    assert_eq!(model.windows(), [first, second]);
+
+    // A command naming the other window's workspace runs there and comes back.
+    model.apply(Command::RenameWorkspace(first_ws, "api".into()));
+    assert_eq!(model.focused_window(), second);
+    assert_eq!(model.workspace(first_ws).unwrap().name, "api");
+    // Selecting it moves focus there, and says so.
+    let effects = model.apply(Command::SelectWorkspace(first_ws));
+    assert_eq!(model.focused_window(), first);
+    assert_eq!(window_effects(&effects), [Effect::FocusWindow(first)]);
+
+    // Closing a background window keeps focus where it is.
+    let effects = model.apply(Command::CloseWindow(second));
+    assert_eq!(model.focused_window(), first);
+    assert_eq!(window_effects(&effects), [Effect::CloseWindow(second)]);
+    assert_eq!(killed(&effects).len(), 1);
+    // The last window quits.
+    let effects = model.apply(Command::CloseWindow(first));
+    assert!(effects.contains(&Effect::Quit));
+}
+
+#[test]
+fn closing_a_windows_last_workspace_closes_the_window() {
+    let (mut model, _) = Model::new();
+    let first = model.focused_window();
+    model.apply(Command::NewWindow);
+    let second = model.focused_window();
+    let effects = model.apply(Command::CloseActiveWorkspace);
+    assert_eq!(
+        window_effects(&effects),
+        [Effect::CloseWindow(second), Effect::FocusWindow(first)]
+    );
+    assert_eq!(model.windows(), [first]);
+}
+
+#[test]
+fn workspaces_and_tabs_move_between_windows() {
+    let (mut model, _) = Model::new();
+    let first = model.focused_window();
+    model.apply(Command::NewWorkspace);
+    let moving = model.active_workspace().id;
+    // Into a new window: it leaves the first window and is active in the new one.
+    let effects = model.apply(Command::MoveWorkspaceToWindow {
+        workspace: moving,
+        window: None,
+    });
+    let second = model.focused_window();
+    assert_eq!(window_effects(&effects), [Effect::OpenWindow(second)]);
+    assert_eq!(model.active_workspace().id, moving);
+    assert_eq!(model.window(first).unwrap().workspaces.len(), 1);
+    // Alone in its window, a new window would change nothing.
+    let effects = model.apply(Command::MoveWorkspaceToWindow {
+        workspace: moving,
+        window: None,
+    });
+    assert!(effects.is_empty());
+
+    // A tab to the first window's workspace: it follows, and its own window stays.
+    model.apply(Command::NewTab);
+    let tab = model.focused_tab().id;
+    let target = model.window(first).unwrap().active;
+    let effects = model.apply(Command::MoveTab {
+        tab,
+        to: MoveTo::Workspace(target),
+    });
+    assert_eq!(window_effects(&effects), [Effect::FocusWindow(first)]);
+    assert_eq!(model.focused_tab().id, tab);
+    assert_eq!(model.windows(), [first, second]);
+
+    // The second window's last workspace back to the first: the second window closes.
+    let effects = model.apply(Command::MoveWorkspaceToWindow {
+        workspace: moving,
+        window: Some(first),
+    });
+    assert_eq!(window_effects(&effects), [Effect::CloseWindow(second)]);
+    assert_eq!(model.windows(), [first]);
+    assert_eq!(model.workspaces().len(), 2);
+
+    // A tab out into a new window.
+    let effects = model.apply(Command::MoveTab {
+        tab,
+        to: MoveTo::NewWindow,
+    });
+    assert_eq!(window_effects(&effects).len(), 1);
+    assert_eq!(model.windows().len(), 2);
+    assert_eq!(model.focused_tab().id, tab);
+}
+
+#[test]
+fn windows_survive_spec_and_restore() {
+    let (mut model, _) = Model::new();
+    model.apply(Command::NewWorkspace);
+    model.apply(Command::NewWindow);
+    model.apply(Command::NewWorkspace);
+    model.apply(Command::NewWorkspace);
+    model.apply(Command::SelectWorkspaceIndex(1));
+    let (spec, tabs) = model.spec();
+    assert_eq!(spec.windows, [1, 3]);
+    assert_eq!(spec.focused, 1);
+    let (restored, _, new_tabs) = Model::restore(spec.clone());
+    assert_eq!(restored.check(), Ok(()));
+    assert_eq!(restored.spec().0, spec);
+    assert_eq!(new_tabs.len(), tabs.len());
+    assert_eq!(restored.windows().len(), 2);
 }
 
 #[test]
@@ -948,7 +1090,7 @@ const DIRECTIONS: [Direction; 4] = [
 
 /// A random command that refers only to things that currently exist.
 ///
-/// Arms are weighted by how many of the 28 buckets map to them; the unlisted buckets (and 16
+/// Arms are weighted by how many of the 29 buckets map to them; the unlisted buckets (and 16
 /// and 26 when there are no sessions) end a random tab's session or browser, so tabs churn
 /// steadily. Ratios range over -1..2 to exercise clamping, and some picks (moves, placements)
 /// are pointless, which covers the ignore paths.
@@ -964,7 +1106,7 @@ fn random_command(rng: &mut Rng, model: &Model) -> Command {
         .flat_map(|p| model.pane(*p).unwrap().tabs.clone())
         .collect();
     let sessions: Vec<_> = model.sessions().collect();
-    match rng.below(28) {
+    match rng.below(29) {
         25 => match rng.below(3) {
             0 => Command::ToggleMaximize,
             1 => Command::EqualizePanes,
@@ -980,6 +1122,19 @@ fn random_command(rng: &mut Rng, model: &Model) -> Command {
         },
         17 => Command::ClearAttention(rng.pick(&tabs)),
         26 if !sessions.is_empty() => Command::SetTabBadge(rng.pick(&sessions), Some("!".into())),
+        28 => match rng.below(5) {
+            0 => Command::NewWindow,
+            1 => Command::CloseWindow(rng.pick(&model.windows())),
+            2 => Command::FocusWindow(rng.pick(&model.windows())),
+            3 => Command::MoveWorkspaceToWindow {
+                workspace: rng.pick(&workspaces),
+                window: (rng.below(2) == 0).then(|| rng.pick(&model.windows())),
+            },
+            _ => Command::MoveTab {
+                tab: rng.pick(&tabs),
+                to: MoveTo::NewWindow,
+            },
+        },
         0 => Command::NewWorkspace,
         1 => Command::CloseWorkspace(rng.pick(&workspaces)),
         2 => Command::SelectWorkspace(rng.pick(&workspaces)),

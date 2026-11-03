@@ -7,6 +7,7 @@
 use iced::Task;
 use iced::keyboard::{Key, Modifiers, key};
 use macaroni_config::Config;
+use macaroni_core::Command;
 
 use crate::keymap::Action;
 use crate::message::Message;
@@ -72,6 +73,21 @@ impl App {
                 Task::none()
             }
             Action::ReopenTab => self.reopen_tab(),
+            Action::CloseWindow => {
+                let window = self.model.focused_window();
+                // The last window quits the same way its close button does.
+                match self.os_window(window) {
+                    Some(id) if self.wins.len() == 1 => self.close_requested(id),
+                    _ => self.apply(Command::CloseWindow(window)),
+                }
+            }
+            Action::WorkspaceToNewWindow => {
+                let workspace = self.model.active_workspace().id;
+                self.apply(Command::MoveWorkspaceToWindow {
+                    workspace,
+                    window: None,
+                })
+            }
             Action::SearchScrollback(everywhere) => {
                 self.palette_update(crate::view::palette::PaletteMessage::OpenSearch(everywhere))
             }

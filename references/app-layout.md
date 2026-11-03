@@ -2,7 +2,7 @@
 
 ## Mental model
 
-- `main.rs`: `App` (the `Model`, `running` and `pending` sessions, config, `chrome`, transient UI state), `App::update`, the flat dispatcher `App::handle`, `App::subscription`.
+- `main.rs`: `App` (the `Model`, `running` and `pending` sessions, config, `chrome`, transient UI state, `wins`), `App::update`, the flat dispatcher `App::handle`, `App::subscription`. It's an iced `daemon`, so it can have any number of windows; it only exits through `App::exit`.
 - `message.rs`: `Message`. `state.rs`: transient UI types (`Drag`, `ItemDrag`, `Dragged`, `DropTarget`, `Menu`, `Submenu`, `MenuTarget`, `MenuPage`, `Renaming`, `SidebarHover`).
 - `update/`: one handler file per area (`actions`, `browser`, `config`, `dividers`, `effects`, `items`, `menus`, `rename`, `search`, `shortcuts`, `sidebar`, `terminals`, `window`).
 - `view.rs` + `view/`: `title_bar`, `sidebar`, `tabs`, `panes`, `menus`, `drag`, `widgets`, `icon_picker`, `folder_dialog`, `settings/`.
@@ -20,6 +20,16 @@ TerminalView ──► ViewEvent ──► Message::View(id, ev) ──► App::
 - Sessions start lazily at their real grid size, never a placeholder.
 - View modules import shared enums (`Dragged`, `MenuPage`, `ColorTarget`, ...) through the crate root; those `use` lines in `main.rs` must stay even though `main.rs` doesn't use them.
 
+## Windows (`update/window.rs`)
+
+- `App.wins` maps each iced `window::Id` to a `Win`: the model's `WindowId` it shows, its size, position, maximized flag, native handle (the parent of its pages) and scale. A window is added when it's asked to open (`open_window`), before it has.
+- **"The window" depends on where you are.** `App::view(id)` sets `App.viewing`, and `App::win`, `window_size`, `scale`, `maximized`, `shown` (the window's `WindowView`) and `shown_workspace` answer for the window being drawn; `update` clears `viewing`, so in handlers they answer for the focused window. View code reads `shown()` / `shown_workspace()`, never `model.workspaces()` / `active_workspace()`, or every window would draw the focused one's sidebar. Lists that span windows (palette, dashboard, scrollback search, IPC `list`) use `model.all_workspaces()`.
+- Menus, dialogs, drags and the palette only draw in the focused window (`drawing_focused`); OS focus moving to another window dismisses them and applies `Command::FocusWindow`. Drag moves carry their window id and only the focused window's count.
+- The model's `OpenWindow`, `CloseWindow` and `FocusWindow` effects open, close and raise OS windows (`run_effects`). A window's close button closes it and everything in it (`Command::CloseWindow`), except the last, which saves the session and quits. Startup opens one window per model window where the session left it (the focused one last, so it's in front).
+- Session: `Saved.windows` (`SavedWindow`: active workspace index, position, size, maximized) and `focused_window`; workspaces carry their window index; a file from before windows is one window. `session::capture` fills the active workspaces and `App::saved_windows` the rest.
+- Dragging tabs and workspaces between windows: see Dragging.
+- Shortcuts: `new_window`, `close_window`, `move_to_new_window`; the workspace menu's Move Workspace has To New Window and To Window N, and the tab menu's Move has New window and other windows' workspaces (`window_label`).
+
 ## How `App::view` is built (`view.rs`)
 
 One `stack`, in covering order: `window()`, `resize_edges` (custom frame, not maximized), `drop_marker`, `drag_ghost`, `menu_layers`, icon picker, folder dialog, worktree dialog, environment dialog, agent dashboard, command palette, settings dialog. Pane letters are drawn by `App::pane` itself, over each pane's card. Overlays are `pin`ned layers; modals put a full-window click catcher under themselves.
@@ -32,7 +42,7 @@ One `stack`, in covering order: `window()`, `resize_edges` (custom frame, not ma
 
 - **`workspace_origin(c)`**: the pane area's top-left in window coordinates. Divider dragging and drop targeting subtract it from cursor positions. Banners aren't counted.
 - **`pane_area(c, size)`**: half a pane gap bigger on every side (minus `pane_overlap`); each pane is pinned `gap / 2` inside its share, so gaps show only between panes and the outer panes sit on the area's edges.
-- **`drop_target` has no `responsive` size**: it rebuilds the area as `App.window_size - workspace_origin - panes.margin`. Keep it in sync with `workspace_area`'s padding.
+- **`drop_target` has no `responsive` size**: it rebuilds the area as `App::window_size() - workspace_origin - panes.margin`. Keep it in sync with `workspace_area`'s padding.
 - **Pane vertical layout**: the card starts `tabs.height + tabs.gap` below the pane top. The strip is `strip_scrollbar_room(c)` taller than the tabs (the scrollbar sits under them), so the column spacing is `tabs.gap - strip_scrollbar_room`. Drop zones and browser placement rely on this.
 - **Shared borders (solid only)**: meeting borders become one line.
   - `pane_overlap`: with `panes.gap` 0, each pane is pinned a border wider and taller, over its right and lower neighbours.
@@ -91,6 +101,7 @@ One `stack`, in covering order: `window()`, `resize_edges` (custom frame, not ma
 
 - **Dividers** (`update/dividers.rs`): handles fill the gap at each divider. `drag_events` runs only while `App.drag` is set and turns moves into `SetSplitRatio` (cursor minus `workspace_origin`, relative to `divider.area`; the model clamps).
 - **Tabs and workspaces** (`update/items.rs`, `view/drag.rs`): `TabPress`/`WorkspacePress` are `mouse_area`s (a press both selects and arms `App.item_drag`); the drag starts after `TAB_DRAG_THRESHOLD`. `drop_target` picks a strip slot (`hovered_tab` + `hover_zone`), a pane body (outer `SPLIT_ZONE` splits), a workspace edge (`edge_drop`), or a sidebar entry (`sidebar_hover`, opening the workspace after `WORKSPACE_HOVER_OPEN`). Workspaces use `workspace_drop`/`workspace_line`, tried on a cloned model so no-ops show nothing.
+- **Between windows.** The OS keeps sending the cursor to the window a drag started in (the focused one), in its coordinates, wherever it goes. `App::over` turns each move into an `Over` on the drag: `Here`, `Window(id, point in that window)` from the windows' screen positions (`Win.position`, asked for when a window opens and kept by `Moved`), or `Outside(screen point)`. Over another window, `drop_target` borrows `App.viewing` to work out the target from that window's geometry (`pane_drop`); nothing there reports hover, so its sidebar means its active workspace and its strips their end. `DropTarget::Edge` carries the workspace so the split lands in that window. That window draws the marker (`drop_marker` only draws in the window the cursor is over), and every window's pages step aside while dragging. Outside every window a tab drops as `MoveTo::NewWindow` and a workspace as `MoveWorkspaceToWindow { window: None }`, with `App.next_window_at` placing the new window under the cursor (`DROP_GRAB`); a workspace over another window moves into its sidebar. Window positions are logical, so monitors with different scales line up only roughly.
 - `Pointer::on_zone` reports `Before`/`After` and `GapBefore`/`GapAfter`. Zone messages carry their item because one move can publish the old exit and new entry in either order; during a drag exits are ignored so gaps keep a target.
 - Insertion lines are `GapLine`s, which paint outside their own bounds. Trap: don't use `pin` at a negative offset instead; `Pin` passes its bounds as the viewport and children outside are culled.
 

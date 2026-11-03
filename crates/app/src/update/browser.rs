@@ -16,51 +16,75 @@ use crate::{App, open_url};
 
 impl App {
     /// Moves every browser over its pane or hides it, starts browsers shown for the first time,
-    /// and moves keyboard focus into a page when its tab becomes the focused one. Does nothing
-    /// until the main window's native handle is known.
+    /// and moves keyboard focus into a page when its tab becomes the focused one.
     ///
     /// Side effects: moves, shows, hides and focuses native windows, and may start a web engine.
     pub(crate) fn sync_browsers(&mut self) {
-        let Some(parent) = self.parent else {
-            return;
-        };
-        self.place_browsers(parent);
+        self.place_browsers();
         self.follow_focused_tab();
     }
 
-    /// Puts each browser over its pane, or hides it while its tab is off screen or covered.
-    /// A browser whose start failed isn't retried.
-    fn place_browsers(&mut self, parent: isize) {
+    /// Puts each browser over its pane in its tab's window, or hides it while its tab is off
+    /// screen or covered. A page whose tab moved to another window moves with it (or, where it
+    /// can't be moved, opens again there). A browser whose start failed isn't retried; one in
+    /// a window whose native handle isn't known yet waits.
+    fn place_browsers(&mut self) {
         let ids: Vec<BrowserId> = self.browsers.keys().copied().collect();
         let menu = self.menu_bounds();
         let dragging = self
             .item_drag
             .is_some_and(|d| d.dragging && d.tab().is_some());
+        let focused_window = self.model.focused_window();
         for id in ids {
-            let visible = self
-                .model
-                .tab_for_browser(id)
-                .is_some_and(|tab| self.model.tab_visible(tab));
+            let tab = self.model.tab_for_browser(id);
+            let window = tab.and_then(|t| self.model.window_of_tab(t));
+            let Some(win) = window
+                .and_then(|w| self.os_window(w))
+                .and_then(|w| self.wins.get(&w))
+                .copied()
+            else {
+                continue;
+            };
+            let Some(parent) = win.parent else {
+                continue;
+            };
+            let visible = tab.is_some_and(|tab| self.model.tab_visible(tab));
+            // Menus and dialogs only open in the focused window.
+            let here = window == Some(focused_window);
+            if let Some(panel) = self.browsers.get_mut(&id)
+                && panel.parent.is_some_and(|p| p != parent)
+                && let Some(b) = &panel.browser
+            {
+                if !b.reparent(parent) {
+                    // Opens again in the new window, at its tab's address.
+                    panel.browser = None;
+                }
+                // The bounds stay: the new window's view may well have reported them already
+                // (its handle arrives after it first draws), and it only reports changes.
+                panel.parent = Some(parent);
+            }
             let panel = &self.browsers[&id];
             // Nothing iced draws can cover a page, so pages under the menu or the settings
             // dialog step aside.
             // A dragged tab's drop markers would be hidden under pages too.
+            // A drag can end over any window, so its pages all step aside.
             let covered = |b: &Rectangle| {
                 dragging
-                    || self.settings.is_some()
-                    || self.icon_picker.is_some()
-                    || self.folder_dialog.is_some()
-                    || self.command_palette.is_some()
-                    || self.worktree_dialog.is_some()
-                    || self.dashboard
-                    || self.pane_letters
-                    || self.env_dialog.is_some()
-                    || menu.iter().any(|m| m.intersects(b))
+                    || here && self.settings.is_some()
+                    || here
+                        && (self.icon_picker.is_some()
+                            || self.folder_dialog.is_some()
+                            || self.command_palette.is_some()
+                            || self.worktree_dialog.is_some()
+                            || self.dashboard
+                            || self.pane_letters
+                            || self.env_dialog.is_some()
+                            || menu.iter().any(|m| m.intersects(b)))
             };
             let want = panel
                 .bounds
                 .filter(|b| visible && !covered(b))
-                .map(|b| browser::physical(b, self.scale));
+                .map(|b| browser::physical(b, win.scale));
             // A page hidden while it holds the keyboard hands it back first: WebView2 takes
             // focus back into a page hidden with it, and the page would pull its tab forward.
             if want.is_none() && self.page_focus == Some(id) {
@@ -69,6 +93,9 @@ impl App {
             let panel = &self.browsers[&id];
             if panel.browser.is_none() && panel.error.is_none() && want.is_some() {
                 self.start_browser(id, parent, want);
+                if let Some(panel) = self.browsers.get_mut(&id) {
+                    panel.parent = Some(parent);
+                }
             } else if let Some(b) = &panel.browser {
                 b.place(want);
             }

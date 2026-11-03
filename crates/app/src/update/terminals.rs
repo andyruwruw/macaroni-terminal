@@ -605,7 +605,8 @@ impl App {
             return Task::none();
         }
         let show = self.apply(Command::SelectTab(tab));
-        let raise = match self.window {
+        // Selecting it focused its window in the model.
+        let raise = match self.os_window(self.model.focused_window()) {
             Some(id) => Task::batch([
                 iced::window::minimize(id, false),
                 iced::window::gain_focus(id),

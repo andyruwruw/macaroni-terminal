@@ -77,6 +77,8 @@ pub(crate) enum WorkspaceAction {
     Group(Option<GroupId>),
     /// Moves every pane of this other workspace into the workspace, which it then leaves.
     Combine(WorkspaceId),
+    /// Moves the workspace to another window, or (`None`) a new one.
+    ToWindow(Option<macaroni_core::WindowId>),
 }
 
 /// An item on a sidebar group header's right-click menu.
@@ -139,14 +141,14 @@ pub(crate) enum Message {
     Action(Action),
     /// The config directory changed on disk: reload the file and apply it, or show why not.
     ConfigChanged,
-    /// The window gained (`true`) or lost keyboard focus.
-    WindowFocused(bool),
+    /// A window gained (`true`) or lost keyboard focus.
+    WindowFocused(window::Id, bool),
     /// The error banner's close button: hides the config errors until the next reload.
     DismissConfigErrors,
     /// A divider between panes was pressed: follow the cursor until release.
     DragStart(WorkspaceId, Divider),
     /// The cursor moved while a divider is dragged (window coordinates).
-    DragMove(Point),
+    DragMove(window::Id, Point),
     /// The left button was released while a divider is dragged.
     DragEnd,
     /// The sidebar's right edge was pressed, to drag its width.
@@ -189,7 +191,7 @@ pub(crate) enum Message {
     /// A sidebar workspace was pressed: selects it and arms a drag.
     WorkspacePress(WorkspaceId),
     /// The cursor moved while a tab or workspace is pressed (window coordinates).
-    ItemDragMove(Point),
+    ItemDragMove(window::Id, Point),
     /// The left button was released while a tab or workspace is pressed: drops it if it was
     /// being dragged.
     ItemDragEnd,
@@ -258,8 +260,9 @@ pub(crate) enum Message {
     /// The control socket: listening started or failed, a connection opened or closed, or a
     /// request (valid or not) arrived.
     Ipc(ipc::IpcMessage),
-    /// The window's close button (or Alt+F4): save the session, close the browsers, quit.
-    CloseRequested,
+    /// A window's close button (or Alt+F4): closes that window and what's in it, or, for the
+    /// last window, saves the session, closes the browsers and quits.
+    CloseRequested(window::Id),
     /// The new-tab menu's shell at an index into `App.shells` was picked for a pane.
     NewTabWith(PaneId, usize),
     /// The new-tab menu's SSH profile at an index into `[[ssh]]` was picked for a pane.
@@ -294,19 +297,21 @@ pub(crate) enum Message {
     VsCodeInstalled(Result<bool, String>),
     /// Downloading (`Ok(true)`) or removing (`Ok(false)`) Chromium finished.
     ChromiumInstalled(Result<bool, String>),
-    /// The main window opened: remember it and ask for its native handle and scale.
+    /// A window opened: ask for its native handle and scale.
     WindowOpened(window::Id),
-    /// A custom title bar control, or a press on a resize border.
+    /// A custom title bar control, or a press on a resize border, in the focused window.
     Window(WindowOp),
-    /// The window was resized (logical pixels): remember the size and ask if it's maximized.
-    WindowResized(Size),
-    /// Whether the window is maximized, answered after a resize.
-    Maximized(bool),
-    /// The main window's native handle (`HWND`), the parent for browser windows; `None` where
+    /// A window was resized (logical pixels): remember the size and ask if it's maximized.
+    WindowResized(window::Id, Size),
+    /// A window moved (its top-left corner in logical pixels), for the session.
+    WindowMoved(window::Id, Point),
+    /// Whether a window is maximized, answered after a resize.
+    Maximized(window::Id, bool),
+    /// A window's native handle (`HWND`), the parent for its browser windows; `None` where
     /// there isn't one.
-    WindowHandle(Option<isize>),
-    /// The window's scale factor, at open and whenever it changes.
-    Rescaled(f32),
+    WindowHandle(window::Id, Option<isize>),
+    /// A window's scale factor, at open and whenever it changes.
+    Rescaled(window::Id, f32),
     /// A click in macaroni's own UI while a page had keyboard focus.
     ReclaimFocus,
     /// A key nothing else handled while a browser tab is focused: maybe a shortcut.
@@ -328,6 +333,8 @@ pub(crate) enum WindowOp {
     Minimize,
     /// Resizes from an edge or corner with the cursor.
     Resize(window::Direction),
+    /// The close button: as the system's close does ([`Message::CloseRequested`]).
+    Close,
 }
 
 /// A browser address bar's buttons.

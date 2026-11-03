@@ -122,6 +122,21 @@ pub(crate) struct ItemDrag {
     /// The cursor has moved past the drag threshold, so releasing drops rather than clicks.
     /// Stays set once set.
     pub(crate) dragging: bool,
+    /// Which window the cursor is over: the one the drag started in, another, or none.
+    pub(crate) over: Over,
+}
+
+/// Which window a dragged item is over ([`ItemDrag::over`]). The OS keeps sending the cursor to
+/// the window the drag started in (the focused one), in its coordinates, wherever it goes.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) enum Over {
+    /// The window the drag started in.
+    #[default]
+    Here,
+    /// Another window, with the cursor in its coordinates.
+    Window(iced::window::Id, Point),
+    /// No window: a drop opens a new one there (screen coordinates).
+    Outside(Point),
 }
 
 /// Which kind of item an [`ItemDrag`] holds.
@@ -160,12 +175,14 @@ pub(crate) enum DropTarget {
         /// The side to split off on, or `None` to join the pane.
         side: Option<Direction>,
     },
-    /// Along an edge of the whole workspace.
-    Edge(Direction),
+    /// Along an edge of a whole workspace (the active one of the window under the cursor).
+    Edge(WorkspaceId, Direction),
     /// A workspace in the sidebar.
     Workspace(WorkspaceId),
     /// The sidebar's "New workspace" button: the tab moves to a new workspace.
     NewWorkspace,
+    /// Outside every window: the tab moves to a new window.
+    NewWindow,
 }
 
 /// What's under the cursor in the sidebar, for dropping tabs and workspaces on.
