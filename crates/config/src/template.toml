@@ -5,13 +5,17 @@
 # "themes" folder next to this file, e.g. themes/mytheme.toml -> theme = "mytheme".
 # theme = "macaroni-dark"
 
-# How the app around the terminals looks: "glass" (translucent sheets with lit edges over a
-# deep gradient) or "solid" (flat greys).
-# ui_theme = "glass"
+# How the app around the terminals looks: "solid" (flat greys) or "glass" (translucent sheets
+# with lit edges over a deep gradient). Some sizes below differ between them; those show
+# solid's value with glass's after it.
+# ui_theme = "solid"
 
 [font]
 # Any installed monospace font. Leave unset to use the bundled JetBrains Mono.
 # family = "JetBrains Mono"
+# Fonts tried in order for a character the font above lacks, before the bundled symbols font
+# and the system's own fallback.
+# fallback = ["Cascadia Code", "Noto Sans Mono CJK JP"]
 # size = 14
 # ligatures = false
 # A row's height as a multiple of the size, from 1 to 2.5.
@@ -34,6 +38,15 @@
 # identity_file = "~/.ssh/id_ed25519"   # -i
 # args = ["-A"]              # more ssh arguments
 
+# Triggers: a regex run over each line a terminal prints (colors taken out), and what a match
+# does. Add one per [[trigger]] table; give each at least one of highlight, notify or badge.
+# [[trigger]]
+# pattern = '(?i)\berror\b'   # Rust regex syntax; single quotes keep the \ as written
+# highlight = "red"           # color the match on screen: a workspace color or "#rrggbb"
+# notify = true               # mark the tab and notify, with the line as the text
+# badge = "error"             # set the tab's badge until you look at it; $1 puts in a group
+# name = "Build"              # the notification's title (default: the tab's)
+
 [terminal]
 # Lines of history kept per terminal. Applies to terminals opened after the change.
 # scrollback = 10000
@@ -43,6 +56,9 @@
 # scroll_lines = 3
 # Copy text to the clipboard as soon as it's selected.
 # copy_on_select = false
+# Where terminals start in a workspace that has no folder of its own. Blank is your home
+# folder; ~ stands for it ("~/code").
+# default_dir = ""
 
 [notifications]
 # Programs can ask for attention (OSC 9, OSC 777, OSC 99): the tab, pane and workspace are
@@ -54,12 +70,18 @@
 # What the bell sounds like: "off", "system" (the system's alert sound), or the path of a sound
 # file (.wav on Windows; anything afplay plays on macOS).
 # bell_sound = "off"
+# When a command runs at least this many seconds, its finish asks for attention like a
+# notification (0 turns it off). Needs a shell that marks commands (OSC 133): Git Bash does
+# here on Windows.
+# long_command = 30
 
 [session]
 # Reopen the last layout (workspaces, splits, tabs and their directories) when macaroni starts.
 # restore = true
 # In restored tabs that were running Claude Code, resume that session (claude --resume <id>).
 # resume_agents = true
+# Save each terminal's text when macaroni quits and show it again, dimmed, in its restored tab.
+# keep_scrollback = true
 
 [agents]
 # Coding agents report what they're doing once their hooks are installed
@@ -76,6 +98,9 @@
 # Where links you Ctrl+click (Cmd+click on macOS) in a terminal open: "panel" for a browser
 # split next to the terminal, "system" for your default browser.
 # open_links = "panel"
+# What shows pages: "system" for Edge's WebView2 on Windows or Safari's WebKit on macOS,
+# "chromium" for embedded Chromium (Windows only). Applies to pages opened afterwards.
+# engine = "system"
 
 [workspace_items]
 # What each workspace's row in the sidebar shows. Text settings are templates: placeholders in
@@ -87,19 +112,25 @@
 #   {summary}   "2 panes, 5 tabs"            {dir}       the focused tab's folder name
 #   {path}      the focused tab's directory  {notice}    the latest notification
 #   {agent}     what its coding agent is doing
+#   {branch}    the git branch of the focused tab's folder (else the workspace folder)
+#   {dirty}     "*" when that repository has uncommitted changes
+#   {sync}      commits ahead of and behind its upstream: "↑2↓1" (empty when in step)
 #   {activity}  the notification, else the agent, else nothing
 #   {status}    the notification, else the agent, else the summary
 # icon = true
 # The tile behind the icon; false shows the icon on its own.
-# icon_background = true  (solid: false)
+# icon_background = false  (glass: true)
 # title = "{name}"
 # detail = "{activity}"
 # badge = "{shortcut}"
+# A large faded label in the top right of each of the workspace's panes, such as "{name}" or
+# "{branch}"; empty shows none.
+# pane_badge = ""
 # Show the muted and pinned marks.
 # status_icons = true
 # close_button = true
 # The search bar at the top of the sidebar.
-# search = true  (solid: false)
+# search = false  (glass: true)
 
 [tab_items]
 # What each tab shows, the same way. Pinned tabs always show just their icon. Placeholders:
@@ -124,7 +155,7 @@
 # sidebar_width = 236
 # title_bar_height = 36
 # title_bar_border_width = 1
-# title_bar_gap = 12  (solid: 0)
+# title_bar_gap = 0  (glass: 12)
 # caption_button_width = 42
 # caption_icon_size = 14
 # logo_size = 13
@@ -136,23 +167,23 @@
 
 [style.sidebar]
 # top_padding = 12
-# padding = 12  (solid: 8)
+# padding = 8  (glass: 12)
 # bottom_padding = 8
 # search_height = 36
 # search_padding = 10
 # search_gap = 10
 # spacing = 6
 # new_workspace_gap = 8
-# panes_gap = 4  (solid: 0)
+# panes_gap = 0  (glass: 4)
 # border_width = 1
 
 [style.workspaces]
-# padding = 8  (solid: 4)
-# radius = 8  (solid: 10)
-# add_radius = 8  (solid: 2)
-# spacing = 8  (solid: 0)
+# padding = 4  (glass: 8)
+# radius = 10  (glass: 8)
+# add_radius = 2  (glass: 8)
+# spacing = 0  (glass: 8)
 # line_spacing = 2
-# tile_size = 32  (solid: 27)
+# tile_size = 27  (glass: 32)
 # tile_radius = 8
 # icon_size = 16
 # title_size = 13
@@ -173,11 +204,11 @@
 # height = 36
 # padding_left = 10
 # padding_right = 6
-# radius = 8  (solid: 0)
-# add_radius = 8  (solid: 0)
+# radius = 0  (glass: 8)
+# add_radius = 0  (glass: 8)
 # accent_width = 2
-# spacing = 6  (solid: 0)
-# gap = 10  (solid: 0)
+# spacing = 0  (glass: 6)
+# gap = 0  (glass: 10)
 # part_spacing = 8
 # min_width = 110
 # max_title_chars = 28
@@ -188,9 +219,9 @@
 # scrollbar_width = 3
 
 [style.panes]
-# gap = 8  (solid: 0)
-# margin = 8  (solid: 0)
-# radius = 16  (solid: 0)
+# gap = 0  (glass: 8)
+# margin = 0  (glass: 8)
+# radius = 0  (glass: 16)
 # padding = 6
 # terminal_padding = 6
 # border_width = 1
@@ -204,7 +235,7 @@
 # padding = 5
 # item_padding = 10
 # spacing = 10
-# radius = 10  (solid: 4)
+# radius = 4  (glass: 10)
 # border_width = 1
 # text_size = 13
 # icon_size = 15
@@ -219,7 +250,7 @@
 # shadow_blur = 18
 
 [style.controls]
-# radius = 8  (solid: 3)
+# radius = 3  (glass: 8)
 # border_width = 1
 # highlight_width = 1.5
 # insertion_line_width = 2
@@ -270,10 +301,14 @@
 #       home, end, pageup, pagedown, left, right, up, down, f1-f12.
 #
 # Actions: new_tab, close_tab, next_tab, previous_tab, split_right, split_down, split_left,
-#          split_up, close_pane, focus_left, focus_right, focus_up, focus_down, new_workspace,
+#          split_up, close_pane, focus_left, focus_right, focus_up, focus_down, maximize_pane,
+#          equalize_panes, rotate_panes, swap_left, swap_right, swap_up, swap_down, new_workspace,
 #          close_workspace, next_workspace, previous_workspace, workspace_1 ... workspace_9,
 #          copy, paste, find, zoom_in, zoom_out, reset_zoom, open_settings, open_config,
-#          toggle_sidebar.
+#          toggle_sidebar, command_palette, show_waiting, next_waiting, new_worktree,
+#          previous_prompt, next_prompt, copy_output, agent_dashboard, jump_to_pane,
+#          reopen_tab, save_scrollback, search_workspace, search_all, new_window,
+#          close_window, move_to_new_window.
 #
 # "ctrl+shift+t" = "none"
 # "alt+t" = "new_tab"

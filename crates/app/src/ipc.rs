@@ -384,17 +384,27 @@ impl App {
         })
     }
 
-    /// Every workspace, pane and tab, as `list` reports them.
+    /// Every workspace, pane and tab in every window, as `list` reports them.
     fn tree(&self) -> Tree {
-        let active = self.model.active_workspace().id;
+        let focused = self.model.focused_window();
         let workspaces = self
             .model
-            .workspaces()
-            .iter()
-            .map(|ws| WorkspaceInfo {
+            .windows()
+            .into_iter()
+            .filter_map(|w| self.model.window(w))
+            .enumerate()
+            .flat_map(|(number, window)| {
+                window
+                    .workspaces
+                    .iter()
+                    .map(move |ws| (number as u64 + 1, window, ws))
+            })
+            .map(|(number, window, ws)| WorkspaceInfo {
                 id: ws.id.0,
                 name: ws.name.clone(),
-                active: ws.id == active,
+                active: ws.id == window.active,
+                window: number,
+                focused_window: window.id == focused,
                 panes: ws
                     .layout
                     .leaves()
@@ -426,6 +436,10 @@ impl App {
                 Ok(json!({ "subscribed": true }))
             }
             Call::NewWorkspace { name } => self.new_workspace(name),
+            Call::NewWindow => {
+                self.run(Command::NewWindow);
+                Ok(self.focused_ids())
+            }
             Call::SelectWorkspace { workspace } => {
                 self.workspace_command(Some(workspace), Command::SelectWorkspace)
             }
@@ -588,6 +602,24 @@ impl App {
             },
         };
         self.run(command);
+        // A new report means any answered prompt is gone; the next one can be answered.
+        self.answered.remove(&tab);
+        // The dashboard's "for 3m": when the agent entered the state it's in now.
+        match self
+            .model
+            .tab(tab)
+            .and_then(|t| t.agent.as_ref())
+            .map(|a| a.state)
+        {
+            Some(now) if self.agent_since.get(&tab).map(|(state, _)| *state) != Some(now) => {
+                self.agent_since
+                    .insert(tab, (now, std::time::Instant::now()));
+            }
+            Some(_) => {}
+            None => {
+                self.agent_since.remove(&tab);
+            }
+        }
         self.broadcast(Event::AgentChanged {
             tab: tab.0,
             state,

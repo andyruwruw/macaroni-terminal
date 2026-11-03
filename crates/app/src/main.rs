@@ -56,9 +56,11 @@ mod anim;
 mod backdrop;
 mod bell;
 mod browser;
+mod chromium;
 mod drag_area;
 mod fonts;
 mod gap_line;
+mod git;
 mod glass;
 mod hair_line;
 mod icons;
@@ -79,20 +81,21 @@ mod side_line;
 mod state;
 mod terminal;
 mod theme;
+mod triggers;
 mod update;
 mod view;
 mod vscode;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use iced::futures::channel::mpsc::{UnboundedSender, unbounded};
 use iced::futures::{SinkExt, Stream, StreamExt};
-use iced::{Event, Size, Subscription, Task, event, mouse, window};
+use iced::{Event, Point, Size, Subscription, Task, event, mouse, window};
 use macaroni_config::Config;
-use macaroni_core::{BrowserId, Model, PaneId, SessionId, TabId, TabKind};
+use macaroni_core::{BrowserId, Model, PaneId, SessionId, TabId, TabKind, WindowId, WorkspaceId};
 use macaroni_term::shell::{self, ShellOption};
 use macaroni_term::{GridSize, SessionEvent, Snapshot, is_openable};
 
@@ -126,36 +129,65 @@ const MAX_FONT_SIZE: f32 = 72.0;
 const EVENT_BUFFER: usize = 256;
 /// How many config change notices the subscription's output holds before forwarding waits.
 const CONFIG_EVENT_BUFFER: usize = 8;
+/// How many closed tabs `reopen_tab` can bring back.
+const CLOSED_TABS_KEPT: usize = 20;
+
+/// A closed tab, kept so `reopen_tab` can bring it back: what it was (as a session save would
+/// keep it), and where.
+#[derive(Debug, Clone)]
+struct ClosedTab {
+    /// Its directory, Claude Code session, address, name and look.
+    saved: session::SavedTab,
+    /// The pane it was in.
+    pane: PaneId,
+    /// The workspace that pane was in.
+    workspace: WorkspaceId,
+}
+
 /// How often unsaved session changes are checked for a save that's come due.
 const SAVE_TICK: Duration = Duration::from_secs(1);
+/// How often workspaces' git branches and dirty marks are looked up, while the sidebar shows
+/// them.
+const GIT_TICK: Duration = Duration::from_secs(3);
 
 /// Runs the app, or a Chromium helper process when CEF started this executable as one.
 fn main() -> iced::Result {
     // Before anything creates a wgpu instance: CEF on Windows needs iced on the GL backend.
     browser::prefer_gl();
     // Chromium's renderer, GPU and utility processes are this executable too.
-    if let Some(code) = macaroni_browser::helper_process() {
+    if let Some(code) = macaroni_browser::helper_process(&chromium::dir()) {
         std::process::exit(code);
     }
+    notifications::register();
     fonts::load();
-    let result = iced::application(App::new, App::update, App::view)
+    // A daemon, which can have any number of windows; it only exits through `App::exit`.
+    let result = iced::daemon(App::new, App::update, App::view)
         .title(App::title)
         .subscription(App::subscription)
-        .theme(|app: &App| app.iced_theme.clone())
-        .window(window_settings())
-        // Close requests become `Message::CloseRequested`, so the session is saved first.
-        .exit_on_close_request(false)
+        .theme(|app: &App, _| app.iced_theme.clone())
         .run();
     // After the event loop: `App::exit` has already closed every browser window.
-    browser::shutdown();
+    macaroni_browser::shutdown();
     result
 }
 
-/// The main window's settings. On Windows macaroni draws its own title bar (`view::title_bar`),
-/// so the window has no system frame, only the shadow and rounded corners.
-fn window_settings() -> window::Settings {
+/// A window's settings, where and how big `saved` says (else the default size, where the system
+/// puts it). On Windows macaroni draws its own title bar (`view::title_bar`), so the window has
+/// no system frame, only the shadow and rounded corners.
+fn window_settings(saved: Option<&session::SavedWindow>) -> window::Settings {
+    let size = saved
+        .and_then(|s| s.size)
+        .map_or(DEFAULT_WINDOW_SIZE, |(w, h)| Size::new(w, h));
+    let position = saved
+        .and_then(|s| s.position)
+        .map_or(window::Position::Default, |(x, y)| {
+            window::Position::Specific(Point::new(x, y))
+        });
     let settings = window::Settings {
-        size: DEFAULT_WINDOW_SIZE,
+        size,
+        position,
+        // Close requests become `Message::CloseRequested`, so the session is saved first.
+        exit_on_close_request: false,
         decorations: !view::CUSTOM_FRAME,
         // The taskbar's and Alt+Tab's icon. The exe's own (Explorer, pinned shortcuts) is the
         // .ico that build.rs embeds; both are drawn from the same `app-icon.svg`.
@@ -172,6 +204,25 @@ fn window_settings() -> window::Settings {
         ..settings
     };
     settings
+}
+
+/// One OS window and what's known about it.
+#[derive(Debug, Clone, Copy)]
+struct Win {
+    /// The model's window it shows.
+    model: WindowId,
+    /// Its size in logical pixels, for laying out menus and drop targets.
+    size: Size,
+    /// Its top-left corner on screen, in logical pixels, once it has moved, for the session.
+    position: Option<Point>,
+    /// Whether it's maximized, refreshed on every resize (no resize borders then).
+    maximized: bool,
+    /// Its native handle (`HWND`, or the `NSView` on macOS), the parent of its browser windows.
+    parent: Option<isize>,
+    /// Its scale factor, for placing browser windows in physical pixels.
+    scale: f32,
+    /// Whether it has keyboard focus.
+    focused: bool,
 }
 
 /// The whole application state: the model, everything running for it, and the UI state around
@@ -201,6 +252,8 @@ struct App {
     config_errors: Vec<String>,
     /// Shortcuts in effect, for terminal views and keys nothing else handled.
     keymap: Keymap,
+    /// `[[trigger]]`, compiled; set by `apply_config`.
+    triggers: triggers::Triggers,
     /// The terminal colors from the theme.
     palette: Palette,
     /// The interface's colors and sizes, derived from the palette and the config.
@@ -213,8 +266,8 @@ struct App {
     empty: Snapshot,
     /// The divider being dragged, if any.
     drag: Option<Drag>,
-    /// Whether the window has keyboard focus (kept `true` while a browser page has it), for
-    /// deciding whether a notification needs the user's attention.
+    /// Whether one of macaroni's windows has keyboard focus (kept `true` while a browser page
+    /// has it), for deciding whether a notification needs the user's attention.
     window_focused: bool,
     /// The item being renamed in place and the name typed so far.
     renaming: Option<(Renaming, String)>,
@@ -226,6 +279,28 @@ struct App {
     icon_picker: Option<view::icon_picker::IconPicker>,
     /// The open workspace folder dialog.
     folder_dialog: Option<view::folder_dialog::FolderDialog>,
+    /// The command palette, while it's open.
+    command_palette: Option<view::palette::Palette>,
+    /// The new worktree dialog, while it's open.
+    worktree_dialog: Option<view::worktree_dialog::WorktreeDialog>,
+    /// The workspace environment dialog, while it's open.
+    env_dialog: Option<view::env_dialog::EnvDialog>,
+    /// Each terminal's text file in the scrollback folder, written on quit for the final save
+    /// (`[session] keep_scrollback`); empty otherwise.
+    scrollback_files: BTreeMap<TabId, String>,
+    /// Recently closed tabs, newest last (`reopen_tab`).
+    closed_tabs: Vec<ClosedTab>,
+    /// The agent dashboard is open.
+    dashboard: bool,
+    /// Letters show over the panes, waiting for the key that picks one (`jump_to_pane`).
+    pane_letters: bool,
+    /// Tabs whose agent's permission prompt was answered from a notification or the dashboard,
+    /// until the agent reports again; see `App::asks_permission`.
+    answered: BTreeSet<TabId>,
+    /// When each agent entered the state it's in, for the dashboard: the state, and when.
+    agent_since: HashMap<TabId, (macaroni_core::AgentState, Instant)>,
+    /// Text to type into a tab's terminal once it starts (`claude` for a new worktree).
+    startup_input: BTreeMap<TabId, String>,
     /// The sidebar's dragged width and whether it's folded away (see `update/sidebar.rs`).
     sidebar: session::SidebarLayout,
     /// Whether the sidebar's edge is being dragged.
@@ -258,8 +333,6 @@ struct App {
     tab_reveals: Vec<PaneId>,
     /// The custom `#rrggbb` field on a workspace's, group's or tab's color menu.
     color_input: String,
-    /// The window's size in logical pixels, for laying out menus and drop targets.
-    window_size: Size,
     /// The open find bar.
     search: Option<Search>,
     /// The control API's connections, subscribers and endpoint.
@@ -271,6 +344,10 @@ struct App {
     session_saved: Option<Instant>,
     /// The model changed since the session was last written.
     session_dirty: bool,
+    /// Each workspace folder's git branch and dirty mark, by folder ([`git::look`]).
+    git: HashMap<String, git::Repo>,
+    /// A [`git::look`] is running; ticks meanwhile are skipped.
+    git_busy: bool,
     /// Shells for the new-tab menu, the default first.
     shells: Vec<ShellOption>,
     /// VS Code's `code` command, for the new-tab menu, if installed.
@@ -289,16 +366,19 @@ struct App {
     browsers: BTreeMap<BrowserId, Panel>,
     /// VS Code in browser tabs: whether it's downloaded, and its server.
     vscode_web: vscode::WebVsCode,
+    /// Chromium for browser tabs: whether it's downloaded, and a download in progress.
+    chromium: chromium::Chromium,
     /// Where browsers send their events; `None` until [`Message::BrowserEventsReady`].
     browser_events: Option<UnboundedSender<(BrowserId, BrowserMessage)>>,
-    /// The main window, once it has opened.
-    window: Option<window::Id>,
-    /// Whether the window is maximized, refreshed on every resize (no resize borders then).
-    maximized: bool,
-    /// The main window's native handle (`HWND`), the parent of every browser window.
-    parent: Option<isize>,
-    /// The window's scale factor, for placing browser windows in physical pixels.
-    scale: f32,
+    /// Every open window, by its iced id. Added when it's asked to open, so effects can find it
+    /// before it has.
+    wins: BTreeMap<window::Id, Win>,
+    /// The window `App::view` is drawing, so the view code (which only gets `&self`) shows that
+    /// window's sidebar, not the focused one's. Cleared at the start of every update.
+    viewing: std::cell::Cell<Option<window::Id>>,
+    /// Where on screen the next window to open goes: where a tab or workspace was dropped
+    /// outside every window. Taken by `App::open_window`.
+    next_window_at: Option<Point>,
     /// Points added to the configured font size by zooming, for this run only.
     zoom: f32,
     /// The browser holding keyboard focus, when a page rather than macaroni has it.
@@ -319,7 +399,7 @@ impl App {
     ///
     /// Side effects: writes the config template on first run and queues the first sessions and
     /// browsers. The control socket and the session channel come later, from subscriptions.
-    fn new() -> Self {
+    fn new() -> (Self, Task<Message>) {
         let mut args = std::env::args().skip(1);
         let first_command = args.next().map(|program| (program, args.collect()));
         let config_dir = macaroni_config::config_dir();
@@ -332,6 +412,10 @@ impl App {
             .then(|| session::load(&session::path(&config_dir)))
             .flatten();
         let sidebar = saved.as_ref().and_then(|s| s.sidebar);
+        let saved_windows = saved
+            .as_ref()
+            .map(|s| s.windows.clone())
+            .unwrap_or_default();
         let (model, effects, restored) = restore::startup(saved);
         let mut app = Self::with_defaults(model, restored, first_command, config_dir);
         // Read from the loaded config, since `app.config` is still the default until `apply_config`.
@@ -349,7 +433,20 @@ impl App {
         // Startup effects only queue sessions and browsers; none of them quits, so there's no
         // task to keep.
         let _ = app.run_effects(effects);
-        app
+        // A window for each of the model's, where it was; the focused one opens last, so it
+        // ends up in front.
+        let focused = app.model.focused_window();
+        let mut windows = app.model.windows();
+        windows.sort_by_key(|w| *w == focused);
+        let all = app.model.windows();
+        let opens: Vec<_> = windows
+            .into_iter()
+            .map(|w| {
+                let index = all.iter().position(|x| *x == w).unwrap_or(0);
+                app.open_window(w, saved_windows.get(index))
+            })
+            .collect();
+        (app, Task::batch(opens))
     }
 
     /// The app around `model` with the default config, before the real one applies. Probes the
@@ -375,6 +472,7 @@ impl App {
             config: defaults,
             config_errors: Vec::new(),
             keymap: Keymap::new(&[]).0,
+            triggers: triggers::Triggers::default(),
             palette,
             chrome,
             metrics: Metrics::measure(
@@ -391,6 +489,16 @@ impl App {
             settings: None,
             icon_picker: None,
             folder_dialog: None,
+            command_palette: None,
+            worktree_dialog: None,
+            startup_input: BTreeMap::new(),
+            env_dialog: None,
+            scrollback_files: BTreeMap::new(),
+            closed_tabs: Vec::new(),
+            dashboard: false,
+            pane_letters: false,
+            answered: BTreeSet::new(),
+            agent_since: HashMap::new(),
             sidebar: session::SidebarLayout::default(),
             sidebar_drag: false,
             sidebar_query: String::new(),
@@ -404,12 +512,13 @@ impl App {
             tab_views: BTreeMap::new(),
             tab_reveals: Vec::new(),
             color_input: String::new(),
-            window_size: DEFAULT_WINDOW_SIZE,
             search: None,
             ipc: ipc::IpcState::new(macaroni_ipc::endpoint()),
             restored,
             session_saved: None,
             session_dirty: false,
+            git: HashMap::new(),
+            git_busy: false,
             shells: shell::available(),
             vscode: shell::vscode(),
             tab_shells: BTreeMap::new(),
@@ -418,11 +527,11 @@ impl App {
             offer_git_bash: false,
             browsers: BTreeMap::new(),
             vscode_web: vscode::WebVsCode::new(),
+            chromium: chromium::Chromium::new(),
             browser_events: None,
-            window: None,
-            maximized: false,
-            parent: None,
-            scale: 1.0,
+            wins: BTreeMap::new(),
+            viewing: std::cell::Cell::new(None),
+            next_window_at: None,
             zoom: 0.0,
             page_focus: None,
             last_focused_tab: None,
@@ -432,17 +541,32 @@ impl App {
         }
     }
 
-    /// The window title: the focused tab's label, else the active workspace's name.
-    fn title(&self) -> String {
-        match self.model.focused_tab().label() {
+    /// A window's title: the label of its focused tab, else its active workspace's name.
+    fn title(&self, id: window::Id) -> String {
+        let Some(ws) = self
+            .wins
+            .get(&id)
+            .and_then(|w| self.model.window(w.model))
+            .and_then(|w| self.model.workspace(w.active))
+        else {
+            return APP_NAME.to_owned();
+        };
+        let tab = self
+            .model
+            .pane(ws.focused)
+            .and_then(|p| self.model.tab(p.active))
+            .and_then(|t| t.label());
+        match tab {
             Some(title) => format!("{title} - {APP_NAME}"),
-            None => format!("{} - {APP_NAME}", self.model.active_workspace().name),
+            None => format!("{} - {APP_NAME}", ws.name),
         }
     }
 
     /// iced's update function: handles `message`, then brings the native browser windows and
     /// the fades in line with the new state.
     fn update(&mut self, message: Message) -> Task<Message> {
+        // Outside the view, "the window" is the focused one.
+        self.viewing.set(None);
         let task = self.handle(message);
         // Both run after every message, whichever handler ran: browser windows aren't drawn by
         // iced, so any change to the model, a menu, a drag or the settings dialog may have to
@@ -455,22 +579,29 @@ impl App {
     /// Sets each workspace's and tab's fade targets (selected, hovered) from the current state.
     /// The view reads the eased levels, and `window::frames` runs while any is still moving.
     fn sync_fades(&mut self) {
-        let active = self.model.active_workspace().id;
+        // Each window's active workspace is selected in its own sidebar.
+        let active: Vec<WorkspaceId> = self
+            .model
+            .windows()
+            .into_iter()
+            .filter_map(|w| self.model.window(w))
+            .map(|w| w.active)
+            .collect();
         let hovered_ws = match self.sidebar_hover {
             Some((SidebarHover::Workspace(ws), _)) => Some(ws),
             _ => None,
         };
         let model = &self.model;
         let hovered_tab = self.hovered_tab;
-        let workspaces = model.workspaces().iter().map(|ws| {
+        let all = model.all_workspaces();
+        let workspaces = all.iter().map(|ws| {
             (
                 anim::Item::Workspace(ws.id),
-                ws.id == active,
+                active.contains(&ws.id),
                 hovered_ws == Some(ws.id),
             )
         });
-        let tabs = model
-            .workspaces()
+        let tabs = all
             .iter()
             .flat_map(|ws| ws.layout.leaves())
             .filter_map(|p| model.pane(p))
@@ -509,6 +640,11 @@ impl App {
             }
             Message::Settings(message) => self.settings_update(message),
             Message::IconPicker(message) => self.icon_picker_update(message),
+            Message::Palette(message) => self.palette_update(message),
+            Message::Worktree(message) => self.worktree_update(message),
+            Message::Dashboard(message) => self.dashboard_update(message),
+            Message::Env(message) => self.env_update(message),
+            Message::PaneLetter(letter) => self.pane_letter(letter),
             Message::Folder(message) => self.folder_update(message),
             Message::SettingsClose => {
                 self.settings = None;
@@ -517,26 +653,43 @@ impl App {
 
             Message::WindowOpened(id) => self.window_opened(id),
             Message::Window(op) => self.window_op(op),
-            Message::WindowResized(size) => self.window_resized(size),
-            Message::WindowFocused(focused) => self.set_window_focused(focused),
-            Message::Maximized(maximized) => {
-                self.maximized = maximized;
+            Message::WindowResized(id, size) => self.window_resized(id, size),
+            Message::WindowMoved(id, at) => {
+                if let Some(win) = self.wins.get_mut(&id) {
+                    win.position = Some(at);
+                    self.session_dirty = true;
+                }
                 Task::none()
             }
-            Message::WindowHandle(handle) => {
-                self.parent = handle;
+            Message::WindowFocused(id, focused) => self.set_window_focused(id, focused),
+            Message::Maximized(id, maximized) => {
+                if let Some(win) = self.wins.get_mut(&id) {
+                    win.maximized = maximized;
+                }
                 Task::none()
             }
-            Message::Rescaled(scale) => {
-                self.scale = scale;
+            Message::WindowHandle(id, handle) => {
+                if let Some(win) = self.wins.get_mut(&id) {
+                    win.parent = handle;
+                }
+                Task::none()
+            }
+            Message::Rescaled(id, scale) => {
+                if let Some(win) = self.wins.get_mut(&id) {
+                    win.scale = scale;
+                }
                 Task::none()
             }
             Message::ReclaimFocus => self.reclaim_focus(),
-            Message::CloseRequested => self.close_requested(),
+            Message::CloseRequested(id) => self.close_requested(id),
 
             Message::DragStart(workspace, divider) => self.divider_press(workspace, divider),
-            Message::DragMove(position) if self.sidebar_drag => self.sidebar_drag_move(position.x),
-            Message::DragMove(position) => self.divider_move(position),
+            // Drags happen in the focused window; another window's coordinates mean nothing here.
+            Message::DragMove(id, _) if !self.is_focused_window(id) => Task::none(),
+            Message::DragMove(_, position) if self.sidebar_drag => {
+                self.sidebar_drag_move(position.x)
+            }
+            Message::DragMove(_, position) => self.divider_move(position),
             Message::DragEnd => {
                 self.drag = None;
                 self.sidebar_drag = false;
@@ -563,7 +716,8 @@ impl App {
 
             Message::TabPress(tab) => self.tab_press(tab),
             Message::WorkspacePress(ws) => self.workspace_press(ws),
-            Message::ItemDragMove(at) => self.item_drag_move(at),
+            Message::ItemDragMove(id, _) if !self.is_focused_window(id) => Task::none(),
+            Message::ItemDragMove(_, at) => self.item_drag_move(at),
             Message::ItemDragEnd => self.item_drag_end(),
             Message::TabHover(pane, index, entered) => self.tab_hover(pane, index, entered),
             Message::TabZone(pane, index, zone) => self.tab_zone(pane, index, zone),
@@ -573,6 +727,14 @@ impl App {
             Message::TabScroll(pane, delta) => self.tab_scroll(pane, delta),
             Message::TabViewport(pane, viewport) => self.tab_viewport(pane, viewport),
             Message::Frame => Task::none(),
+            Message::GitTick => self.git_tick(),
+            Message::NotificationClicked(tab) => self.notification_clicked(tab),
+            Message::PermissionAnswer(tab, allow) => self.answer_permission(tab, allow),
+            Message::GitInfo(repos) => {
+                self.git = repos;
+                self.git_busy = false;
+                Task::none()
+            }
             Message::SaveTick => {
                 self.save_session(false);
                 Task::none()
@@ -606,6 +768,7 @@ impl App {
             Message::VsCodeTab(pane) => self.vscode_tab(pane),
             Message::VsCodeReady(listening) => self.vscode_ready(listening),
             Message::VsCodeInstalled(result) => self.vscode_installed(result),
+            Message::ChromiumInstalled(result) => self.chromium_installed(result),
             Message::InstallGitBash => self.install_git_bash(),
             Message::DismissShellOffer => {
                 self.offer_git_bash = false;
@@ -668,12 +831,27 @@ impl App {
         } else {
             Subscription::none()
         };
+        // While the dashboard shows, a redraw a second keeps its times counting.
+        let dashboard = if self.dashboard {
+            Subscription::run(dashboard_ticks)
+        } else {
+            Subscription::none()
+        };
+        let git = if self.sidebar_shows_git() {
+            Subscription::run(git_ticks)
+        } else {
+            Subscription::none()
+        };
         let frames = if self.fades.animating() {
             window::frames().map(|_| Message::Frame)
         } else {
             Subscription::none()
         };
-        let search = if self.search.is_some() {
+        let search = if self.pane_letters {
+            event::listen_with(pane_letter_keys)
+        } else if self.command_palette.is_some() {
+            event::listen_with(palette_keys)
+        } else if self.search.is_some() {
             event::listen_with(search_keys)
         } else if self.settings.is_some() {
             event::listen_with(settings_keys)
@@ -687,6 +865,11 @@ impl App {
             || self.settings.is_some()
             || self.icon_picker.is_some()
             || self.folder_dialog.is_some()
+            || self.command_palette.is_some()
+            || self.worktree_dialog.is_some()
+            || self.dashboard
+            || self.pane_letters
+            || self.env_dialog.is_some()
             || self.sidebar_search_focused
         {
             event::listen_with(escape_keys)
@@ -716,6 +899,9 @@ impl App {
             _ => Subscription::none(),
         };
         Subscription::batch([
+            dashboard,
+            notifications::clicks(),
+            git,
             vscode,
             search,
             dismiss,
@@ -726,7 +912,7 @@ impl App {
             window::open_events().map(Message::WindowOpened),
             reclaim,
             shortcuts,
-            iced::window::close_requests().map(|_| Message::CloseRequested),
+            iced::window::close_requests().map(Message::CloseRequested),
             event::listen_with(window_focus_events),
             // Clicking the search field focuses it and clicking anything else blurs it, and
             // neither reaches the app any other way.
@@ -741,19 +927,21 @@ impl App {
 }
 
 /// Cursor moves and the left button's release, while a divider is dragged.
-fn drag_events(event: Event, _: event::Status, _: window::Id) -> Option<Message> {
+fn drag_events(event: Event, _: event::Status, id: window::Id) -> Option<Message> {
     match event {
-        Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Message::DragMove(position)),
+        Event::Mouse(mouse::Event::CursorMoved { position }) => {
+            Some(Message::DragMove(id, position))
+        }
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::DragEnd),
         _ => None,
     }
 }
 
 /// Cursor moves and the left button's release, while a tab or workspace is pressed or dragged.
-fn item_drag_events(event: Event, _: event::Status, _: window::Id) -> Option<Message> {
+fn item_drag_events(event: Event, _: event::Status, id: window::Id) -> Option<Message> {
     match event {
         Event::Mouse(mouse::Event::CursorMoved { position }) => {
-            Some(Message::ItemDragMove(position))
+            Some(Message::ItemDragMove(id, position))
         }
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
             Some(Message::ItemDragEnd)
@@ -769,6 +957,39 @@ fn search_keys(event: Event, _: event::Status, _: window::Id) -> Option<Message>
             key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
             ..
         }) => Some(Message::SearchClose),
+        _ => None,
+    }
+}
+
+/// The next key while pane letters show: a letter picks its pane; any other key but a modifier
+/// alone (and Escape, which `dismiss` handles) cancels, as `PaneLetter(' ')`.
+fn pane_letter_keys(event: Event, _: event::Status, _: window::Id) -> Option<Message> {
+    use iced::keyboard::{Event::KeyPressed, Key, key::Named};
+    match event {
+        Event::Keyboard(KeyPressed { key, .. }) => match key {
+            Key::Character(c) => Some(Message::PaneLetter(c.chars().next().unwrap_or(' '))),
+            Key::Named(
+                Named::Escape | Named::Shift | Named::Control | Named::Alt | Named::Super,
+            ) => None,
+            _ => Some(Message::PaneLetter(' ')),
+        },
+        _ => None,
+    }
+}
+
+/// Up and Down, while the command palette is open: move its highlight.
+fn palette_keys(event: Event, _: event::Status, _: window::Id) -> Option<Message> {
+    use iced::keyboard::{Event::KeyPressed, Key::Named, key::Named as N};
+    use view::palette::PaletteMessage::Move;
+    match event {
+        Event::Keyboard(KeyPressed {
+            key: Named(N::ArrowUp),
+            ..
+        }) => Some(Message::Palette(Move(-1))),
+        Event::Keyboard(KeyPressed {
+            key: Named(N::ArrowDown),
+            ..
+        }) => Some(Message::Palette(Move(1))),
         _ => None,
     }
 }
@@ -827,13 +1048,14 @@ fn clicks(event: Event, _: event::Status, _: window::Id) -> Option<Message> {
     }
 }
 
-/// The window gaining or losing focus, being rescaled, or being resized.
-fn window_focus_events(event: Event, _: event::Status, _: window::Id) -> Option<Message> {
+/// A window gaining or losing focus, being rescaled, resized or moved.
+fn window_focus_events(event: Event, _: event::Status, id: window::Id) -> Option<Message> {
     match event {
-        Event::Window(window::Event::Focused) => Some(Message::WindowFocused(true)),
-        Event::Window(window::Event::Unfocused) => Some(Message::WindowFocused(false)),
-        Event::Window(window::Event::Rescaled(scale)) => Some(Message::Rescaled(scale)),
-        Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(size)),
+        Event::Window(window::Event::Focused) => Some(Message::WindowFocused(id, true)),
+        Event::Window(window::Event::Unfocused) => Some(Message::WindowFocused(id, false)),
+        Event::Window(window::Event::Rescaled(scale)) => Some(Message::Rescaled(id, scale)),
+        Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(id, size)),
+        Event::Window(window::Event::Moved(at)) => Some(Message::WindowMoved(id, at)),
         _ => None,
     }
 }
@@ -846,6 +1068,38 @@ fn session_events() -> impl Stream<Item = Message> {
         let _ = output.send(Message::EventsReady(sender)).await;
         while let Some((id, event)) = receiver.next().await {
             let _ = output.send(Message::Session(id, event)).await;
+        }
+    })
+}
+
+/// [`Message::Frame`] every second, for the agent dashboard's times, from a thread that stops
+/// once the subscription is dropped.
+fn dashboard_ticks() -> impl Stream<Item = Message> {
+    iced::stream::channel(1, async |mut output| {
+        let (sender, mut receiver) = unbounded();
+        std::thread::spawn(move || {
+            while sender.unbounded_send(()).is_ok() {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        });
+        while receiver.next().await.is_some() {
+            let _ = output.send(Message::Frame).await;
+        }
+    })
+}
+
+/// [`Message::GitTick`] at once and then every [`GIT_TICK`], from a thread that stops once the
+/// subscription is dropped.
+fn git_ticks() -> impl Stream<Item = Message> {
+    iced::stream::channel(1, async |mut output| {
+        let (sender, mut receiver) = unbounded();
+        std::thread::spawn(move || {
+            while sender.unbounded_send(()).is_ok() {
+                std::thread::sleep(GIT_TICK);
+            }
+        });
+        while receiver.next().await.is_some() {
+            let _ = output.send(Message::GitTick).await;
         }
     })
 }
@@ -890,12 +1144,13 @@ fn browser_events() -> impl Stream<Item = Message> {
     })
 }
 
-/// The window's `HWND` on Windows, which browsers are parented to; `None` on other platforms
-/// or if the handle isn't available.
+/// The window's `HWND` on Windows or its content `NSView` on macOS, which browsers are parented
+/// to; `None` on other platforms or if the handle isn't available.
 fn native_handle(window: &dyn window::Window) -> Option<isize> {
     use window::raw_window_handle::RawWindowHandle;
     match window.window_handle().ok()?.as_raw() {
         RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+        RawWindowHandle::AppKit(handle) => Some(handle.ns_view.as_ptr() as isize),
         _ => None,
     }
 }
@@ -932,6 +1187,43 @@ fn open_in_editor(path: &std::path::Path) {
 /// The user's home directory, from `USERPROFILE` on Windows and `HOME` elsewhere.
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+}
+
+/// Opens a text file from a terminal's output at `line` and `column` (from 1): in VS Code
+/// (`code -g`) when it's installed, else the system's plain text editor (Notepad, or `open -t`
+/// on macOS), which ignore the position. Never the file's default handler: the path came from
+/// untrusted output and could name a program or script. Spawns and doesn't wait.
+fn open_text_file(path: &std::path::Path, line: Option<u32>, column: Option<u32>) {
+    if let Some(code) = macaroni_term::shell::vscode() {
+        let mut target = path.to_string_lossy().into_owned();
+        if let Some(line) = line {
+            target = format!("{target}:{line}");
+            if let Some(column) = column {
+                target = format!("{target}:{column}");
+            }
+        }
+        let mut command = std::process::Command::new(code);
+        command.arg("-g").arg(target);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // `code` is a batch file: without this a console window flashes up.
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let _ = command.spawn();
+        return;
+    }
+    let mut command = if cfg!(windows) {
+        std::process::Command::new("notepad.exe")
+    } else if cfg!(target_os = "macos") {
+        let mut open = std::process::Command::new("open");
+        open.arg("-t");
+        open
+    } else {
+        return;
+    };
+    let _ = command.arg(path).spawn();
 }
 
 /// Runs VS Code's `code` command on `dir` (or with no folder). Spawns a process and doesn't

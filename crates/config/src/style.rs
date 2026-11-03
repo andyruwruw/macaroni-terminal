@@ -57,6 +57,8 @@ pub enum Unit {
     Lines,
     /// Points, for font sizes.
     Points,
+    /// Seconds.
+    Seconds,
 }
 
 impl Unit {
@@ -69,6 +71,7 @@ impl Unit {
             Self::Times => "\u{d7}",
             Self::Lines => "lines",
             Self::Points => "pt",
+            Self::Seconds => "s",
         }
     }
 

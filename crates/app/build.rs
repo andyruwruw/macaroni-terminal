@@ -6,6 +6,10 @@
 //!
 //! The manifest must be embedded, not side by side: without its `supportedOS` entry for Windows
 //! 10, Windows reports version 8 and Chromium's GPU process dies at start.
+//!
+//! `libcef.dll` is delay-loaded: Chromium isn't shipped with the app but downloaded on request,
+//! so the executable must start without it. `macaroni-browser` loads it from the download
+//! before the first CEF call (`delayimp.lib` comes with `cef-dll-sys`).
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +36,7 @@ fn main() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("macaroni.exe.manifest");
         println!("cargo:rerun-if-changed={}", manifest.display());
         println!("cargo:rustc-link-arg-bin=macaroni=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg-bin=macaroni=/DELAYLOAD:libcef.dll");
         println!(
             "cargo:rustc-link-arg-bin=macaroni=/MANIFESTINPUT:{}",
             manifest.display()

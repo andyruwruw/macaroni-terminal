@@ -33,14 +33,18 @@ To handle a new event, add it to the event list at the top of `claude.rs` and a 
 
 Trap: `macaroni-cli hook` must never fail or print (some hooks' stdout goes into Claude's context) and is a no-op without `MACARONI_TAB_ID` or a reachable app, so the hooks are safe to leave installed.
 
+## Where agents show
+
+The sidebar row and tab (`agent_line`), and the agent dashboard (`agent_dashboard`; see [`app-layout.md`](app-layout.md)), which also shows `Agent.summary` from `macaroni-cli statusline` and how long the agent has been in its state (`App.agent_since`, kept by `ipc.rs` as hooks arrive). To try it without Claude, pipe a hook's JSON into `macaroni-cli hook` with `MACARONI_TAB_ID` set, from bash: PowerShell 5's pipe into a native program doesn't deliver it intact.
+
 ## Notification gating
 
 `App::notify` reads the agent state the hook set just before `notify`: idle means finished (`[agents] notify_finished`), needs input means `notify_input`. Keep the hook's order: state first, then `notify`. Everything after goes through the attention path in [`notifications.md`](notifications.md).
 
 ## Session restore
 
-- `session.json` sits next to `config.toml`, built from `Model::spec()` and rebuilt with `Model::restore()` (new tabs in saved order). Per tab: `cwd` (the agent's cwd while one runs, since `claude --resume` only finds a session from its own directory; else OSC 7) and agent session, plus `ssh` (the profile name) for SSH tabs, which reconnect on restore while the profile still exists. Hidden tabs' terminals start as soon as the first shown one does, at its size (`App::start_hidden`), so every restored agent resumes at launch. Trap: restored details wait in `App.restored` until a tab's terminal starts, so `capture` takes them from there for unstarted tabs; reading only the model would drop them on the next save.
-- Saved at most once per `SESSION_SAVE_INTERVAL` after changes, and on window close (the app intercepts close requests to save first). After that close save, `App::exit` turns saving off: agents killed by the close can still report (`SessionEnd` clears the agent) while browsers finish closing. Closing the last workspace forgets the session. `macaroni <program>` neither restores nor saves.
+- `session.json` sits next to `config.toml`, built from `Model::spec()` and rebuilt with `Model::restore()` (new tabs in saved order, windows with their positions; see [`app-layout.md`](app-layout.md)). Per tab: `cwd` (the agent's cwd while one runs, since `claude --resume` only finds a session from its own directory; else OSC 7) and agent session, plus `ssh` (the profile name) for SSH tabs, which reconnect on restore while the profile still exists. Hidden tabs' terminals start as soon as the first shown one does, at its size (`App::start_hidden`), so every restored agent resumes at launch. Trap: restored details wait in `App.restored` until a tab's terminal starts, so `capture` takes them from there for unstarted tabs; reading only the model would drop them on the next save.
+- Saved at most once per `SESSION_SAVE_INTERVAL` after changes (moving or resizing a window counts), and when the last window closes (the app intercepts close requests to save first). Closing one of several windows closes what's in it, so it isn't restored. After that close save, `App::exit` turns saving off: agents killed by the close can still report (`SessionEnd` clears the agent) while browsers finish closing. Closing the last workspace forgets the session. `macaroni <program>` neither restores nor saves.
 - With `[session] resume_agents`, a restored agent tab gets `claude --resume <id>` typed into its shell. Trap: the id is typed into a shell, so it must pass `is_safe_session_id` first.
 
 ## Input

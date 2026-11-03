@@ -4,8 +4,10 @@
 //! [`Session::spawn`] opens the PTY (portable-pty; ConPTY on Windows), starts the program through
 //! [`crate::shell::command`] and starts three threads:
 //!
-//! - `pty-reader` reads output, runs it through [`OscSniffer`] (notifications, OSC 7) and then
-//!   the emulator, and raises [`SessionEvent::Wakeup`].
+//! - `pty-reader` reads output, runs it through [`OscSniffer`] (notifications, OSC 7, prompt
+//!   marks, inline images), through
+//!   [`Lines`] and the triggers when there are any, and then the emulator, and raises
+//!   [`SessionEvent::Wakeup`].
 //! - `pty-waiter` waits on the child and raises [`SessionEvent::Exited`].
 //! - `pty-sync` flushes a synchronized update (mode 2026) the program never closed.
 //!
@@ -16,18 +18,20 @@
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::thread;
 use std::time::Instant;
 
 use alacritty_terminal::sync::FairMutex;
 use portable_pty::{ChildKiller, MasterPty, PtySize, native_pty_system};
+use regex::RegexSet;
 
 use crate::emulator::{AlacrittyEmulator, Emulator, EmulatorEvent};
 use crate::grid::{
     CellSide, CursorShape, DefaultColors, GridPoint, GridSize, Modes, Scroll, SearchDirection,
     SelectionKind, Snapshot,
 };
+use crate::lines::Lines;
 use crate::osc::{Notification, OscEvent, OscSniffer};
 
 /// What to run in a new [`Session`].
@@ -52,7 +56,14 @@ pub struct SessionConfig {
     /// The cursor's shape until the program asks for another; [`Session::set_default_cursor`]
     /// changes it.
     pub cursor: CursorShape,
+    /// Patterns matched against each line of output, raising [`SessionEvent::Triggered`];
+    /// [`Session::set_triggers`] changes them.
+    pub triggers: Option<RegexSet>,
 }
+
+/// The patterns the reader thread matches lines against, shared so they can change while it
+/// runs.
+type Triggers = Arc<RwLock<Option<RegexSet>>>;
 
 /// Bytes the emulator wants sent back to the program, waiting for the emulator lock to be
 /// released (see [`send_replies`]).
@@ -76,9 +87,99 @@ pub enum SessionEvent {
     Notify(Notification),
     /// The shell reported its working directory (OSC 7).
     Cwd(String),
+    /// A line of output matched a trigger. Raised at most once per trigger per read, for the
+    /// first line it matched, so a flood of matching lines doesn't flood the app.
+    Triggered {
+        /// The pattern's index in the [`RegexSet`].
+        trigger: usize,
+        /// The line, in plain text.
+        line: String,
+    },
+    /// A command the shell marked (OSC 133 `C` to `D`) finished: its exit code when the shell
+    /// gave one, and how long it ran.
+    CommandFinished {
+        /// The exit code.
+        exit: Option<i32>,
+        /// From the output mark to the finish mark.
+        elapsed: std::time::Duration,
+    },
     /// The child exited, with its exit code when it could be read. Output may still arrive after
     /// this (see the `pty-waiter` thread in [`Session::spawn`]).
     Exited(Option<u32>),
+}
+
+/// The reader thread's OSC 133 state: turns each mark into an OSC 8 link for the emulator
+/// ([`crate::emulator::MARK_PREFIX`]) and times commands.
+///
+/// alacritty ignores OSC 133, and a row number recorded for a mark would go stale as soon as
+/// scrollback is trimmed. A hyperlink lives in the cells themselves, so it moves with the text:
+/// the prompt's cells carry `macaroni-mark:prompt[:<exit code of the command before>]`, the
+/// output's `macaroni-mark:output`, each with an id of its own so two marks of a kind in a row
+/// stay apart. Links are only looked up on demand and never drawn, so they don't show.
+#[derive(Default)]
+struct Marks {
+    /// Makes each mark's link id unique within the session.
+    seq: u64,
+    /// When the running command's output started (`C`), until its `D`.
+    started: Option<Instant>,
+    /// The exit code of the last command that ran, for the next prompt's link.
+    exit: Option<i32>,
+}
+
+impl Marks {
+    /// The bytes to feed the emulator right after `mark`, and the event to send when it ends a
+    /// command. A `D` without a `C` before it (a prompt redrawn with no command run) reports
+    /// nothing.
+    fn next(&mut self, mark: crate::osc::Mark) -> (Vec<u8>, Option<SessionEvent>) {
+        use crate::osc::Mark;
+        self.seq += 1;
+        let open = |uri: String| format!("\x1b]8;id=mcr{};{uri}\x07", self.seq).into_bytes();
+        let close = b"\x1b]8;;\x07".to_vec();
+        match mark {
+            Mark::Prompt => {
+                let uri = match self.exit.take() {
+                    Some(code) => format!("{}prompt:{code}", crate::emulator::MARK_PREFIX),
+                    None => format!("{}prompt", crate::emulator::MARK_PREFIX),
+                };
+                (open(uri), None)
+            }
+            Mark::Command => (close, None),
+            Mark::Output => {
+                self.started = Some(Instant::now());
+                (
+                    open(format!("{}output", crate::emulator::MARK_PREFIX)),
+                    None,
+                )
+            }
+            Mark::Finished(exit) => {
+                let event = self.started.take().map(|started| {
+                    self.exit = exit;
+                    SessionEvent::CommandFinished {
+                        exit,
+                        elapsed: started.elapsed(),
+                    }
+                });
+                (close, event)
+            }
+        }
+    }
+}
+
+/// `bytes` with each insert's bytes placed at its offset (offsets in order); `bytes` itself,
+/// unallocated, when there are none.
+fn with_inserts<'a>(bytes: &'a [u8], inserts: &[(usize, Vec<u8>)]) -> std::borrow::Cow<'a, [u8]> {
+    if inserts.is_empty() {
+        return std::borrow::Cow::Borrowed(bytes);
+    }
+    let mut out = Vec::with_capacity(bytes.len() + inserts.len() * 32);
+    let mut from = 0;
+    for (at, insert) in inserts {
+        out.extend_from_slice(&bytes[from..*at]);
+        out.extend_from_slice(insert);
+        from = *at;
+    }
+    out.extend_from_slice(&bytes[from..]);
+    std::borrow::Cow::Owned(out)
 }
 
 /// One shell: a PTY, the emulator it feeds, and the threads that move bytes between them.
@@ -99,6 +200,8 @@ pub struct Session {
     killer: Box<dyn ChildKiller + Send + Sync>,
     /// Set when output has been parsed since the last snapshot; merges wakeups.
     dirty: Arc<AtomicBool>,
+    /// The triggers, shared with the reader thread.
+    triggers: Triggers,
 }
 
 impl Session {
@@ -180,6 +283,7 @@ impl Session {
         };
         let emulator = Arc::new(FairMutex::new(emulator));
         let dirty = Arc::new(AtomicBool::new(false));
+        let triggers: Triggers = Arc::new(RwLock::new(config.triggers));
 
         // A program that opens a synchronized update and never closes it must not freeze the
         // screen: this thread applies the update at its deadline if it's still open.
@@ -225,11 +329,14 @@ impl Session {
             let dirty = dirty.clone();
             let notify = notify.clone();
             let writer = writer.clone();
+            let triggers = triggers.clone();
             thread::Builder::new()
                 .name("pty-reader".into())
                 .spawn(move || {
                     let mut buf = vec![0u8; 64 * 1024];
                     let mut sniffer = OscSniffer::default();
+                    let mut marks = Marks::default();
+                    let mut lines = Lines::default();
                     loop {
                         match reader.read(&mut buf) {
                             // EOF ends the thread but is not how exit is detected (ConPTY keeps
@@ -238,15 +345,68 @@ impl Session {
                             Ok(n) => {
                                 // The sniffer runs first and outside the lock: it has its own
                                 // parser and doesn't need the grid.
-                                for event in sniffer.feed(&buf[..n]) {
-                                    notify(match event {
-                                        OscEvent::Notify(n) => SessionEvent::Notify(n),
-                                        OscEvent::Cwd(path) => SessionEvent::Cwd(path),
-                                    });
+                                let mut inserts = Vec::new();
+                                // Where the prompt and typed command start (`true`) and end, for
+                                // `Lines` to leave them out.
+                                let mut quiet = Vec::new();
+                                let mut images = Vec::new();
+                                for (at, event) in sniffer.feed_at(&buf[..n]) {
+                                    match event {
+                                        OscEvent::Notify(n) => notify(SessionEvent::Notify(n)),
+                                        OscEvent::Cwd(path) => notify(SessionEvent::Cwd(path)),
+                                        OscEvent::Image(request) => images.push((at, request)),
+                                        OscEvent::Mark(mark) => {
+                                            use crate::osc::Mark;
+                                            quiet.push((
+                                                at,
+                                                matches!(mark, Mark::Prompt | Mark::Command),
+                                            ));
+                                            let (link, finished) = marks.next(mark);
+                                            inserts.push((at, link));
+                                            if let Some(event) = finished {
+                                                notify(event);
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Ok(triggers) = triggers.read()
+                                    && let Some(set) = triggers.as_ref()
+                                {
+                                    let mut fired = vec![false; set.len()];
+                                    let mut matched = |line: &str| {
+                                        for trigger in set.matches(line).iter() {
+                                            if !std::mem::replace(&mut fired[trigger], true) {
+                                                notify(SessionEvent::Triggered {
+                                                    trigger,
+                                                    line: line.to_owned(),
+                                                });
+                                            }
+                                        }
+                                    };
+                                    let mut from = 0;
+                                    for &(at, on) in &quiet {
+                                        lines.feed(&buf[from..at], &mut matched);
+                                        lines.set_quiet(on);
+                                        from = at;
+                                    }
+                                    lines.feed(&buf[from..n], &mut matched);
+                                } else if let Some(&(_, on)) = quiet.last() {
+                                    lines.set_quiet(on);
                                 }
                                 let deadline = {
                                     let mut emulator = emulator.lock();
-                                    emulator.feed(&buf[..n]);
+                                    // Placed under the lock: how many cells an image covers
+                                    // depends on the grid's size, which a resize could change.
+                                    for (at, request) in images {
+                                        if let Some(image) = request.place(emulator.size()) {
+                                            inserts.push((at, image.anchors()));
+                                            emulator.add_image(image);
+                                        }
+                                    }
+                                    // Stable, so a mark and an image ending together stay in
+                                    // the order they came.
+                                    inserts.sort_by_key(|(at, _)| *at);
+                                    emulator.feed(&with_inserts(&buf[..n], &inserts));
                                     emulator.sync_deadline()
                                 };
                                 // Before the next read, and so before any further output: this
@@ -286,7 +446,15 @@ impl Session {
             master: pair.master,
             killer,
             dirty,
+            triggers,
         })
+    }
+
+    /// Replaces the patterns output lines are matched against; `None` stops matching.
+    pub fn set_triggers(&self, triggers: Option<RegexSet>) {
+        if let Ok(mut current) = self.triggers.write() {
+            *current = triggers;
+        }
     }
 
     /// Changes the colors the program is told when it asks for one it hasn't set, for a new
@@ -356,6 +524,21 @@ impl Session {
         self.emulator.lock().selection_text()
     }
 
+    /// See [`Emulator::jump_to_prompt`].
+    pub fn jump_to_prompt(&self, up: bool) -> bool {
+        self.emulator.lock().jump_to_prompt(up)
+    }
+
+    /// See [`Emulator::all_text`].
+    pub fn all_text(&self) -> String {
+        self.emulator.lock().all_text()
+    }
+
+    /// See [`Emulator::last_output`].
+    pub fn last_output(&self) -> Option<String> {
+        self.emulator.lock().last_output()
+    }
+
     /// See [`Emulator::hyperlink_at`].
     pub fn hyperlink_at(&self, at: GridPoint) -> Option<String> {
         self.emulator.lock().hyperlink_at(at)
@@ -413,6 +596,43 @@ fn pty_size(size: GridSize) -> PtySize {
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
+
+    #[test]
+    fn marks_become_links_and_time_commands() {
+        use crate::osc::Mark;
+        let mut marks = super::Marks::default();
+        // A prompt redrawn with no command (D without C) reports nothing.
+        assert!(marks.next(Mark::Finished(Some(0))).1.is_none());
+        let (link, _) = marks.next(Mark::Prompt);
+        assert!(
+            String::from_utf8(link)
+                .unwrap()
+                .ends_with(";macaroni-mark:prompt\x07")
+        );
+        marks.next(Mark::Output);
+        let (close, event) = marks.next(Mark::Finished(Some(3)));
+        assert_eq!(close, b"\x1b]8;;\x07");
+        assert!(matches!(
+            event,
+            Some(super::SessionEvent::CommandFinished { exit: Some(3), .. })
+        ));
+        let (link, _) = marks.next(Mark::Prompt);
+        assert!(
+            String::from_utf8(link)
+                .unwrap()
+                .ends_with(";macaroni-mark:prompt:3\x07")
+        );
+    }
+
+    #[test]
+    fn inserts_land_at_their_offsets() {
+        let inserts = [(1, b"<".to_vec()), (3, b">".to_vec())];
+        assert_eq!(&*super::with_inserts(b"abcd", &inserts), b"a<bc>d");
+        assert!(matches!(
+            super::with_inserts(b"abcd", &[]),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -449,6 +669,7 @@ mod tests {
                 env: Vec::new(),
                 colors: None,
                 cursor: CursorShape::Block,
+                triggers: Some(RegexSet::new([r"macaroni-\w+"]).unwrap()),
             },
             move |event| {
                 let _ = tx.send(event);
@@ -459,6 +680,7 @@ mod tests {
         // ConPTY can deliver the output after the child has already exited.
         let mut deadline = Instant::now() + Duration::from_secs(15);
         let mut screen = String::new();
+        let mut triggered = false;
         while Instant::now() < deadline {
             screen = session
                 .snapshot()
@@ -466,13 +688,19 @@ mod tests {
                 .iter()
                 .flat_map(|row| row.iter().map(|c| c.ch).chain(['\n']))
                 .collect();
-            if screen.contains(expected) {
+            if screen.contains(expected) && triggered {
                 return;
             }
-            if let Ok(SessionEvent::Exited(_)) = rx.recv_timeout(Duration::from_millis(100)) {
-                deadline = deadline.min(Instant::now() + Duration::from_secs(3));
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(SessionEvent::Exited(_)) => {
+                    deadline = deadline.min(Instant::now() + Duration::from_secs(3));
+                }
+                Ok(SessionEvent::Triggered { trigger: 0, line }) => {
+                    triggered |= line.contains(expected);
+                }
+                _ => {}
             }
         }
-        panic!("{expected:?} never appeared:\n{screen}");
+        panic!("{expected:?} never appeared (triggered: {triggered}):\n{screen}");
     }
 }

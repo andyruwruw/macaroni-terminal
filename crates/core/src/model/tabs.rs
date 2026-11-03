@@ -121,7 +121,7 @@ impl Model {
     /// # Panics
     ///
     /// If `pane` doesn't exist or doesn't hold `tab`.
-    fn take_tab(&mut self, pane: PaneId, tab: TabId) -> usize {
+    pub(super) fn take_tab(&mut self, pane: PaneId, tab: TabId) -> usize {
         let pane = self
             .panes
             .get_mut(&pane)
@@ -163,6 +163,7 @@ impl Model {
             tab.muted = muted;
             if muted {
                 tab.attention = None;
+                tab.badge = None;
             }
         });
     }
@@ -252,6 +253,8 @@ impl Model {
         match to {
             MoveTo::Workspace(ws) => ws == from_ws || self.workspace(ws).is_none(),
             MoveTo::NewWorkspace => alone && only_pane,
+            // Handled by `move_tab_between_windows` before this is asked.
+            MoveTo::NewWindow => true,
             MoveTo::Pane { pane, .. } => !self.panes.contains_key(&pane),
             MoveTo::SplitPane { pane, .. } => {
                 !self.panes.contains_key(&pane) || (pane == from && alone)
@@ -276,7 +279,7 @@ impl Model {
     /// # Panics
     ///
     /// If the target doesn't exist; [`Model::move_is_pointless`] rules that out first.
-    fn put_moved_tab(&mut self, tab: TabId, to: MoveTo) {
+    pub(super) fn put_moved_tab(&mut self, tab: TabId, to: MoveTo) {
         match to {
             MoveTo::Workspace(ws) => {
                 let target = self
@@ -286,7 +289,7 @@ impl Model {
                 self.insert_tab(target, tab);
                 self.active = ws;
             }
-            MoveTo::NewWorkspace => {
+            MoveTo::NewWorkspace | MoveTo::NewWindow => {
                 let pane = self.pane_with(tab);
                 self.push_workspace(pane);
             }
@@ -349,6 +352,7 @@ fn blank_tab(id: TabId, kind: TabKind, url: Option<String>) -> Tab {
         name: None,
         kind,
         attention: None,
+        badge: None,
         agent: None,
         cwd: None,
         url,

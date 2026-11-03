@@ -71,13 +71,13 @@ pub fn installed() -> bool {
 
 /// `program` from `System32`: Windows' own `curl` and `tar` (bsdtar, which unpacks zips), not
 /// Git for Windows' GNU tar that may come first on `PATH`.
-fn system_tool(program: &str) -> PathBuf {
+pub(crate) fn system_tool(program: &str) -> PathBuf {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     PathBuf::from(root).join("System32").join(program)
 }
 
 /// Runs `command` without a console window, turning a failure into a message naming `what`.
-fn run(mut command: Command, what: &str) -> Result<(), String> {
+pub(crate) fn run(mut command: Command, what: &str) -> Result<(), String> {
     hide_window(&mut command);
     let out = command
         .stdin(Stdio::null())
@@ -272,7 +272,7 @@ fn folder_query(folder: &Path) -> String {
 }
 
 /// Keeps a child process from opening a console window on Windows.
-fn hide_window(command: &mut Command) {
+pub(crate) fn hide_window(command: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

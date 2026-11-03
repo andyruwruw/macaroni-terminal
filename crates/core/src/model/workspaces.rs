@@ -65,10 +65,12 @@ impl Model {
                 .flat_map(|p| self.panes[p].tabs.clone())
                 .collect();
             for tab in tabs {
-                self.tabs
+                let tab = self
+                    .tabs
                     .get_mut(&tab)
-                    .expect("every tab in a pane is in the model")
-                    .attention = None;
+                    .expect("every tab in a pane is in the model");
+                tab.attention = None;
+                tab.badge = None;
             }
         }
     }
@@ -94,12 +96,16 @@ impl Model {
             color: None,
             group: None,
             cwd: None,
+            env: Vec::new(),
+            startup: None,
+            maximized: None,
         });
         self.active = id;
         id
     }
 
-    /// Closes the workspace and everything in it, or quits if it's the last one.
+    /// Closes the workspace and everything in it. Its window's last workspace closes the
+    /// window instead, or, in the only window, quits.
     ///
     /// Quitting leaves the model untouched and emits a kill or close for every tab, then
     /// [`Effect::Quit`]. Ignored when the workspace doesn't exist.
@@ -108,6 +114,9 @@ impl Model {
             return;
         };
         if self.workspaces.len() == 1 {
+            if self.close_last_workspace(effects) {
+                return;
+            }
             effects.extend(self.sessions().map(Effect::KillSession));
             effects.extend(self.browsers().map(Effect::CloseBrowser));
             effects.push(Effect::Quit);

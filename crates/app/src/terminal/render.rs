@@ -9,13 +9,16 @@
 //! all: [`super::box_drawing`] turns them into rectangles. Row layouts are cached by content
 //! hash, not by position, so a line that scrolled up reuses its layout.
 //!
-//! Draw order within the view's layer: backgrounds, decorations and boxes (quads), then text
-//! (iced draws a layer's quads before its text whatever the call order). The cursor and IME
-//! preedit go in a layer of their own on top, so the block cursor covers the glyph under it.
+//! Draw order within the view's layer: backgrounds, trigger highlights, decorations and boxes
+//! (quads), then text (iced draws a layer's quads before its text whatever the call order).
+//! Inline images go in a layer above that, so they cover the blank anchor cells they sit on and
+//! any text later printed over them. The cursor and IME preedit go in a layer of their own on
+//! top, so the block cursor covers the glyph under it.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+use iced::advanced::image::{self, Renderer as _};
 use iced::advanced::renderer::{Quad, Renderer as _};
 use iced::advanced::text::{self, Paragraph as _, Renderer as _, Text};
 use iced::{Border, Color, Font, Pixels, Point, Rectangle, Size, font};
@@ -57,6 +60,9 @@ pub struct Metrics {
     pub ligatures: bool,
     /// The row height as a multiple of `font_size` (`[font] line_height`).
     pub line_height: f32,
+    /// Which `[font] fallback` list was in effect ([`fonts::fallback_generation`]), so a new
+    /// list clears the row cache like any other font change.
+    pub fallback: u32,
 }
 
 impl Metrics {
@@ -73,6 +79,7 @@ impl Metrics {
             cell_height,
             ligatures,
             line_height,
+            fallback: fonts::fallback_generation(),
         }
     }
 
@@ -124,13 +131,16 @@ fn owned_text(content: &str, font: Font, metrics: Metrics) -> Text<String> {
     }
 }
 
-/// The font for one cell: the bundled symbols font for Private Use Area characters (Windows icon
-/// fonts claim the same code points, so fallback would pick wrong glyphs), else `base` in the
-/// cell's weight and style.
+/// The font for one cell, in the cell's weight and style: a `[font] fallback` family when `base`
+/// lacks the character and one has it, else the bundled symbols font for Private Use Area
+/// characters (Windows icon fonts claim the same code points, so system fallback would pick
+/// wrong glyphs), else `base`.
 fn font_for(base: Font, ch: char, flags: CellFlags) -> Font {
-    if fonts::is_private_use(ch) {
-        return fonts::SYMBOLS;
-    }
+    let base = match (!ch.is_ascii()).then(|| fonts::fallback_for(ch)).flatten() {
+        Some(fallback) => fallback,
+        None if fonts::is_private_use(ch) => return fonts::SYMBOLS,
+        None => base,
+    };
     Font {
         weight: if flags.contains(CellFlags::BOLD) {
             font::Weight::Bold
@@ -196,6 +206,8 @@ pub struct Frame<'a> {
     pub origin: Point,
     /// Skip painting the default background.
     pub transparent: bool,
+    /// Text to color, over its background: each pattern and its color.
+    pub highlights: &'a [(regex::Regex, Color)],
     /// Whether the view has keyboard focus and the window is focused; otherwise the cursor is a
     /// hollow block.
     pub focused: bool,
@@ -213,6 +225,10 @@ pub struct GridRenderer {
     /// Layouts used in the last frame, by row content hash. Rebuilt every frame from the previous
     /// one, so layouts for rows no longer on screen are dropped.
     rows: HashMap<u64, RowLayout>,
+    /// The inline images drawn in the last frame, by image id (unique across sessions). The
+    /// handle has to be the same one every frame: iced keys its decoded copy by the handle's
+    /// id, and a new handle for the same bytes would decode and upload them again.
+    images: HashMap<u64, image::Handle>,
 }
 
 impl GridRenderer {
@@ -255,12 +271,111 @@ impl GridRenderer {
             });
             let y = origin.y + i as f32 * metrics.cell_height;
             row.draw(renderer, origin.x, y, metrics, clip);
+            draw_highlights(renderer, frame, cells, y);
         }
 
+        self.draw_images(renderer, frame, clip);
+        draw_prompt_marks(renderer, frame, clip);
         if let Some(link) = frame.link {
             draw_link(renderer, frame, link);
         }
         draw_cursor(renderer, frame, clip);
+    }
+}
+
+/// Colors the parts of a row (its top at `y`) that match a highlight pattern. Rows are matched
+/// one at a time, so a match can't span a wrapped line. Done every frame rather than cached
+/// with the row's layout: a few short regex searches per row cost less than keeping the cache
+/// in step with the config.
+fn draw_highlights(renderer: &mut iced::Renderer, frame: &Frame<'_>, cells: &[Cell], y: f32) {
+    if frame.highlights.is_empty() {
+        return;
+    }
+    // The row as text, with each character's byte offset and column (wide characters' spacer
+    // cells have no text of their own).
+    let mut text = String::with_capacity(cells.len());
+    let mut starts = Vec::with_capacity(cells.len());
+    for (col, cell) in cells.iter().enumerate() {
+        if cell.flags.contains(CellFlags::WIDE_SPACER) {
+            continue;
+        }
+        starts.push((text.len(), col));
+        text.push(cell.ch);
+    }
+    if text.trim().is_empty() {
+        return;
+    }
+    let column = |byte: usize| {
+        starts
+            .iter()
+            .find(|(at, _)| *at >= byte)
+            .map_or(cells.len(), |(_, col)| *col)
+    };
+    let (cw, ch) = (frame.metrics.cell_width, frame.metrics.cell_height);
+    for (regex, color) in frame.highlights {
+        for found in regex.find_iter(&text).filter(|m| !m.is_empty()) {
+            let (start, end) = (column(found.start()), column(found.end()));
+            fill(
+                renderer,
+                Rectangle::new(
+                    Point::new(frame.origin.x + start as f32 * cw, y),
+                    Size::new((end - start) as f32 * cw, ch),
+                ),
+                *color,
+            );
+        }
+    }
+}
+
+impl GridRenderer {
+    /// Draws the inline images on screen in a layer over the text, each fitted to its block of
+    /// cells (keeping its shape unless it asked to stretch). Afterwards the handle cache holds
+    /// exactly these images.
+    fn draw_images(&mut self, renderer: &mut iced::Renderer, frame: &Frame<'_>, clip: Rectangle) {
+        let mut previous = std::mem::take(&mut self.images);
+        if frame.snapshot.images.is_empty() {
+            return;
+        }
+        let cache = &mut self.images;
+        let (cw, ch) = (frame.metrics.cell_width, frame.metrics.cell_height);
+        // The grid, not the view: an image half scrolled off stops at the text's edge rather
+        // than running into the padding.
+        let grid = Rectangle::new(
+            frame.origin,
+            Size::new(
+                frame.snapshot.cols as f32 * cw,
+                frame.snapshot.rows.len() as f32 * ch,
+            ),
+        );
+        let Some(clip) = grid.intersection(&clip) else {
+            return;
+        };
+        renderer.with_layer(clip, |renderer| {
+            for placement in &frame.snapshot.images {
+                let picture = &placement.image;
+                let handle = previous
+                    .remove(&picture.id)
+                    .unwrap_or_else(|| image::Handle::from_bytes(picture.data.to_vec()));
+                let block = Size::new(f32::from(picture.cols) * cw, f32::from(picture.rows) * ch);
+                let size = if picture.stretch {
+                    block
+                } else {
+                    let (w, h) = (picture.width as f32, picture.height as f32);
+                    let scale = (block.width / w).min(block.height / h);
+                    Size::new(w * scale, h * scale)
+                };
+                let top_left = Point::new(
+                    frame.origin.x + placement.col as f32 * cw,
+                    frame.origin.y + placement.row as f32 * ch,
+                );
+                renderer.draw_image(
+                    image::Image::new(handle.clone()),
+                    Rectangle::new(top_left, size),
+                    clip,
+                );
+                cache.insert(picture.id, handle);
+            }
+        });
     }
 }
 
@@ -327,6 +442,35 @@ impl RowLayout {
 fn line_thickness(metrics: Metrics) -> f32 {
     (metrics.font_size / FONT_SIZE_PER_LINE_PX).round().max(1.0)
 }
+
+/// A short bar in the left padding beside each prompt the shell marked, for how the command
+/// before it ended: the theme's red when it failed, a faded green when it succeeded. The
+/// padding is the only room that isn't text, so the bar sits just left of the first column.
+fn draw_prompt_marks(renderer: &mut iced::Renderer, frame: &Frame<'_>, clip: Rectangle) {
+    let overrides = frame.snapshot.color_overrides.as_slice();
+    let failed = to_iced(frame.palette.resolve(TermColor::Indexed(1), overrides), 1.0);
+    let passed = to_iced(
+        frame.palette.resolve(TermColor::Indexed(2), overrides),
+        0.45,
+    );
+    for &(row, exit) in &frame.snapshot.prompts {
+        let bar = Rectangle {
+            x: frame.origin.x - PROMPT_MARK_INSET,
+            y: frame.origin.y + row as f32 * frame.metrics.cell_height,
+            width: PROMPT_MARK_WIDTH,
+            height: frame.metrics.cell_height,
+        };
+        if let Some(bar) = bar.intersection(&clip) {
+            fill(renderer, bar, if exit == 0 { passed } else { failed });
+        }
+    }
+}
+
+/// How far left of the first column a prompt's mark starts.
+const PROMPT_MARK_INSET: f32 = 4.0;
+
+/// How wide a prompt's mark is.
+const PROMPT_MARK_WIDTH: f32 = 2.0;
 
 /// Underlines the link under the pointer: its row, first and last column.
 fn draw_link(

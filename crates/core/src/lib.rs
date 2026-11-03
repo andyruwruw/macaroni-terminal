@@ -1,4 +1,4 @@
-//! The pure app model: workspaces, their split layouts, panes and tabs, as plain data.
+//! The pure app model: windows, their workspaces, split layouts, panes and tabs, as plain data.
 //!
 //! [`Model`] holds the state and [`Model::apply`] is the only way to change it: every input
 //! (keybindings, menus, the sidebar, the control socket) becomes a [`Command`], and `apply`
@@ -19,13 +19,13 @@ mod ids;
 mod layout;
 mod model;
 
-pub use ids::{BrowserId, GroupId, PaneId, SessionId, TabId, WorkspaceId};
+pub use ids::{BrowserId, GroupId, PaneId, SessionId, TabId, WindowId, WorkspaceId};
 pub use layout::{
     Axis, Direction, Divider, MIN_RATIO, Rect, Side, SplitNode, neighbour, split_rect,
 };
 pub use model::{
-    Agent, AgentState, Command, Effect, Group, LayoutSpec, Model, MoveTo, Notice, Pane, Shift, Tab,
-    TabKind, TabSpec, Workspace, WorkspaceSpec,
+    Agent, AgentState, Command, Effect, Group, LayoutSpec, Model, MoveTo, Notice, Pane, Shift,
+    Spec, Tab, TabKind, TabSpec, WindowView, Workspace, WorkspaceSpec,
 };
 
 #[cfg(test)]

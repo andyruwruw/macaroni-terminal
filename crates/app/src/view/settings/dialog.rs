@@ -147,7 +147,7 @@ impl App {
         let c = self.chrome;
         // Lowercased once here, since `Setting::matches` expects it.
         let query = settings.query.trim().to_lowercase();
-        let size = dialog_size(self.window_size);
+        let size = dialog_size(self.window_size());
         // Pinned over the cards it stays in view while they scroll, so a color can be watched as
         // it's dragged. Outside the scrollable it also never moves a card, which `Jump` relies on.
         let preview = (query.is_empty())
@@ -224,7 +224,7 @@ impl App {
                 .iter()
                 .filter_map(|t| Some((t.name, t.label, theme.get(t.name)?)))
                 .collect();
-            color_picker::picker_layer(c, picker, &themes, self.window_size)
+            color_picker::picker_layer(c, picker, &themes, self.window_size())
         });
         Some(stack![backdrop].push(picker).into())
     }
@@ -1228,7 +1228,7 @@ fn field<'a>(
 }
 
 /// An on/off switch: off, its track is a field's (sunken and outlined); on, the accent.
-fn toggle<'a>(c: Chrome, on: bool, message: Message) -> Element<'a, Message> {
+pub(crate) fn toggle<'a>(c: Chrome, on: bool, message: Message) -> Element<'a, Message> {
     let knob = container(Space::new().width(14).height(14)).style(move |_| card_style(c.knob, 7.0));
     let track = container(knob)
         .width(34)

@@ -12,6 +12,7 @@
 
 mod color_picker;
 mod dialog;
+pub(crate) use dialog::toggle;
 mod list;
 mod preview;
 
@@ -107,7 +108,7 @@ impl Section {
     }
 
     /// The sections the dialog lists, in order ([`Section::shown_in_build`]).
-    fn shown() -> impl Iterator<Item = Self> {
+    pub(crate) fn shown() -> impl Iterator<Item = Self> {
         Self::ALL.into_iter().filter(|s| s.shown_in_build())
     }
 
@@ -122,7 +123,7 @@ impl Section {
     }
 
     /// The section's name, in the dialog's list and over its rows.
-    fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Terminal => "Terminal",
@@ -256,6 +257,8 @@ pub enum SettingsMessage {
     VsCode(bool),
     /// Stop VS Code's server; the next VS Code tab starts it again.
     VsCodeStop,
+    /// Download (`true`) or remove Chromium for browser tabs.
+    Chromium(bool),
     /// Enter in the new SSH profile's fields: add it from their drafts.
     AddSsh,
     /// Remove the `[[ssh]]` profile at this index.
@@ -601,6 +604,7 @@ impl App {
         match message {
             SettingsMessage::Reveal(section, group) => return self.reveal_card(section, group),
             SettingsMessage::VsCode(install) => return self.vscode_install(install),
+            SettingsMessage::Chromium(install) => return self.chromium_install(install),
             SettingsMessage::VsCodeStop => {
                 self.vscode_web.stop();
                 return Task::none();
@@ -787,7 +791,8 @@ impl App {
             SettingsMessage::PickerClose => settings.picker = None,
             SettingsMessage::Reveal(..)
             | SettingsMessage::VsCode(_)
-            | SettingsMessage::VsCodeStop => {}
+            | SettingsMessage::VsCodeStop
+            | SettingsMessage::Chromium(_) => {}
             SettingsMessage::AddSsh => {
                 let host = settings.drafts.get(SSH_HOST).map_or("", |h| h.trim());
                 if host.is_empty() {

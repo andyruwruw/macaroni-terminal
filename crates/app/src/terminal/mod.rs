@@ -29,7 +29,7 @@ use iced::{Element, Event, Length, Point, Rectangle, Size, Theme, Vector, window
 use macaroni_core::SessionId;
 use macaroni_term::{
     CellSide, GridPoint, GridSize, Key, Link, Mods, MouseButton, MouseEvent, Scroll, SelectionKind,
-    Snapshot, encode_key, encode_mouse, url_at,
+    Snapshot, encode_key, encode_mouse, file_at, url_at,
 };
 
 pub use render::Metrics;
@@ -142,6 +142,8 @@ pub struct TerminalView<'a, M> {
     wheel_lines: f32,
     /// Finishing a selection copies it.
     copy_on_select: bool,
+    /// Text to color wherever it shows (`[[trigger]] highlight`): each pattern and its color.
+    highlights: &'a [(regex::Regex, iced::Color)],
     /// Wraps a [`ViewEvent`] into the app's message.
     on_event: Box<dyn Fn(ViewEvent) -> M + 'a>,
 }
@@ -171,6 +173,7 @@ impl<'a, M> TerminalView<'a, M> {
             enter_renames: false,
             wheel_lines: WHEEL_LINES,
             copy_on_select: false,
+            highlights: &[],
             on_event: Box::new(on_event),
         }
     }
@@ -212,6 +215,11 @@ impl<'a, M> TerminalView<'a, M> {
             copy_on_select,
             ..self
         }
+    }
+
+    /// Colors text matching each pattern with its color (`[[trigger]] highlight`).
+    pub fn highlights(self, highlights: &'a [(regex::Regex, iced::Color)]) -> Self {
+        Self { highlights, ..self }
     }
 
     /// The grid that fits in `bounds` inside the padding: at least 1x1, whole cells only (the
@@ -261,7 +269,15 @@ impl<'a, M> TerminalView<'a, M> {
         }
         let position = cursor.position_over(bounds)?;
         let (at, _) = self.cell_at(bounds, position);
-        let link = url_at(self.snapshot.rows.get(at.row)?, at.col)?;
+        let row = self.snapshot.rows.get(at.row)?;
+        // A file reference underlines like a URL; whether the file exists is checked on click.
+        let link = url_at(row, at.col).or_else(|| {
+            file_at(row, at.col).map(|f| Link {
+                start: f.start,
+                end: f.end,
+                url: f.path,
+            })
+        })?;
         Some((at.row, link))
     }
 
@@ -830,6 +846,7 @@ impl<M> Widget<M, Theme, iced::Renderer> for TerminalView<'_, M> {
             metrics: self.metrics,
             origin: bounds.position() + Vector::new(self.padding, self.padding),
             transparent: self.transparent,
+            highlights: self.highlights,
             focused: self.focused && state.window_focused,
             preedit: state
                 .preedit

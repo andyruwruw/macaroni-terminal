@@ -49,6 +49,17 @@ impl Model {
         }
     }
 
+    /// Maximizes the active workspace's focused pane, or ends it (`Command::ToggleMaximize`).
+    pub(super) fn toggle_maximize(&mut self) {
+        let ws = self.workspace_mut(self.active);
+        if ws.layout.leaves().len() > 1 {
+            ws.maximized = match ws.maximized {
+                Some(_) => None,
+                None => Some(ws.focused),
+            };
+        }
+    }
+
     /// Focuses the nearest pane in a direction from the focused one, if there is one.
     ///
     /// Works in the unit square: ratios alone decide adjacency, so the result doesn't depend on
@@ -59,6 +70,36 @@ impl Model {
         if let Some(target) = neighbour(&panes, ws.focused, direction) {
             self.workspace_mut(self.active).focused = target;
         }
+    }
+
+    /// Swaps the focused pane with its neighbour in `direction` (`Command::SwapPane`).
+    pub(super) fn swap_pane(&mut self, direction: Direction) {
+        let ws = self.active_workspace();
+        let focused = ws.focused;
+        if let Some(other) = neighbour(&ws.layout.panes(Rect::UNIT), focused, direction) {
+            self.workspace_mut(self.active).layout.map_leaves(&|pane| {
+                if pane == focused {
+                    other
+                } else if pane == other {
+                    focused
+                } else {
+                    pane
+                }
+            });
+        }
+    }
+
+    /// Moves every pane one place along in leaf order (`Command::RotatePanes`).
+    pub(super) fn rotate_panes(&mut self) {
+        let leaves = self.active_workspace().layout.leaves();
+        if leaves.len() < 2 {
+            return;
+        }
+        // The pane in each place is the one from the place before it.
+        self.workspace_mut(self.active).layout.map_leaves(&|pane| {
+            let at = leaves.iter().position(|p| *p == pane).unwrap_or(0);
+            leaves[(at + leaves.len() - 1) % leaves.len()]
+        });
     }
 
     /// Sets the ratio of the split at `path`, clamped to `MIN_RATIO..=1 - MIN_RATIO`; ignored

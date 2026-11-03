@@ -268,7 +268,7 @@ impl App {
             content = content.push(text(error.clone()).size(TEXT_SIZE).color(c.danger));
         }
         content = content.push(body);
-        let window = self.window_size;
+        let window = self.window_size();
         let card = container(content)
             .padding(20)
             .width((window.width - PICKER_MARGIN).clamp(320.0, PICKER_SIZE.width))

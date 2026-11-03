@@ -78,7 +78,7 @@ impl App {
     /// below [`COLLAPSE_BELOW`]) and leaving the panes [`MIN_PANE_ROOM`].
     pub(crate) fn sidebar_drag_move(&mut self, x: f32) -> Task<Message> {
         let collapsed = x < COLLAPSE_BELOW;
-        let max = (self.window_size.width - MIN_PANE_ROOM).max(COLLAPSE_BELOW);
+        let max = (self.window_size().width - MIN_PANE_ROOM).max(COLLAPSE_BELOW);
         self.sidebar.collapsed = collapsed;
         if !collapsed {
             let min = sidebar_compact_width(self.chrome);

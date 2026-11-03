@@ -18,6 +18,7 @@ use super::tabs::tab_spacing;
 use super::{pane_area, pane_overlap, workspace_origin};
 use crate::gap_line::{Gap, GapLine};
 use crate::pointer::Zone;
+use crate::state::Over;
 use crate::theme::Chrome;
 use crate::{App, Dragged, DropTarget, Message, SidebarHover, WorkspaceDrop};
 
@@ -36,14 +37,33 @@ impl App {
     /// the sidebar, which mark the item under the cursor instead). Pane geometry is the same
     /// `SplitNode::panes` math the panes are drawn with; positions in a strip and sidebar
     /// entries come from what the cursor is over.
+    ///
+    /// Over another window, the target is worked out the same way in that window's layout (its
+    /// marker in its coordinates), except that nothing there reports what's hovered: its sidebar
+    /// means its active workspace, and its strips mean their end. Outside every window, it's a
+    /// new window.
     pub fn drop_target(&self) -> Option<(DropTarget, Option<Rectangle>)> {
         let c = self.chrome;
         let drag = self.item_drag.filter(|d| d.dragging)?;
-        let at = drag.at;
         let tab = drag.tab()?;
+        let at = match drag.over {
+            Over::Here => drag.at,
+            Over::Window(id, at) => {
+                // The geometry below asks `App::win` and `App::shown`, so for a moment it's
+                // that window being looked at.
+                let previous = self.viewing.replace(Some(id));
+                let target = if at.x < c.s.window.sidebar_width {
+                    Some((DropTarget::Workspace(self.shown().active), None))
+                } else {
+                    self.pane_drop(at, tab, None)
+                };
+                self.viewing.set(previous);
+                return target;
+            }
+            Over::Outside(_) => return Some((DropTarget::NewWindow, None)),
+        };
         let source = self.model.pane_of_tab(tab)?;
         let home = self.model.workspace_of_pane(source)?;
-        let alone = self.model.pane(source).is_some_and(|p| p.tabs.len() == 1);
 
         if at.x < c.s.window.sidebar_width {
             return match self.sidebar_hover?.0 {
@@ -54,25 +74,37 @@ impl App {
                 SidebarHover::NewWorkspace => Some((DropTarget::NewWorkspace, None)),
             };
         }
+        self.pane_drop(at, tab, self.hovered_tab)
+    }
 
-        let ws = self.model.active_workspace();
+    /// Where a tab dropped at `at` over the workspace area lands, from the panes' geometry in
+    /// the window being looked at (`App::shown_workspace`). In a strip it goes after the
+    /// `hovered` tab of that pane, else at the strip's end.
+    fn pane_drop(
+        &self,
+        at: Point,
+        tab: TabId,
+        hovered: Option<(macaroni_core::PaneId, usize)>,
+    ) -> Option<(DropTarget, Option<Rectangle>)> {
+        let c = self.chrome;
+        let source = self.model.pane_of_tab(tab)?;
+        let alone = self.model.pane(source).is_some_and(|p| p.tabs.len() == 1);
+        let ws = self.shown_workspace();
         let origin = workspace_origin(c);
         // The workspace area's padding (`App::workspace_area`) takes a gap off the right and
         // bottom; `window_size` is used instead of the `responsive` size, which isn't kept.
         let area = Rect {
             x: 0.0,
             y: 0.0,
-            width: self.window_size.width - origin.x - c.s.panes.margin,
-            height: self.window_size.height - origin.y - c.s.panes.margin,
+            width: self.window_size().width - origin.x - c.s.panes.margin,
+            height: self.window_size().height - origin.y - c.s.panes.margin,
         };
         let local = Point::new(at.x - origin.x, at.y - origin.y);
-        let panes = ws
-            .layout
-            .panes(pane_area(c, Size::new(area.width, area.height)));
+        let panes = ws.shown_panes(pane_area(c, Size::new(area.width, area.height)));
 
         // Near the workspace's outer edge: a pane as tall or wide as the whole workspace.
         if panes.len() > 1
-            && let Some(edge) = edge_drop(origin, area, local)
+            && let Some(edge) = edge_drop(ws.id, origin, area, local)
         {
             return Some(edge);
         }
@@ -92,7 +124,7 @@ impl App {
                 // Before or after the hovered tab, by which half (or gap) the cursor is in. A
                 // drag doesn't clear the hover on exit, so moving past the last tab keeps it as
                 // "after the last"; with no tab of this pane hovered yet, it appends.
-                let index = match self.hovered_tab {
+                let index = match hovered {
                     Some((p, i)) if p == pane => i + usize::from(self.hover_zone.after()),
                     _ => usize::MAX,
                 };
@@ -152,9 +184,10 @@ impl App {
     /// the group's start (or after the group, collapsed). Over "New workspace", the end.
     pub fn workspace_drop(&self) -> Option<WorkspaceDrop> {
         let c = self.chrome;
+        // Over another window (or none), it moves there instead (`App::item_drag_end`).
         let drag = self
             .item_drag
-            .filter(|d| d.dragging && d.at.x < c.s.window.sidebar_width)?;
+            .filter(|d| d.dragging && d.over == Over::Here && d.at.x < c.s.window.sidebar_width)?;
         let Dragged::Workspace(ws) = drag.item else {
             return None;
         };
@@ -336,10 +369,15 @@ pub(super) fn insertion_line(
     .into()
 }
 
-/// A whole-workspace split when the cursor (`local`, from the pane area's `origin`) is within
-/// [`EDGE_SNAP`] of the left, right or bottom of `area`, with its marker in window
+/// A split of all of workspace `ws` when the cursor (`local`, from the pane area's `origin`) is
+/// within [`EDGE_SNAP`] of the left, right or bottom of `area`, with its marker in window
 /// coordinates. The top edge is left out: it's where the tab strips are.
-fn edge_drop(origin: Point, area: Rect, local: Point) -> Option<(DropTarget, Option<Rectangle>)> {
+fn edge_drop(
+    ws: WorkspaceId,
+    origin: Point,
+    area: Rect,
+    local: Point,
+) -> Option<(DropTarget, Option<Rectangle>)> {
     let direction = if local.x < EDGE_SNAP {
         Direction::Left
     } else if local.x > area.width - EDGE_SNAP {
@@ -362,7 +400,7 @@ fn edge_drop(origin: Point, area: Rect, local: Point) -> Option<(DropTarget, Opt
         Point::new(origin.x + x, origin.y + y),
         Size::new(width, height),
     );
-    Some((DropTarget::Edge(direction), Some(marker)))
+    Some((DropTarget::Edge(ws, direction), Some(marker)))
 }
 
 /// The side of `card` that `at` is nearest, if it's within [`SPLIT_ZONE`] of it; `None` for the

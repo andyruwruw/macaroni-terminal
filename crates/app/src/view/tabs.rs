@@ -64,8 +64,14 @@ const SCROLLER_ALPHA: f32 = 0.6;
 /// Between the agent's status and its summary, and either side of them.
 const STATUS_SPACING: f32 = 4.0;
 
-/// The find bar's field width.
+/// The find bar's field width, room permitting.
 const SEARCH_WIDTH: f32 = 220.0;
+
+/// The narrowest the find bar's field gets in a narrow pane.
+const MIN_SEARCH_WIDTH: f32 = 80.0;
+
+/// Room for the find bar's "No matches".
+const SEARCH_STATUS_WIDTH: f32 = 72.0;
 
 /// Between the find bar's parts.
 const SEARCH_SPACING: f32 = 4.0;
@@ -106,6 +112,13 @@ pub(super) fn strip_scrollbar_room(c: Chrome) -> f32 {
     (c.s.tabs.scrollbar_width + SCROLLBAR_MARGIN * 2.0).min(c.s.tabs.gap)
 }
 
+/// What a tab's badge says: what a trigger set, else `[tab_items] badge` filled in.
+fn tab_badge(c: Chrome, template: &str, tab: &Tab, index: usize) -> String {
+    tab.badge
+        .clone()
+        .unwrap_or_else(|| tab_text(c, template, tab, index))
+}
+
 /// `template` from `[tab_items]` filled in for `tab`, the `index`th in its pane.
 fn tab_text(c: Chrome, template: &str, tab: &Tab, index: usize) -> String {
     label::fill(template, |key| tab_value(c, tab, index, key))
@@ -140,8 +153,9 @@ impl App {
         let mut strip = row![tab_scroller(c, pane.id, tabs.into(), overflow), add]
             .spacing(tab_spacing(c))
             .align_y(alignment::Vertical::Top);
-        let search = self.search_bar(pane);
-        let buttons = self.config.tab_items.new_buttons;
+        let search = self.search_bar(pane, width);
+        // The find bar takes the new tab buttons' place while it's open.
+        let buttons = self.config.tab_items.new_buttons && search.is_none();
         // Pushes the find bar and the buttons to the right.
         if search.is_some() || buttons {
             strip = strip.push(Space::new().width(Fill));
@@ -239,7 +253,7 @@ impl App {
                 )
                 .chars()
                 .count()
-                    + tab_text(c, &items.badge, tab, index).chars().count();
+                    + tab_badge(c, &items.badge, tab, index).chars().count();
                 // Rough widths: per title character, and for the icon, padding, close button
                 // and spacing.
                 text as f32 * c.s.tabs.title_size * CHAR_WIDTH
@@ -252,9 +266,13 @@ impl App {
                     + TAB_WIDTH_SLACK
             })
             .sum();
-        // The `+` button (a `tabs.height` square) and its spacing, and the new tab buttons.
-        let room =
-            width - c.s.tabs.height - tab_spacing(c) - self.new_buttons_width() - STRIP_SLACK;
+        // The `+` button (a `tabs.height` square) and its spacing, and the find bar or the new
+        // tab buttons.
+        let right = match self.search_field_width(pane, width) {
+            Some(field) => field + self.search_fixed_width(),
+            None => self.new_buttons_width(),
+        };
+        let room = width - c.s.tabs.height - tab_spacing(c) - right - STRIP_SLACK;
         // Each unpinned tab's share of what the pinned ones leave, less the spacing after it
         // (`natural` counts that spacing per tab too).
         let unpinned = (tabs.len() - pinned).max(1) as f32;
@@ -407,7 +425,13 @@ impl App {
         // One line, clipped: tabs shrink to share the strip (and then scroll) instead of
         // wrapping, which would make the header taller and resize everything below it.
         let title = tab_text(c, &items.title, tab, index);
-        let badge = tab_text(c, &items.badge, tab, index);
+        let badge = tab_badge(c, &items.badge, tab, index);
+        // A trigger's badge is news, in the attention color; the configured one is a label.
+        let badge_color = if tab.badge.is_some() {
+            c.attention
+        } else {
+            c.faint
+        };
         let title = (!title.is_empty()).then(|| {
             container(one_line(
                 truncate(&title, c.s.tabs.max_title_chars as usize),
@@ -427,7 +451,7 @@ impl App {
             .push(title)
             .push(
                 (!badge.is_empty())
-                    .then(|| one_line(badge, c.s.tabs.badge_size, c.faint.scale_alpha(fade))),
+                    .then(|| one_line(badge, c.s.tabs.badge_size, badge_color.scale_alpha(fade))),
             )
             .push((items.status_icons && tab.muted).then(|| {
                 icon(Icon::BellOff, c.s.tabs.badge_size + MARK_OVER_TEXT, c.faint).opacity(fade)
@@ -801,18 +825,53 @@ fn host(url: &str) -> Option<&str> {
 }
 
 impl App {
-    /// The find bar, shown in the header of the pane whose active tab it searches.
-    fn search_bar(&self, pane: &Pane) -> Option<Element<'_, Message>> {
-        let search = self.search.as_ref()?;
-        let tab = self.model.tab(pane.active)?;
-        let TabKind::Terminal(session) = tab.kind else {
-            return None;
+    /// Whether the find bar shows in `pane`'s strip: its active tab is the terminal being
+    /// searched. Switching tabs hides the bar without closing it. A page's search has its own
+    /// card in the browser pane instead (`App::page_find`).
+    fn search_shown(&self, pane: &Pane) -> bool {
+        use crate::state::SearchTarget;
+        let (Some(search), Some(tab)) = (self.search.as_ref(), self.model.tab(pane.active)) else {
+            return false;
         };
-        // Only the pane whose active tab is the session being searched; switching tabs hides
-        // the bar without closing it.
-        if session != search.session {
+        matches!(tab.kind, TabKind::Terminal(session) if search.target == SearchTarget::Terminal(session))
+    }
+
+    /// The find bar's parts other than its field: the status, the three buttons and the
+    /// spacing between them all.
+    fn search_fixed_width(&self) -> f32 {
+        let c = self.chrome;
+        let status = if self.search.as_ref().is_some_and(|s| !s.found) {
+            SEARCH_STATUS_WIDTH
+        } else {
+            0.0
+        };
+        status + 3.0 * tab_row(c) + 4.0 * SEARCH_SPACING + tab_spacing(c)
+    }
+
+    /// The find bar's field width in a `width`-wide strip, `None` when the bar isn't in
+    /// `pane`: `SEARCH_WIDTH`, less what a narrow pane needs for one tab and the `+`, but no
+    /// narrower than `MIN_SEARCH_WIDTH`.
+    fn search_field_width(&self, pane: &Pane, width: f32) -> Option<f32> {
+        if !self.search_shown(pane) {
             return None;
         }
+        let c = self.chrome;
+        let spare = width
+            - c.s.tabs.min_width
+            - c.s.tabs.height
+            - tab_spacing(c) * 2.0
+            - self.search_fixed_width()
+            - STRIP_SLACK;
+        Some(spare.clamp(MIN_SEARCH_WIDTH, SEARCH_WIDTH))
+    }
+
+    /// The find bar, shown in the header of the pane whose active tab it searches, in a
+    /// `width`-wide strip.
+    fn search_bar(&self, pane: &Pane, width: f32) -> Option<Element<'_, Message>> {
+        let field = self.search_field_width(pane, width)?;
+        let search = self.search.as_ref()?;
+        // Enter goes to the next match up the scrollback: the newest output is at the bottom.
+        let submit = macaroni_term::SearchDirection::Older;
         let c = self.chrome;
         let step = |glyph: Icon, direction| icon_button(c, glyph, Message::SearchStep(direction));
         let status = if search.found { "" } else { "No matches" };
@@ -824,11 +883,11 @@ impl App {
                 text_input("Find", &search.query)
                     .id(SEARCH_INPUT)
                     .on_input(Message::SearchInput)
-                    .on_submit(Message::SearchStep(macaroni_term::SearchDirection::Older))
+                    .on_submit(Message::SearchStep(submit))
                     .size(c.s.controls.field_text_size)
                     .padding(FIELD_PADDING)
                     .style(move |_, status| input_style(c, status))
-                    .width(SEARCH_WIDTH),
+                    .width(field),
                 step(Icon::Up, macaroni_term::SearchDirection::Older),
                 step(Icon::Down, macaroni_term::SearchDirection::Newer),
                 icon_button(c, Icon::Close, Message::SearchClose),

@@ -5,10 +5,10 @@
 //! update [`crate::App::sync_browsers`] moves each browser over its placeholder, or hides it
 //! when its tab isn't on screen. Like terminals, a browser starts the first time it's shown.
 //!
-//! Also here: the process-wide CEF [`RUNTIME`] ([`start`], [`shutdown`]), [`prefer_gl`] (which
-//! `main` must call before iced creates its renderer), the profile directory, the address bar's
-//! [`resolve`], and [`shortcuts`], which lets macaroni's keymap see keys pressed inside a page.
-//! Everything that touches CEF itself is in the `macaroni-browser` crate.
+//! Also here: [`prefer_gl`] (which `main` must call before iced creates its renderer), the
+//! profile directory, the [`engine`] from the config, the address bar's [`resolve`], and
+//! [`shortcuts`], which lets macaroni's keymap see keys pressed inside a page. Everything that
+//! touches a web engine itself is in the `macaroni-browser` crate.
 
 use std::sync::{Arc, Mutex};
 
@@ -17,21 +17,18 @@ use iced::advanced::{Clipboard, Layout, Shell, layout, mouse, renderer};
 use iced::keyboard::key::{Code, Named, Physical};
 use iced::keyboard::{Key, Modifiers};
 use iced::{Element, Event, Length, Rectangle, Size, Theme, window};
-use macaroni_browser::{Bounds, KeyPress, Runtime};
+use macaroni_browser::{Bounds, Engine, KeyPress};
+use macaroni_config::BrowserEngine;
 use macaroni_core::BrowserId;
 
 use crate::keymap::{Action, Keymap};
 
-/// CEF, started on first use. Lives until [`shutdown`], after the window closes.
-static RUNTIME: Mutex<Option<Result<Runtime, String>>> = Mutex::new(None);
-
-/// Starts CEF if it isn't running yet, with the profile in [`data_dir`]. A failure is kept and
-/// returned again on every later call, so a second macaroni on the same profile shows the same
-/// error in each tab instead of retrying.
-pub fn start() -> Result<(), String> {
-    let mut runtime = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
-    let runtime = runtime.get_or_insert_with(|| Runtime::start(&data_dir()));
-    runtime.as_ref().map(|_| ()).map_err(Clone::clone)
+/// The engine `[browser] engine` picks for pages opened from now on.
+pub fn engine(setting: BrowserEngine) -> Engine {
+    match setting {
+        BrowserEngine::System => Engine::System,
+        BrowserEngine::Chromium => Engine::Chromium,
+    }
 }
 
 /// Browsers are child windows, and on Windows DWM draws a DX12 or Vulkan (flip model) swap chain
@@ -47,17 +44,11 @@ pub fn prefer_gl() {
     }
 }
 
-/// Closes every browser and stops CEF (`cef::shutdown`, on the calling thread). Call on the main
-/// thread once the iced event loop has exited.
-pub fn shutdown() {
-    RUNTIME.lock().unwrap_or_else(|e| e.into_inner()).take();
-}
-
 /// Cookies and cache: `%LOCALAPPDATA%\macaroni\browser` on Windows, `~/Library/Application
 /// Support/macaroni/browser` elsewhere (the temp dir if neither variable is set). A test run
 /// with its own config dir gets its own profile too (`<config dir>/browser`): Chromium allows
 /// one process per profile.
-fn data_dir() -> std::path::PathBuf {
+pub fn data_dir() -> std::path::PathBuf {
     local_data("browser")
 }
 
@@ -89,6 +80,8 @@ pub enum BrowserMessage {
     Action(Action),
     /// Page text asked for over the control API: the request's id and the text.
     Text(u64, String),
+    /// Whether a find in the page matched, for the query it was for.
+    Found(String, bool),
 }
 
 /// The app's state for one browser tab, in `App.browsers`. Created when the tab is opened; the
@@ -109,6 +102,35 @@ pub struct Panel {
     pub bounds: Option<Rectangle>,
     /// Why the browser couldn't start.
     pub error: Option<String>,
+    /// The page's zoom, 1.0 for 100% (one of [`PAGE_ZOOMS`]).
+    pub zoom: f64,
+    /// The native window the page was opened in or moved to; a tab moved to another window
+    /// moves its page when this differs.
+    pub parent: Option<isize>,
+}
+
+/// The zoom steps `zoom_in` and `zoom_out` move a page through, as browsers have them.
+pub const PAGE_ZOOMS: [f64; 13] = [
+    0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
+];
+
+/// The zoom one step from `current` (`Some(true)` in, `Some(false)` out), or 100% for `None`;
+/// clamped to [`PAGE_ZOOMS`]' ends.
+pub fn next_zoom(current: f64, step: Option<bool>) -> f64 {
+    match step {
+        None => 1.0,
+        Some(true) => PAGE_ZOOMS
+            .iter()
+            .copied()
+            .find(|z| *z > current + 1e-6)
+            .unwrap_or(PAGE_ZOOMS[PAGE_ZOOMS.len() - 1]),
+        Some(false) => PAGE_ZOOMS
+            .iter()
+            .rev()
+            .copied()
+            .find(|z| *z < current - 1e-6)
+            .unwrap_or(PAGE_ZOOMS[0]),
+    }
 }
 
 impl Panel {
@@ -122,6 +144,8 @@ impl Panel {
             forward: false,
             bounds: None,
             error: None,
+            zoom: 1.0,
+            parent: None,
         }
     }
 }
@@ -173,8 +197,8 @@ pub fn resolve(input: &str) -> String {
 }
 
 /// The handler a browser calls for keys pressed in the page: macaroni's shortcuts win, except
-/// copy, paste and find, which belong to the page. Runs on CEF's UI thread, so the keymap is
-/// shared behind a lock (`App.shared_keymap`, replaced on config reload) and a match goes back
+/// copy, paste and find, which belong to the page. Chromium runs it on its own UI thread, so the
+/// keymap is shared behind a lock (`App.shared_keymap`, replaced on config reload) and a match goes back
 /// through `send`. Returns whether the key was taken, so the page doesn't also see it.
 pub fn shortcuts(
     keymap: Arc<Mutex<Keymap>>,
@@ -194,7 +218,7 @@ pub fn shortcuts(
             .unwrap_or_else(|e| e.into_inner())
             .lookup(&key, physical, mods);
         match action {
-            None | Some(Action::Copy | Action::Paste | Action::Find) => false,
+            None | Some(Action::Copy | Action::Paste) => false,
             Some(action) => {
                 send(action);
                 true
@@ -204,7 +228,8 @@ pub fn shortcuts(
 }
 
 /// A Windows virtual-key code as the iced key a US layout produces, for the keymap. Only the
-/// keys default shortcuts use (letters, digits, Tab, arrows, `,` `[` `]`); `None` for the rest.
+/// keys default shortcuts use (letters, digits, Tab, Enter, arrows, `,` `[` `]` `=` `-`); `None`
+/// for the rest.
 fn iced_key(vk: u32) -> Option<(Key, Physical)> {
     const LETTERS: [Code; 26] = [
         Code::KeyA,
@@ -259,11 +284,14 @@ fn iced_key(vk: u32) -> Option<(Key, Physical)> {
             character((b'0' + i as u8) as char, DIGITS[i])
         }
         0x09 => named(Named::Tab, Code::Tab),
+        0x0D => named(Named::Enter, Code::Enter),
         0x25 => named(Named::ArrowLeft, Code::ArrowLeft),
         0x26 => named(Named::ArrowUp, Code::ArrowUp),
         0x27 => named(Named::ArrowRight, Code::ArrowRight),
         0x28 => named(Named::ArrowDown, Code::ArrowDown),
+        0xBB => character('=', Code::Equal),
         0xBC => character(',', Code::Comma),
+        0xBD => character('-', Code::Minus),
         0xDB => character('[', Code::BracketLeft),
         0xDD => character(']', Code::BracketRight),
         _ => None,
@@ -364,6 +392,15 @@ impl<'a, M: 'a> From<BrowserHost<M>> for Element<'a, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_steps_through_and_stops_at_the_ends() {
+        assert_eq!(next_zoom(1.0, Some(true)), 1.1);
+        assert_eq!(next_zoom(1.0, Some(false)), 0.9);
+        assert_eq!(next_zoom(3.0, Some(true)), 3.0);
+        assert_eq!(next_zoom(0.5, Some(false)), 0.5);
+        assert_eq!(next_zoom(1.75, None), 1.0);
+    }
 
     #[test]
     fn address_bar_input_resolves_to_a_url() {

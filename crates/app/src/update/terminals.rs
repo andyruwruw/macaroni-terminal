@@ -12,10 +12,10 @@ use std::path::PathBuf;
 
 use iced::Task;
 use iced::futures::channel::mpsc::UnboundedSender;
-use macaroni_core::{Command, SessionId};
+use macaroni_core::{AgentState, Command, SessionId, TabId, TabKind};
 use macaroni_term::{
-    GridPoint, GridSize, Scroll, Session, SessionConfig, SessionEvent, encode_paste, is_openable,
-    url_at,
+    GridPoint, GridSize, Scroll, Session, SessionConfig, SessionEvent, encode_paste, file_at,
+    is_openable, url_at,
 };
 
 use super::config::cursor_shape;
@@ -23,6 +23,10 @@ use crate::message::Message;
 use crate::state::Running;
 use crate::terminal::{SelectOp, ViewEvent};
 use crate::{APP_NAME, App, bell, notifications, session};
+
+/// How many of a terminal's last non-blank rows must show a permission dialog for Allow and
+/// Deny to answer it: Claude Code draws it under its output, above at most a few lines of hints.
+const PERMISSION_ROWS: usize = 16;
 
 impl App {
     /// The session event channel exists: start every terminal whose view already has a size.
@@ -66,9 +70,10 @@ impl App {
             .tab_for_session(id)
             .and_then(|tab| self.restored.remove(&tab))
             .unwrap_or_default();
-        // A restored tab reopens where it was; a new one starts in its workspace's folder. A
-        // directory that's gone (deleted, an unplugged drive) would make the spawn fail, so
-        // each falls back to the next, and then to the home directory.
+        // A restored tab reopens where it was; a new one starts in its workspace's folder, or
+        // `[terminal] default_dir` for a workspace without one. A directory that's gone
+        // (deleted, an unplugged drive) would make the spawn fail, so each falls back to the
+        // next, and then to the home directory.
         let folder = self
             .model
             .tab_for_session(id)
@@ -79,7 +84,12 @@ impl App {
             .as_ref()
             .map(PathBuf::from)
             .filter(|dir| dir.is_dir())
-            .or_else(|| folder.map(PathBuf::from).filter(|dir| dir.is_dir()));
+            .or_else(|| folder.map(PathBuf::from).filter(|dir| dir.is_dir()))
+            .or_else(|| {
+                self.default_folder()
+                    .map(PathBuf::from)
+                    .filter(|dir| dir.is_dir())
+            });
         let (program, args) = self.program_for(id, &restored);
         let config = SessionConfig {
             // Blank means the platform's default shell.
@@ -91,12 +101,32 @@ impl App {
             env: self.session_env(id),
             colors: Some(self.palette.default_colors()),
             cursor: cursor_shape(self.config.terminal.cursor_style),
+            triggers: self.triggers.watched(),
         };
         match Session::spawn(config, move |event| {
             let _ = events.unbounded_send((id, event));
         }) {
             Ok(session) => {
+                self.show_saved_scrollback(&session, &restored);
+                // The workspace's startup command, for shells only: not SSH tabs, whose shell is
+                // on another machine.
+                let startup = self
+                    .model
+                    .tab_for_session(id)
+                    .and_then(|tab| self.workspace_of_tab(tab))
+                    .and_then(|ws| self.model.workspace(ws)?.startup.clone())
+                    .filter(|_| !self.ssh_tabs.contains_key(&id) && restored.ssh.is_none());
+                if let Some(command) = startup {
+                    session.write(format!("{command}\r").as_bytes());
+                }
                 self.resume_agent(&session, &restored);
+                if let Some(text) = self
+                    .model
+                    .tab_for_session(id)
+                    .and_then(|tab| self.startup_input.remove(&tab))
+                {
+                    session.write(text.as_bytes());
+                }
                 let snapshot = session.snapshot();
                 self.running.insert(
                     id,
@@ -148,7 +178,14 @@ impl App {
     /// The control socket and tab id, so programs in the terminal can reach the app. Empty if
     /// the socket couldn't be bound.
     fn session_env(&self, id: SessionId) -> Vec<(String, String)> {
-        let mut env = Vec::new();
+        // The workspace's own variables first, so macaroni's (which scripts rely on) win.
+        let mut env = self
+            .model
+            .tab_for_session(id)
+            .and_then(|tab| self.workspace_of_tab(tab))
+            .and_then(|ws| self.model.workspace(ws))
+            .map(|ws| ws.env.clone())
+            .unwrap_or_default();
         if let Some(endpoint) = &self.ipc.endpoint {
             env.push((macaroni_ipc::SOCKET_ENV.to_owned(), endpoint.clone()));
             if let Some(tab) = self.model.tab_for_session(id) {
@@ -156,6 +193,25 @@ impl App {
             }
         }
         env
+    }
+
+    /// Shows a restored tab's text from before the restart, dimmed, above its new shell, and
+    /// deletes the file (the next quit writes it again with whatever's added).
+    fn show_saved_scrollback(&self, session: &Session, restored: &session::SavedTab) {
+        let Some(name) = &restored.scrollback else {
+            return;
+        };
+        let path = session::scrollback_dir(&self.config_dir).join(name);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            // Control characters would be read as terminal commands; the text is shown, not run.
+            let clean: String = text
+                .chars()
+                .filter(|c| *c == '\n' || !c.is_control())
+                .collect();
+            let shown = clean.replace('\n', "\r\n");
+            session.print(format!("\x1b[2m{shown}\x1b[0m\r\n").as_bytes());
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     /// Resumes the Claude Code session a restored tab had, if enabled and its id is safe to type.
@@ -197,15 +253,49 @@ impl App {
                 }
             }
             SessionEvent::Notify(n) => self.attention(id, n.title, n.body),
+            SessionEvent::CommandFinished { exit, elapsed } => {
+                let long = self.config.notifications.long_command;
+                if long == 0 || elapsed.as_secs() < u64::from(long) {
+                    return Task::none();
+                }
+                let took = crate::label::duration(elapsed);
+                let body = match exit {
+                    Some(0) | None => format!("Finished after {took}"),
+                    Some(code) => format!("Failed (exit {code}) after {took}"),
+                };
+                self.attention(id, Some("Command finished".to_owned()), body)
+            }
             SessionEvent::Cwd(path) => self.apply(Command::SetTabCwd(id, Some(path))),
+            SessionEvent::Triggered { trigger, line } => self.triggered(id, trigger, line),
             SessionEvent::ClipboardStore(text) => iced::clipboard::write(text),
             SessionEvent::Exited(code) => self.session_exited(id, code),
         }
     }
 
+    /// A line of the terminal's output matched a `[[trigger]]`: set its tab's badge and notify,
+    /// as the trigger asks. Neither happens for the tab the user is looking at.
+    fn triggered(&mut self, id: SessionId, trigger: usize, line: String) -> Task<Message> {
+        let fired = self.triggers.fire(id, trigger, &line);
+        let looking = self.window_focused
+            && self
+                .model
+                .tab_for_session(id)
+                .is_some_and(|tab| self.model.focused_tab().id == tab);
+        let badge = match fired.badge {
+            Some(badge) if !looking => self.apply(Command::SetTabBadge(id, Some(badge))),
+            _ => Task::none(),
+        };
+        let notice = match fired.notify {
+            Some(title) => self.attention(id, title, line),
+            None => Task::none(),
+        };
+        Task::batch([badge, notice])
+    }
+
     /// A terminal's program exited: its tab closes, except an SSH tab whose `ssh` failed (a
     /// connection that couldn't be made or was dropped), which stays to show why.
     fn session_exited(&mut self, id: SessionId, code: Option<u32>) -> Task<Message> {
+        self.triggers.forget(id);
         let Some(name) = self.ssh_tabs.get(&id).filter(|_| code != Some(0)).cloned() else {
             return self.apply(Command::SessionExited(id));
         };
@@ -345,18 +435,64 @@ impl App {
         }
     }
 
-    /// Opens the link at a cell: an OSC 8 hyperlink, else a URL in the text.
+    /// Opens the link at a cell: an OSC 8 hyperlink, else a URL in the text, else a file
+    /// reference (`src/main.rs:12:5`) that exists, in a text editor at its line.
     fn open_link_at(&mut self, id: SessionId, at: GridPoint) -> Task<Message> {
-        let url = self.running.get(&id).and_then(|r| {
-            r.session
-                .hyperlink_at(at)
-                .filter(|u| is_openable(u))
-                .or_else(|| url_at(r.snapshot.rows.get(at.row)?, at.col).map(|link| link.url))
-        });
-        match url {
-            Some(url) => self.open_link(url),
-            None => Task::none(),
+        let Some(r) = self.running.get(&id) else {
+            return Task::none();
+        };
+        let url = r
+            .session
+            .hyperlink_at(at)
+            .filter(|u| is_openable(u))
+            .or_else(|| url_at(r.snapshot.rows.get(at.row)?, at.col).map(|link| link.url));
+        if let Some(url) = url {
+            return self.open_link(url);
         }
+        let file = r
+            .snapshot
+            .rows
+            .get(at.row)
+            .and_then(|row| file_at(row, at.col));
+        if let Some(file) = file
+            && let Some(path) = self.resolve_file(id, &file.path)
+        {
+            crate::open_text_file(&path, file.line, file.column);
+        }
+        Task::none()
+    }
+
+    /// `path` as written in a terminal's output, as an existing file: Git Bash's `/c/x` read as
+    /// `C:/x`, and a relative path taken from the tab's directory (else its workspace's).
+    /// `None` when there's no such file.
+    fn resolve_file(&self, id: SessionId, path: &str) -> Option<std::path::PathBuf> {
+        let mut written = path.to_owned();
+        if cfg!(windows) {
+            let bytes = path.as_bytes();
+            if bytes.len() >= 3
+                && bytes[0] == b'/'
+                && bytes[1].is_ascii_alphabetic()
+                && bytes[2] == b'/'
+            {
+                written = format!("{}:{}", (bytes[1] as char).to_ascii_uppercase(), &path[2..]);
+            }
+        }
+        let path = std::path::PathBuf::from(&written);
+        let full = if path.is_absolute() {
+            path
+        } else {
+            let tab = self.model.tab_for_session(id)?;
+            let base = self
+                .model
+                .tab(tab)
+                .and_then(|t| t.cwd.clone())
+                .or_else(|| {
+                    let ws = self.workspace_of_tab(tab)?;
+                    self.workspace_dir(self.model.workspace(ws)?)
+                })?;
+            std::path::Path::new(&base).join(path)
+        };
+        full.is_file().then_some(full)
     }
 
     /// A click in an unfocused terminal selects its tab.
@@ -395,7 +531,7 @@ impl App {
             })
             .unwrap_or_else(|| APP_NAME.to_owned());
         if self.config.notifications.os && (!self.window_focused || !visible) {
-            notifications::show(heading, body.clone());
+            notifications::show(heading, body.clone(), tab, self.asks_permission(tab));
         }
         self.broadcast(macaroni_ipc::Event::Notification {
             tab: tab.0,
@@ -407,6 +543,77 @@ impl App {
             title,
             body,
         })
+    }
+
+    /// Whether the coding agent in `tab` is waiting on a permission prompt: it needs input, and
+    /// what it said (Claude Code's "needs your permission to use Bash") is about permission.
+    /// Once answered, it doesn't ask again until the agent reports something new
+    /// (`App.answered` is cleared by its next hook), so a second click can't type twice.
+    pub(crate) fn asks_permission(&self, tab: TabId) -> bool {
+        !self.answered.contains(&tab)
+            && self
+                .model
+                .tab(tab)
+                .and_then(|t| t.agent.as_ref())
+                .is_some_and(|agent| {
+                    agent.state == AgentState::NeedsInput
+                        && agent
+                            .detail
+                            .as_deref()
+                            .is_some_and(|d| d.to_lowercase().contains("permission"))
+                })
+    }
+
+    /// Answers the permission prompt of the coding agent in `tab`: `1` (Claude Code's "Yes")
+    /// to allow, Escape (its "No") to deny, and the tab's notice is cleared. Only when the tab
+    /// still asks ([`App::asks_permission`], so at most once per prompt) and the end of its
+    /// output, where Claude Code draws the dialog, shows it ("Do you want"): a late click
+    /// mustn't type into whatever runs there now. Otherwise it just shows the tab.
+    pub(crate) fn answer_permission(&mut self, tab: TabId, allow: bool) -> Task<Message> {
+        let running = match self.model.tab(tab).map(|t| &t.kind) {
+            Some(TabKind::Terminal(session)) => self.running.get(session),
+            _ => None,
+        };
+        let prompt_shown = running.is_some_and(|r| {
+            let rows: Vec<String> = r
+                .snapshot
+                .rows
+                .iter()
+                .map(|row| row.iter().map(|c| c.ch).collect())
+                .collect();
+            // The dialog is under the latest output, which needn't reach the screen's bottom.
+            let end = rows
+                .iter()
+                .rposition(|row| !row.trim().is_empty())
+                .map_or(0, |last| last + 1);
+            rows[end.saturating_sub(PERMISSION_ROWS)..end]
+                .iter()
+                .any(|row| row.contains("Do you want"))
+        });
+        let (Some(r), true, true) = (running, prompt_shown, self.asks_permission(tab)) else {
+            return self.notification_clicked(tab);
+        };
+        r.session.write(if allow { b"1" } else { b"\x1b" });
+        self.answered.insert(tab);
+        self.apply(Command::ClearAttention(tab))
+    }
+
+    /// A click on a tab's OS notification: shows the tab (switching workspace and pane) and
+    /// brings the window up, restored if it was minimized. Ignored once the tab is gone.
+    pub(crate) fn notification_clicked(&mut self, tab: TabId) -> Task<Message> {
+        if self.model.tab(tab).is_none() {
+            return Task::none();
+        }
+        let show = self.apply(Command::SelectTab(tab));
+        // Selecting it focused its window in the model.
+        let raise = match self.os_window(self.model.focused_window()) {
+            Some(id) => Task::batch([
+                iced::window::minimize(id, false),
+                iced::window::gain_focus(id),
+            ]),
+            None => Task::none(),
+        };
+        Task::batch([show, raise])
     }
 
     /// Sets (or with `None`, resets) a terminal tab's title from its program and tells

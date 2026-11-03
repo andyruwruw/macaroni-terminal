@@ -266,7 +266,7 @@ impl App {
         let mut previous = None;
         // A group's members are contiguous in the model's order, so a header goes before the
         // first workspace whose group differs from the one before it.
-        for (i, ws) in self.model.workspaces().iter().enumerate() {
+        for (i, ws) in self.shown().workspaces.iter().enumerate() {
             if !self.workspace_matches(ws, query) {
                 continue;
             }
@@ -453,7 +453,7 @@ impl App {
             c,
             bar,
             c.s.controls.radius,
-            self.window_size,
+            self.window_size(),
             c.s.effects.glass_idle,
         );
         container(bar)
@@ -500,15 +500,13 @@ impl App {
         {
             return group_rename_field(c, id, value);
         }
-        let members: Vec<&Workspace> = self
-            .model
-            .workspaces()
+        let shown = self.shown();
+        let members: Vec<&Workspace> = shown
+            .workspaces
             .iter()
             .filter(|w| w.group == Some(id))
             .collect();
-        let holds_active = members
-            .iter()
-            .any(|w| w.id == self.model.active_workspace().id);
+        let holds_active = members.iter().any(|w| w.id == shown.active);
         // Collapsed, the header stands in for the workspaces it hides.
         let lit = group.collapsed && holds_active;
         // Anything dropped into the group marks it, not just a drop onto the header.
@@ -1140,7 +1138,7 @@ fn workspace_card<'a>(
 
 /// What a workspace item's templates can show (`[workspace_items]`).
 /// Gathered once per item so each placeholder is a lookup, not a model walk.
-struct WorkspaceValues<'a> {
+pub(super) struct WorkspaceValues<'a> {
     /// The workspace itself, for `{name}`.
     ws: &'a Workspace,
     /// Its position in the sidebar from 0; `{index}` and `{shortcut}` show it from 1.
@@ -1155,11 +1153,13 @@ struct WorkspaceValues<'a> {
     notice: Option<&'a str>,
     /// Its most urgent agent's status line ([`agent_line`]), if any.
     agent: Option<String>,
+    /// The git repository its folder is in, for `{branch}` and `{dirty}`.
+    repo: Option<&'a crate::git::Repo>,
 }
 
 impl<'a> WorkspaceValues<'a> {
     /// Collects the values for `ws`, the `index`th workspace in the sidebar.
-    fn new(app: &'a App, index: usize, ws: &'a Workspace) -> Self {
+    pub(super) fn new(app: &'a App, index: usize, ws: &'a Workspace) -> Self {
         let panes = ws.layout.leaves();
         Self {
             ws,
@@ -1176,6 +1176,7 @@ impl<'a> WorkspaceValues<'a> {
                 .and_then(|p| app.model.tab(p.active)),
             notice: app.model.workspace_notice(ws.id).map(|n| n.body.as_str()),
             agent: app.workspace_agent(ws).map(|a| agent_line(app.chrome, a).0),
+            repo: app.workspace_dir(ws).and_then(|dir| app.git.get(&dir)),
         }
     }
 
@@ -1192,7 +1193,7 @@ impl<'a> WorkspaceValues<'a> {
     /// as typed. `{shortcut}` is empty past the ninth workspace, which has no 1-9 shortcut, and
     /// `{status}` falls back from the notice to the agent to the summary, `{activity}` from the
     /// notice to the agent to nothing.
-    fn get(&self, key: &str) -> Option<String> {
+    pub(super) fn get(&self, key: &str) -> Option<String> {
         Some(match key {
             "name" => self.ws.name.clone(),
             "index" => (self.index + 1).to_string(),
@@ -1206,6 +1207,14 @@ impl<'a> WorkspaceValues<'a> {
             "path" => self.focused.and_then(|t| t.cwd.clone()).unwrap_or_default(),
             "notice" => self.notice.unwrap_or_default().to_owned(),
             "agent" => self.agent.clone().unwrap_or_default(),
+            "branch" => self.repo.map(|r| r.branch.clone()).unwrap_or_default(),
+            "sync" => self.repo.map(crate::git::Repo::sync).unwrap_or_default(),
+            "dirty" => if self.repo.is_some_and(|r| r.dirty) {
+                "*"
+            } else {
+                ""
+            }
+            .to_owned(),
             "status" => match (self.notice, &self.agent) {
                 (Some(notice), _) => notice.to_owned(),
                 (None, Some(agent)) => agent.clone(),

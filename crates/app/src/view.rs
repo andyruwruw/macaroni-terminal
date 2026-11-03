@@ -15,7 +15,11 @@
 pub mod folder_dialog;
 
 pub use sidebar::SIDEBAR_SEARCH;
+pub mod dashboard;
+pub mod env_dialog;
 pub mod icon_picker;
+pub mod palette;
+pub mod worktree_dialog;
 
 pub use sidebar::compact_width as sidebar_compact_width;
 pub mod settings;
@@ -184,19 +188,38 @@ pub fn sidebar_margin(c: Chrome) -> f32 {
 }
 
 impl App {
-    /// iced's view function: the window, then each overlay as a higher `stack` layer, in the
-    /// order they must cover each other (the settings dialog over everything).
-    pub fn view(&self) -> Element<'_, Message> {
+    /// iced's view function for window `id`: the window, then each overlay as a higher
+    /// `stack` layer, in the order they must cover each other (the settings dialog over
+    /// everything). Menus, dialogs and drags only show in the focused window.
+    pub fn view(&self, id: iced::window::Id) -> Element<'_, Message> {
+        // The view code asks `App::win` and `App::shown` which window it's drawing.
+        self.viewing.set(Some(id));
+        if !self.wins.contains_key(&id) {
+            return iced::widget::Space::new().into();
+        }
         let c = self.chrome;
         let mut layers: Vec<Element<'_, Message>> = vec![self.window()];
-        if CUSTOM_FRAME && !self.maximized {
+        if CUSTOM_FRAME && !self.maximized() {
             layers.push(resize_edges(c));
+        }
+        if !self.drawing_focused() {
+            // A tab dragged over this window from the focused one is marked where it would land.
+            if self.item_drag.is_some_and(
+                |d| matches!(d.over, crate::state::Over::Window(over, _) if over == id),
+            ) {
+                layers.extend(self.drop_marker());
+            }
+            return stack(layers).into();
         }
         layers.extend(self.drop_marker());
         layers.extend(self.drag_ghost());
         layers.extend(self.menu_layers());
         layers.extend(self.icon_picker_view());
         layers.extend(self.folder_dialog_view());
+        layers.extend(self.worktree_dialog_view());
+        layers.extend(self.env_dialog_view());
+        layers.extend(self.dashboard_view());
+        layers.extend(self.palette_view());
         layers.extend(self.settings_view());
         stack(layers).into()
     }
@@ -286,6 +309,16 @@ impl App {
     /// The area a dragged tab would land in, tinted and outlined.
     fn drop_marker(&self) -> Option<Element<'_, Message>> {
         let c = self.chrome;
+        // Only in the window the cursor is over: the marker is in its coordinates.
+        let drag = self.item_drag?;
+        let here = match drag.over {
+            crate::state::Over::Here => self.drawing_focused(),
+            crate::state::Over::Window(over, _) => self.viewing.get() == Some(over),
+            crate::state::Over::Outside(_) => false,
+        };
+        if !here {
+            return None;
+        }
         let (_, Some(marker)) = self.drop_target()? else {
             return None;
         };

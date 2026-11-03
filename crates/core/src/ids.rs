@@ -43,3 +43,7 @@ id!(
     /// A sidebar group of workspaces.
     GroupId
 );
+id!(
+    /// A window: its own sidebar of workspaces and groups. The app maps it to the OS window.
+    WindowId
+);

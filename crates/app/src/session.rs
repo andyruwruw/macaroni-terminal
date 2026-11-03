@@ -10,7 +10,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use macaroni_core::{Axis, LayoutSpec, Model, SessionId, TabId, TabKind, TabSpec, WorkspaceSpec};
+use macaroni_core::{
+    Axis, LayoutSpec, Model, SessionId, Spec, TabId, TabKind, TabSpec, WorkspaceSpec,
+};
 use serde::{Deserialize, Serialize};
 
 /// The session file's name, in the config directory.
@@ -24,16 +26,44 @@ const VERSION: u32 = 1;
 pub struct Saved {
     /// [`VERSION`] when written; other versions are ignored on load.
     pub version: u32,
-    /// The index of the active workspace in `workspaces`.
+    /// The index in `workspaces` of the focused window's active workspace. Sessions from before
+    /// windows have only this.
     pub active: usize,
-    /// Every workspace, in sidebar order.
+    /// Every workspace: each window's in its sidebar order, windows in order.
     pub workspaces: Vec<SavedWorkspace>,
+    /// Every window, in order; empty in sessions from before windows, which had one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<SavedWindow>,
+    /// The index in `windows` of the focused one.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub focused_window: usize,
     /// Every group, in sidebar order; workspaces refer to them by index.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<SavedGroup>,
     /// The sidebar's dragged width and whether it's folded away.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar: Option<SidebarLayout>,
+}
+
+/// Whether `n` is 0, so a default is left out of the file.
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// A window: its active workspace and where it was on screen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SavedWindow {
+    /// The index in [`Saved::workspaces`] of its active workspace.
+    pub active: usize,
+    /// Its top-left corner on screen, in logical pixels, if it was known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<(f32, f32)>,
+    /// Its size in logical pixels, if it was known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<(f32, f32)>,
+    /// Whether it was maximized.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub maximized: bool,
 }
 
 /// The sidebar as the user left it.
@@ -90,6 +120,15 @@ pub struct SavedWorkspace {
     /// Its folder, where new terminals start; unset is the home directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Environment variables for its terminals, as name and value pairs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
+    /// The command typed into its new shells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<String>,
+    /// The index in [`Saved::windows`] of its window.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub window: usize,
 }
 
 /// A workspace's split tree, mirroring [`LayoutSpec`] with each tab's details in place.
@@ -157,6 +196,15 @@ pub struct SavedTab {
     /// A preset color's name or `#rrggbb`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// The file in [`scrollback_dir`] holding the terminal's text from before the restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrollback: Option<String>,
+}
+
+/// Where terminals' text is kept across a restart (`[session] keep_scrollback`): a
+/// `scrollback` folder in the config directory, one file per tab, named in its [`SavedTab`].
+pub fn scrollback_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("scrollback")
 }
 
 /// Where the session file lives: `session.json` in the config directory.
@@ -164,7 +212,8 @@ pub fn path(config_dir: &Path) -> PathBuf {
     config_dir.join(FILE_NAME)
 }
 
-/// The model's layout plus each tab's directory and agent session. `restored` holds what was
+/// The model's windows and layouts plus each tab's directory and agent session. Windows have
+/// no position or size here; the app adds those. `restored` holds what was
 /// restored for tabs whose terminal hasn't started yet (hidden ones start just after the first shown):
 /// they keep that directory and agent session, which the model doesn't have for them, so a tab
 /// left unopened survives any number of restarts. `ssh` names the profile each SSH terminal runs.
@@ -172,34 +221,54 @@ pub fn capture(
     model: &Model,
     restored: &BTreeMap<TabId, SavedTab>,
     ssh: &BTreeMap<SessionId, String>,
+    scrollback: &BTreeMap<TabId, String>,
 ) -> Saved {
     // `tabs` lists every tab in the order the specs' panes list them, so each pane takes its
     // share off the front.
-    let (specs, active, tabs) = model.spec();
+    let (spec, tabs) = model.spec();
     let mut tabs = tabs.into_iter();
-    let workspaces = specs
+    // Groups are per window; saved, they're one list that workspaces index into.
+    let groups: Vec<&macaroni_core::Group> = model
+        .windows()
         .into_iter()
-        .zip(model.workspaces())
+        .filter_map(|w| model.window(w))
+        .flat_map(|w| w.groups.iter())
+        .collect();
+    let workspaces = spec
+        .workspaces
+        .into_iter()
+        .zip(model.all_workspaces())
         .map(|(spec, ws)| SavedWorkspace {
             name: spec.name,
             focused: spec.focused,
-            layout: layout_from_spec(&spec.layout, model, restored, ssh, &mut tabs),
+            layout: layout_from_spec(&spec.layout, model, restored, ssh, scrollback, &mut tabs),
             muted: ws.muted,
             pinned: ws.pinned,
             icon: ws.icon.clone(),
             color: ws.color.clone(),
             cwd: ws.cwd.clone(),
+            env: ws.env.clone(),
+            startup: ws.startup.clone(),
             group: ws
                 .group
-                .and_then(|g| model.groups().iter().position(|group| group.id == g)),
+                .and_then(|g| groups.iter().position(|group| group.id == g)),
+            window: spec.window,
         })
         .collect();
     Saved {
         version: VERSION,
-        active,
+        active: spec.windows.get(spec.focused).copied().unwrap_or(0),
         workspaces,
-        groups: model
-            .groups()
+        windows: spec
+            .windows
+            .iter()
+            .map(|&active| SavedWindow {
+                active,
+                ..SavedWindow::default()
+            })
+            .collect(),
+        focused_window: spec.focused,
+        groups: groups
             .iter()
             .map(|g| SavedGroup {
                 name: g.name.clone(),
@@ -212,6 +281,56 @@ pub fn capture(
     }
 }
 
+/// What's saved for one tab: its name and look, and where its terminal ran and what ran in
+/// it (or a browser tab's address). Also what a closed tab is reopened from.
+pub fn saved_tab(
+    model: &Model,
+    restored: &BTreeMap<TabId, SavedTab>,
+    ssh: &BTreeMap<SessionId, String>,
+    id: TabId,
+) -> SavedTab {
+    let tab = model.tab(id);
+    let common = SavedTab {
+        name: tab.and_then(|t| t.name.clone()),
+        muted: tab.is_some_and(|t| t.muted),
+        pinned: tab.is_some_and(|t| t.pinned),
+        icon: tab.and_then(|t| t.icon.clone()),
+        color: tab.and_then(|t| t.color.clone()),
+        ..SavedTab::default()
+    };
+    if let Some(tab) = tab
+        && let TabKind::Browser(_) = tab.kind
+    {
+        return SavedTab {
+            url: Some(tab.url.clone().unwrap_or_default()),
+            ..common
+        };
+    }
+    if let Some(pending) = restored.get(&id) {
+        return SavedTab {
+            cwd: pending.cwd.clone(),
+            agent_session: pending.agent_session.clone(),
+            ssh: pending.ssh.clone(),
+            ..common
+        };
+    }
+    // An agent's own directory wins over the shell's: `claude --resume` only finds a session
+    // from the directory it ran in, and the shell reports one only at a prompt, so
+    // `cd x && claude` leaves the old one.
+    let agent = tab.and_then(|t| t.agent.as_ref());
+    SavedTab {
+        cwd: agent
+            .and_then(|a| a.cwd.clone())
+            .or_else(|| tab.and_then(|t| t.cwd.clone())),
+        agent_session: agent.and_then(|a| a.session_id.clone()),
+        ssh: match tab.map(|t| &t.kind) {
+            Some(TabKind::Terminal(session)) => ssh.get(session).cloned(),
+            _ => None,
+        },
+        ..common
+    }
+}
+
 /// One workspace's [`LayoutSpec`] as a [`SavedLayout`], taking each pane's tabs in order from
 /// `tabs` and filling in their details from the model.
 fn layout_from_spec(
@@ -219,6 +338,7 @@ fn layout_from_spec(
     model: &Model,
     restored: &BTreeMap<TabId, SavedTab>,
     ssh: &BTreeMap<SessionId, String>,
+    scrollback: &BTreeMap<TabId, String>,
     tabs: &mut impl Iterator<Item = TabId>,
 ) -> SavedLayout {
     match spec {
@@ -229,47 +349,12 @@ fn layout_from_spec(
             active: *active,
             tabs: tabs
                 .take(specs.len())
-                .map(|id| {
-                    let tab = model.tab(id);
-                    let common = SavedTab {
-                        name: tab.and_then(|t| t.name.clone()),
-                        muted: tab.is_some_and(|t| t.muted),
-                        pinned: tab.is_some_and(|t| t.pinned),
-                        icon: tab.and_then(|t| t.icon.clone()),
-                        color: tab.and_then(|t| t.color.clone()),
-                        ..SavedTab::default()
-                    };
-                    if let Some(tab) = tab
-                        && let TabKind::Browser(_) = tab.kind
-                    {
-                        return SavedTab {
-                            url: Some(tab.url.clone().unwrap_or_default()),
-                            ..common
-                        };
-                    }
-                    if let Some(pending) = restored.get(&id) {
-                        return SavedTab {
-                            cwd: pending.cwd.clone(),
-                            agent_session: pending.agent_session.clone(),
-                            ssh: pending.ssh.clone(),
-                            ..common
-                        };
-                    }
-                    // An agent's own directory wins over the shell's: `claude --resume` only
-                    // finds a session from the directory it ran in, and the shell reports one
-                    // only at a prompt, so `cd x && claude` leaves the old one.
-                    let agent = tab.and_then(|t| t.agent.as_ref());
-                    SavedTab {
-                        cwd: agent
-                            .and_then(|a| a.cwd.clone())
-                            .or_else(|| tab.and_then(|t| t.cwd.clone())),
-                        agent_session: agent.and_then(|a| a.session_id.clone()),
-                        ssh: match tab.map(|t| &t.kind) {
-                            Some(TabKind::Terminal(session)) => ssh.get(session).cloned(),
-                            _ => None,
-                        },
-                        ..common
-                    }
+                .map(|id| SavedTab {
+                    scrollback: scrollback
+                        .get(&id)
+                        .cloned()
+                        .or_else(|| restored.get(&id).and_then(|r| r.scrollback.clone())),
+                    ..saved_tab(model, restored, ssh, id)
                 })
                 .collect(),
         },
@@ -284,25 +369,41 @@ fn layout_from_spec(
                 Axis::Column => SavedAxis::Column,
             },
             ratio: *ratio,
-            first: Box::new(layout_from_spec(first, model, restored, ssh, tabs)),
-            second: Box::new(layout_from_spec(second, model, restored, ssh, tabs)),
+            first: Box::new(layout_from_spec(
+                first, model, restored, ssh, scrollback, tabs,
+            )),
+            second: Box::new(layout_from_spec(
+                second, model, restored, ssh, scrollback, tabs,
+            )),
         },
     }
 }
 
-/// What [`Model::restore`] needs, plus the per-tab details in the same order as its tabs.
-pub fn into_spec(saved: Saved) -> (Vec<WorkspaceSpec>, usize, Vec<SavedTab>) {
+/// What [`Model::restore`] needs, plus the per-tab details in the same order as its tabs. A
+/// session from before windows is one window.
+pub fn into_spec(saved: Saved) -> (Spec, Vec<SavedTab>) {
     let mut tabs = Vec::new();
-    let specs = saved
+    let windows = if saved.windows.is_empty() {
+        vec![saved.active]
+    } else {
+        saved.windows.iter().map(|w| w.active).collect()
+    };
+    let workspaces = saved
         .workspaces
         .into_iter()
         .map(|ws| WorkspaceSpec {
             name: ws.name,
             focused: ws.focused,
             layout: spec_from_layout(ws.layout, &mut tabs),
+            window: ws.window,
         })
         .collect();
-    (specs, saved.active, tabs)
+    let spec = Spec {
+        workspaces,
+        windows,
+        focused: saved.focused_window,
+    };
+    (spec, tabs)
 }
 
 /// A [`SavedLayout`] as a [`LayoutSpec`], pushing each tab's details onto `out` in the order
@@ -412,7 +513,7 @@ mod tests {
         model.apply(Command::SetTabMuted(first, true));
         model.apply(Command::SetTabPinned(first, true));
 
-        let saved = capture(&model, &BTreeMap::new(), &BTreeMap::new());
+        let saved = capture(&model, &BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new());
         let json = serde_json::to_string(&saved).unwrap();
         let reloaded: Saved = serde_json::from_str(&json).unwrap();
         assert_eq!(reloaded, saved);
@@ -420,7 +521,7 @@ mod tests {
         assert_eq!(reloaded.workspaces[0].group, Some(0));
         assert_eq!(reloaded.groups[0].name, "Group 1");
 
-        let (specs, active, tabs) = into_spec(reloaded);
+        let (spec, tabs) = into_spec(reloaded);
         assert_eq!(tabs.len(), 4);
         assert_eq!(tabs[3].url.as_deref(), Some("https://example.com/"));
         assert_eq!(tabs[0].agent_session.as_deref(), Some("1f2e-33"));
@@ -429,14 +530,19 @@ mod tests {
         assert!(tabs[0].muted && tabs[0].pinned);
         assert_eq!(tabs[1], SavedTab::default());
 
-        let (restored, _, new_tabs) = Model::restore(specs, active);
+        let (restored, _, new_tabs) = Model::restore(spec);
         assert_eq!(new_tabs.len(), tabs.len());
         let browser = restored.tab(new_tabs[3]).unwrap();
         assert_eq!(browser.url.as_deref(), Some("https://example.com/"));
         assert_eq!(
-            capture(&restored, &BTreeMap::new(), &BTreeMap::new())
-                .workspaces
-                .len(),
+            capture(
+                &restored,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &BTreeMap::new()
+            )
+            .workspaces
+            .len(),
             1
         );
     }
@@ -469,7 +575,12 @@ mod tests {
             },
         )]);
 
-        let (_, _, tabs) = into_spec(capture(&model, &restored, &BTreeMap::new()));
+        let (_, tabs) = into_spec(capture(
+            &model,
+            &restored,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        ));
         assert_eq!(tabs[0].cwd.as_deref(), Some("C:/repo"));
         assert_eq!(tabs[0].agent_session.as_deref(), Some("1f2e-33"));
         assert_eq!(tabs[1].cwd.as_deref(), Some("C:/other"));
@@ -495,7 +606,7 @@ mod tests {
             },
         )]);
 
-        let (_, _, tabs) = into_spec(capture(&model, &restored, &ssh));
+        let (_, tabs) = into_spec(capture(&model, &restored, &ssh, &BTreeMap::new()));
         assert_eq!(tabs[0].ssh.as_deref(), Some("Pi"));
         assert_eq!(tabs[1].ssh.as_deref(), Some("Work"));
     }
@@ -517,7 +628,11 @@ mod tests {
         std::fs::write(&file, r#"{"version":99,"active":0,"workspaces":[]}"#).unwrap();
         assert_eq!(load(&file), None);
         let (model, _) = Model::new();
-        save(&file, &capture(&model, &BTreeMap::new(), &BTreeMap::new())).unwrap();
+        save(
+            &file,
+            &capture(&model, &BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new()),
+        )
+        .unwrap();
         assert!(load(&file).is_some());
         forget(&file);
         assert_eq!(load(&file), None);

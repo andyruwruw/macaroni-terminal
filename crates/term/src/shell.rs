@@ -5,8 +5,11 @@
 //! PowerShell 7, otherwise Windows PowerShell.
 //!
 //! [`command`] builds the [`CommandBuilder`] that [`Session::spawn`](crate::Session::spawn) runs,
-//! adding the bash integration (`CHERE_INVOKING`, and on Windows a `PROMPT_COMMAND` that reports
-//! OSC 7). [`available`] feeds the app's new-tab menu. [`vscode`] lives here too because it's
+//! adding the shell integration that reports the working directory (OSC 7) and marks prompts and
+//! commands (OSC 133): for bash a `PROMPT_COMMAND` and `PS0` (plus `CHERE_INVOKING` for Git
+//! Bash), for zsh a `ZDOTDIR` whose `.zshenv` (`zshenv.zsh`) hands back to the user's own files
+//! after adding hooks, for PowerShell a script (`prompt.ps1`) run after the user's profile that
+//! wraps `prompt`. [`available`] feeds the app's new-tab menu. [`vscode`] lives here too because it's
 //! the same "find a program on this machine" problem.
 
 use std::path::{Path, PathBuf};
@@ -32,10 +35,18 @@ pub struct ShellOption {
 /// newline that comes before anything visible (after `\[...\]` escapes) is dropped; the next
 /// prompt restores it, unless the user changed `PS1` in between.
 ///
-/// Then it reports the working directory (OSC 7) so restored tabs reopen where they were.
-/// `/c/Users/me` becomes `C:/Users/me`.
-const BASH_PROMPT_COMMAND: &str = r#"if [[ -z $__mcr_nl ]]; then __mcr_nl=1; __mcr_r=$PS1; while [[ $__mcr_r == '\['*'\]'* ]]; do __mcr_r=${__mcr_r#*'\]'}; done; if [[ $__mcr_r == '\n'* ]]; then __mcr_ps1=$PS1; PS1=${PS1%"$__mcr_r"}${__mcr_r#'\n'}; __mcr_short=$PS1; fi; elif [[ $__mcr_nl == 1 ]]; then __mcr_nl=2; [[ -n $__mcr_ps1 && $PS1 == "$__mcr_short" ]] && PS1=$__mcr_ps1; fi
-__mcr_d=$PWD; [[ $__mcr_d =~ ^/([a-zA-Z])(/.*)?$ ]] && __mcr_d="${BASH_REMATCH[1]^^}:${BASH_REMATCH[2]:-/}"; printf '\033]7;file://%s/%s\007' "${HOSTNAME:-localhost}" "${__mcr_d#/}""#;
+/// It reports the last command's exit code (OSC 133 `D`, from `$?` captured before anything
+/// else runs), then the working directory (OSC 7) so restored tabs reopen where they were,
+/// as a Windows path, since the app, `git -C` and restored tabs need one. `/c/Users/me` becomes
+/// `C:/Users/me` without a fork; any other MSYS mount (`/tmp`, `/usr`) is asked of `pwd -W`,
+/// whose subshell is the one fork, and only there. Last, it marks where the prompt starts
+/// (OSC 133 `A`); [`BASH_PS0`] marks where each command's output starts.
+const BASH_PROMPT_COMMAND: &str = r#"__mcr_x=$?; if [[ -z $__mcr_nl ]]; then __mcr_nl=1; __mcr_r=$PS1; while [[ $__mcr_r == '\['*'\]'* ]]; do __mcr_r=${__mcr_r#*'\]'}; done; if [[ $__mcr_r == '\n'* ]]; then __mcr_ps1=$PS1; PS1=${PS1%"$__mcr_r"}${__mcr_r#'\n'}; __mcr_short=$PS1; fi; elif [[ $__mcr_nl == 1 ]]; then __mcr_nl=2; [[ -n $__mcr_ps1 && $PS1 == "$__mcr_short" ]] && PS1=$__mcr_ps1; fi
+__mcr_d=$PWD; if [[ $__mcr_d =~ ^/([a-zA-Z])(/.*)?$ ]]; then __mcr_d="${BASH_REMATCH[1]^^}:${BASH_REMATCH[2]:-/}"; else __mcr_d=$(pwd -W 2>/dev/null || printf '%s' "$PWD"); fi; printf '\033]133;D;%s\007\033]7;file://%s/%s\007\033]133;A\007' "$__mcr_x" "${HOSTNAME:-localhost}" "${__mcr_d#/}""#;
+
+/// Printed by bash after reading a command and before running it: OSC 133 `C`, where the
+/// command's output starts. With `PROMPT_COMMAND`'s `D` and `A` it brackets each command.
+const BASH_PS0: &str = r"\e]133;C\a";
 
 /// The first file called `name` in a `PATH` directory. No `PATHEXT` handling: pass the full
 /// file name (`git.exe`).
@@ -176,37 +187,124 @@ pub fn available() -> Vec<ShellOption> {
     shells
 }
 
+/// The program's name without its folder or extension. Both `/` and `\` count as separators on
+/// every platform: `Path` only knows its own, and a config can name a Windows path anywhere.
+fn program_name(program: &str) -> &str {
+    let file = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    match file.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem,
+        _ => file,
+    }
+}
+
 /// Whether `program` is a bash (including Git Bash), which gets macaroni's prompt integration.
 pub fn is_bash(program: &str) -> bool {
-    Path::new(program)
-        .file_stem()
-        .is_some_and(|s| s.eq_ignore_ascii_case("bash"))
+    program_name(program).eq_ignore_ascii_case("bash")
+}
+
+/// Bash's prompt command outside Windows: the last command's exit code (OSC 133 `D`), the
+/// working directory (OSC 7) and the prompt's start (OSC 133 `A`). Builtins only, like
+/// [`BASH_PROMPT_COMMAND`], which also handles Git Bash's MSYS paths and first-prompt newline.
+const BASH_PROMPT_COMMAND_UNIX: &str = r#"__mcr_x=$?; printf '\033]133;D;%s\007\033]7;file://%s%s\007\033]133;A\007' "$__mcr_x" "${HOSTNAME:-localhost}" "$PWD""#;
+
+/// The zsh integration, written to [`zsh_dir`] as `.zshenv` (see the file for how it hands
+/// control back to the user's own startup files).
+const ZSHENV: &str = include_str!("zshenv.zsh");
+
+/// The PowerShell integration ([`powershell_args`]).
+const PROMPT_PS1: &str = include_str!("prompt.ps1");
+
+/// Whether `program` is PowerShell: Windows PowerShell (`powershell`) or PowerShell 7 (`pwsh`).
+pub fn is_powershell(program: &str) -> bool {
+    let name = program_name(program);
+    name.eq_ignore_ascii_case("pwsh") || name.eq_ignore_ascii_case("powershell")
+}
+
+/// Arguments that start an interactive PowerShell with [`PROMPT_PS1`] run after the profile:
+/// `-NoExit -EncodedCommand`, the script as base64 UTF-16LE, which needs no quoting on a
+/// Windows command line.
+fn powershell_args() -> Vec<String> {
+    use base64::Engine as _;
+    let utf16: Vec<u8> = PROMPT_PS1
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    vec![
+        "-NoExit".into(),
+        "-EncodedCommand".into(),
+        base64::engine::general_purpose::STANDARD.encode(utf16),
+    ]
+}
+
+/// Whether `program` is a zsh.
+pub fn is_zsh(program: &str) -> bool {
+    program_name(program).eq_ignore_ascii_case("zsh")
+}
+
+/// The folder zsh is pointed at (`ZDOTDIR`), with [`ZSHENV`] written in it; `None` if it can't
+/// be written. It's rewritten when its text differs, so an upgrade replaces an old copy.
+fn zsh_dir() -> Option<PathBuf> {
+    let dir = std::env::temp_dir().join("macaroni-zsh");
+    let file = dir.join(".zshenv");
+    if std::fs::read_to_string(&file).ok().as_deref() != Some(ZSHENV) {
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::write(&file, ZSHENV).ok()?;
+    }
+    Some(dir)
+}
+
+/// Adds the prompt integration for bash (`PROMPT_COMMAND`, `PS0`) and zsh (`ZDOTDIR`) to
+/// `command`. Each shell reads only its own variables, so the login shell, whichever it is,
+/// gets both. A user's own `PROMPT_COMMAND` (set in their `.bashrc`) replaces bash's.
+fn integrate(command: &mut CommandBuilder, bash: bool, zsh: bool) {
+    if bash {
+        let prompt = if cfg!(windows) {
+            BASH_PROMPT_COMMAND
+        } else {
+            BASH_PROMPT_COMMAND_UNIX
+        };
+        command.env("PROMPT_COMMAND", prompt);
+        command.env("PS0", BASH_PS0);
+    }
+    if zsh && let Some(dir) = zsh_dir() {
+        // The user's own ZDOTDIR (empty: unset), which the integration puts back.
+        let own = std::env::var_os("ZDOTDIR").unwrap_or_default();
+        command.env("MACARONI_ZDOTDIR", own);
+        command.env("ZDOTDIR", dir);
+    }
 }
 
 /// The command for `program` (or the platform default), with shell-specific environment.
 ///
 /// With `program` of `None`, `args` is ignored: Windows runs [`windows_default`] with its own
-/// arguments, and other platforms run the login shell (`CommandBuilder::new_default_prog`), which
-/// gets no bash integration.
+/// arguments, and other platforms run the login shell (`CommandBuilder::new_default_prog`),
+/// which gets both the bash and the zsh integration since it could be either.
 pub fn command(program: Option<&str>, args: &[String]) -> CommandBuilder {
     let (program, args) = match program {
         Some(program) => (program.to_owned(), args.to_vec()),
         None => match windows_default() {
             Some(default) => (default.program, default.args),
-            None => return CommandBuilder::new_default_prog(),
+            None => {
+                let mut command = CommandBuilder::new_default_prog();
+                integrate(&mut command, true, true);
+                return command;
+            }
         },
+    };
+    // Only a plain PowerShell: arguments of the user's own (`-NoProfile`, `-Command ...`) may
+    // not start an interactive shell at all.
+    let args = if is_powershell(&program) && args.is_empty() {
+        powershell_args()
+    } else {
+        args
     };
     let mut command = CommandBuilder::new(&program);
     command.args(&args);
     if is_bash(&program) {
         // Git Bash's /etc/profile changes to $HOME unless this is set; keep the tab's directory.
         command.env("CHERE_INVOKING", "1");
-        // Windows only: the prompt command exists for Git Bash (its MSYS paths and its PS1).
-        // Elsewhere bash keeps the user's own PROMPT_COMMAND untouched.
-        if cfg!(windows) {
-            command.env("PROMPT_COMMAND", BASH_PROMPT_COMMAND);
-        }
     }
+    integrate(&mut command, is_bash(&program), is_zsh(&program));
     command
 }
 
@@ -215,11 +313,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unix_bash_prompt_command_marks_the_prompt() {
+        // Git Bash is still a bash: enough to check the Unix prompt command runs and prints.
+        let Some(bash) = git_bash() else {
+            return;
+        };
+        let out = std::process::Command::new(bash)
+            .args(["-c", &format!("cd /; false; {BASH_PROMPT_COMMAND_UNIX}")])
+            .output()
+            .expect("run bash");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.starts_with("]133;D;1]7;file://"), "{text:?}");
+        assert!(text.ends_with("/]133;A"), "{text:?}");
+    }
+
+    #[test]
+    fn zsh_gets_its_integration_folder() {
+        assert!(is_zsh("/bin/zsh") && !is_zsh("/bin/bash"));
+        let dir = zsh_dir().expect("temp folder is writable");
+        let written = std::fs::read_to_string(dir.join(".zshenv")).unwrap();
+        assert!(written.contains("add-zsh-hook precmd __macaroni_precmd"));
+        let command = command(Some("/bin/zsh"), &[]);
+        assert_eq!(command.get_env("ZDOTDIR"), Some(dir.as_os_str()));
+        assert!(command.get_env("MACARONI_ZDOTDIR").is_some());
+        // Bash's hook isn't added: the variable is whatever this process inherited (which is
+        // macaroni's own when the tests run in a macaroni terminal).
+        assert_eq!(
+            command.get_env("PROMPT_COMMAND"),
+            std::env::var_os("PROMPT_COMMAND").as_deref()
+        );
+    }
+
+    #[test]
+    fn plain_powershell_gets_its_integration() {
+        assert!(is_powershell("pwsh.exe"));
+        assert!(is_powershell(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        ));
+        assert!(!is_powershell("bash.exe"));
+        let args = powershell_args();
+        assert_eq!(args[..2], ["-NoExit", "-EncodedCommand"]);
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&args[2])
+            .unwrap();
+        let units: Vec<u16> = bytes
+            .chunks(2)
+            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .collect();
+        assert_eq!(String::from_utf16(&units).unwrap(), PROMPT_PS1);
+    }
+
+    #[test]
     fn bash_detection_by_name() {
         assert!(is_bash("C:/Program Files/Git/bin/bash.exe"));
         assert!(is_bash("/bin/bash"));
         assert!(!is_bash("pwsh.exe"));
         assert!(!is_bash("/bin/zsh"));
+        // Either separator, on any platform.
+        assert!(is_bash(r"C:\Program Files\Git\bin\bash.exe"));
+        assert!(is_zsh("/usr/local/bin/zsh"));
+        assert!(!is_bash(".bash"));
     }
 
     #[test]
@@ -253,8 +407,11 @@ mod tests {
             .output()
             .expect("run bash");
         let text = String::from_utf8_lossy(&out.stdout);
-        assert!(text.starts_with("\x1b]7;file://"), "{text:?}");
-        assert!(text.ends_with("/C:/Windows\x07"), "{text:?}");
+        assert!(
+            text.starts_with("\x1b]133;D;0\x07\x1b]7;file://"),
+            "{text:?}"
+        );
+        assert!(text.ends_with("/C:/Windows\x07\x1b]133;A\x07"), "{text:?}");
     }
 
     /// The first prompt loses Git Bash's leading newline and the second gets it back; a

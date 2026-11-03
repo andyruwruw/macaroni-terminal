@@ -113,7 +113,7 @@ impl App {
         )
         .on_press(Message::Window(WindowOp::Drag))
         .on_double_click(Message::Window(WindowOp::ToggleMaximize));
-        let (maximize, maximize_size) = if self.maximized {
+        let (maximize, maximize_size) = if self.maximized() {
             (Icon::Restore, RESTORE_GLYPH)
         } else {
             (Icon::Maximize, MAXIMIZE_GLYPH)
@@ -145,7 +145,7 @@ impl App {
                 c,
                 Icon::Close,
                 CLOSE_GLYPH,
-                Message::CloseRequested,
+                Message::Window(WindowOp::Close),
                 Some(c.close_hover),
             ),
         ]
@@ -165,7 +165,7 @@ impl App {
     /// workspace's menu, the same one as in the sidebar.
     fn title_workspace_name(&self) -> Element<'_, Message> {
         let c = self.chrome;
-        let ws = self.model.active_workspace();
+        let ws = self.shown_workspace();
         let id = ws.id;
         let name = |lit: bool| -> Element<'_, Message> {
             container(

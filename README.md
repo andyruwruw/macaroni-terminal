@@ -8,7 +8,7 @@ I work on many projects at once, and want them split into workspaces, and to all
 
 This terminal seeks to provide that. Run your agent, dev server, code and browser all in one spot.
 
-> macaroni is an early alpha (0.1.0-alpha.1): expect rough edges, and settings and the control API may still change.
+> macaroni is an early alpha (0.1.0-alpha.3): expect rough edges, and settings and the control API may still change.
 
 - **Native and fast.** Rust on the GPU, not a web view, so it keeps up with whatever your agents print.
 - **Made for agents.** Claude Code's live state shows in every pane and in the sidebar, and you get a ping the moment one needs you.
@@ -19,31 +19,39 @@ This terminal seeks to provide that. Run your agent, dev server, code and browse
 
 <p align="center"><img src="docs/screenshots/attention.png" alt="Agent attention: pane ring, sidebar badge and OS notification"></p>
 
-- **Workspaces** in a vertical sidebar, with groups, pins, icons, colors and drag-and-drop.
+- **Workspaces** in a vertical sidebar, with groups, pins, icons, colors and drag-and-drop, in as many windows as you like.
 - **Split panes with tabs in every pane.** Drag a tab to another pane, or onto an edge to split it.
 - **Agent attention.** OSC 9, 777 and 99 light up the waiting tab, pane and workspace, then send an OS notification if you can't see it.
 - **Claude Code integration.** One command adds hooks and a status line; sessions resume in the same tab after a restart.
 
 <p align="center"><img src="docs/screenshots/browser.png" alt="An embedded browser tab beside a terminal"></p>
 
-- **Browser tabs** (Windows). Embedded Chromium with an address bar and DevTools. Ctrl+click a terminal link to open it in a split.
+- **Browser tabs.** The system's web view (Edge on Windows, Safari's engine on macOS) with an address bar and developer tools, or Chromium on Windows, an optional download in Settings. Ctrl+click (Cmd+click on macOS) a terminal link to open it in a split.
 - **VS Code tabs** (Windows, opt-in). Download VS Code for the web from settings and open it in a tab at the pane's folder.
 
 <p align="center"><img src="docs/screenshots/scriptable.png" alt="macaroni-cli and a live-reloading config.toml"></p>
 
 - **Scriptable.** `macaroni-cli` lists, splits, types, reads, notifies and streams events over a local socket.
 - **Configurable everything.** One live-reloading `config.toml` with a settings dialog over it: themes, a glass look, colors, sizes and every shortcut.
-- **Session restore.** Layout, directories and agent sessions come back after a restart.
+- **Session restore.** Layout, directories, scrollback and agent sessions come back after a restart, and closed tabs reopen with Ctrl+Shift+R.
+- **Triggers and inline images.** Regex rules on output highlight, notify or badge a tab; programs can show pictures inline (iTerm2's OSC 1337, as `imgcat` sends).
 - **Good shells by default.** Your login shell on macOS, Git Bash on Windows (with PowerShell as a fallback and a one-click install).
 - **SSH profiles.** Save hosts once and open them from the new-tab menu; a dropped connection reconnects with Enter.
 
 ## Get started
 
+Download the zip for your platform from [Releases](https://github.com/andyruwruw/macaroni-terminal/releases). On Windows, unzip the `macaroni` folder anywhere and run `macaroni.exe`. On macOS, move `macaroni.app` to Applications. The builds aren't signed yet, so the first launch needs a click past a warning: on Windows choose More info > Run anyway; on macOS open it, then allow it in System Settings > Privacy & Security.
+
+Or build and install from source, which needs [rustup](https://rustup.rs) plus the platform build tools (see [CONTRIBUTING.md](CONTRIBUTING.md#setup)):
+
 ```sh
-cargo run -p macaroni --release
+./install              # build, install, start; run again to update
+./install --uninstall  # remove the app (settings are kept)
 ```
 
-You need [rustup](https://rustup.rs) plus the platform build tools (see [CONTRIBUTING.md](CONTRIBUTING.md#setup)). Then hook up Claude Code:
+The same command works in macOS's Terminal and in PowerShell, cmd or Git Bash on Windows (`.\install` in PowerShell and cmd). It installs to `/Applications` on macOS, or `%LOCALAPPDATA%\Programs\macaroni` with a Start menu shortcut on Windows.
+
+Then hook up Claude Code from Settings > Integrations > Agents, or with:
 
 ```sh
 macaroni-cli setup claude
@@ -58,8 +66,11 @@ It shows the change to `~/.claude/settings.json` and asks first; `--remove` undo
 | Split right / down | Ctrl+Shift+D / Ctrl+Shift+E | Cmd+D / Cmd+Shift+D |
 | New tab / close tab | Ctrl+Shift+T / Ctrl+Shift+W | Cmd+T / Cmd+W |
 | New workspace, switch | Ctrl+Shift+N, Ctrl+Shift+1..9 | Cmd+N, Cmd+1..9 |
+| New window | Ctrl+Alt+Shift+N | Cmd+Shift+N |
 | Move focus | Ctrl+Alt+arrows | Cmd+Alt+arrows |
-| Find | Ctrl+F | Cmd+F |
+| Find, search every tab | Ctrl+F, Ctrl+Shift+G | Cmd+F, Cmd+Option+F |
+| Command palette | Ctrl+Shift+P | Cmd+Shift+P |
+| Jump to a pane by letter | Ctrl+Shift+J | Cmd+Shift+J |
 | Toggle sidebar | Ctrl+B | Cmd+B |
 | Settings | Ctrl+, | Cmd+, |
 
@@ -82,4 +93,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the dev loop and the checks, a
 
 ## License
 
-[MIT](LICENSE). Bundled fonts, icons, ConPTY and Chromium keep their own licenses.
+[MIT](LICENSE). Bundled fonts, icons and ConPTY, and the optional Chromium download, keep their own licenses.

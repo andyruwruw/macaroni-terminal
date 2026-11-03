@@ -9,8 +9,8 @@
 
 use iced::Color;
 use macaroni_config::{
-    COLORS, Chord, ChordKey, ColorSetting, ColorValue, Config, CursorStyle, NamedKey,
-    NumberSetting, OpenLinks, Rgba, Style, THEME_COLORS, Theme, ThemeColor, UiTheme, Unit, Value,
+    BrowserEngine, COLORS, ColorSetting, ColorValue, Config, CursorStyle, NumberSetting, OpenLinks,
+    Rgba, Style, THEME_COLORS, Theme, ThemeColor, UiTheme, Unit, Value,
 };
 
 use super::{Control, Section, Setting, SettingsMessage};
@@ -56,8 +56,23 @@ static SCROLL_LINES: NumberSetting = NumberSetting {
     unit: Unit::Lines,
 };
 
+/// `[notifications] long_command`.
+static LONG_COMMAND: NumberSetting = NumberSetting {
+    key: "notifications.long_command",
+    group: "Attention",
+    label: "Long commands",
+    description: "A command that runs at least this long asks for attention when it finishes; \
+                  0 turns it off. Needs a shell that marks commands (Git Bash does here).",
+    default: 30.0,
+    min: 0.0,
+    max: 3600.0,
+    step: 5.0,
+    unit: Unit::Seconds,
+};
+
 /// The number rows that aren't `[style.*]`.
-static OTHER_NUMBERS: [&NumberSetting; 3] = [&FONT_SIZE, &LINE_HEIGHT, &SCROLL_LINES];
+static OTHER_NUMBERS: [&NumberSetting; 4] =
+    [&FONT_SIZE, &LINE_HEIGHT, &SCROLL_LINES, &LONG_COMMAND];
 
 /// The number setting with dotted `key`, from `[style.*]` or the others.
 pub(super) fn number_setting(key: &str) -> Option<&'static NumberSetting> {
@@ -176,6 +191,7 @@ const LOOK: &[(Section, &[Card])] = &[
                     "workspace_items.title",
                     "workspace_items.detail",
                     "workspace_items.badge",
+                    "workspace_items.pane_badge",
                     "workspace_items.status_icons",
                     "workspace_items.close_button",
                 ],
@@ -473,9 +489,9 @@ impl App {
                 Setting::new(
                     Section::Shortcuts,
                     "Shortcuts",
-                    &action_label(&name),
+                    &crate::keymap::label(&name),
                     "",
-                    Control::Shortcut(chord_label(&chord)),
+                    Control::Shortcut(crate::keymap::chord_label(&chord)),
                 )
             },
         ));
@@ -505,7 +521,7 @@ impl App {
     fn browser_settings(&self) -> Vec<Setting> {
         use Section::Browser;
         let config = &self.config;
-        vec![
+        let mut list = vec![
             Setting::new(
                 Browser,
                 "Browser",
@@ -534,7 +550,72 @@ impl App {
                     placeholder: "https://www.google.com/",
                 },
             ),
-        ]
+        ];
+        // Chromium is only an option on Windows.
+        if cfg!(windows) {
+            let engine = match config.browser.engine {
+                BrowserEngine::System => "system",
+                BrowserEngine::Chromium => "chromium",
+            };
+            let engines = vec![
+                ("System (Edge)".into(), str_value("system")),
+                ("Chromium".into(), str_value("chromium")),
+            ];
+            list.insert(
+                1,
+                Setting::new(
+                    Browser,
+                    "Browser",
+                    "Engine",
+                    "What shows pages: Edge's WebView2, built into Windows, or Chromium once \
+                     it's downloaded below. Applies to pages opened afterwards.",
+                    choice("browser.engine", engines, &str_value(engine)),
+                ),
+            );
+        }
+        if crate::chromium::available() {
+            list.push(self.chromium_setting());
+        }
+        list
+    }
+
+    /// The Chromium download: its state, and a button to download or remove it.
+    fn chromium_setting(&self) -> Setting {
+        let state = &self.chromium;
+        let (mut description, button, message) = if state.busy {
+            (
+                "Working\u{2026}".to_owned(),
+                "Please wait",
+                SettingsMessage::Chromium(true),
+            )
+        } else if state.installed {
+            (
+                format!(
+                    "Downloaded to {}. Set the engine to Chromium to use it.",
+                    crate::chromium::dir().display()
+                ),
+                "Remove",
+                SettingsMessage::Chromium(false),
+            )
+        } else {
+            (
+                "Embedded Chromium, for pages that need Chrome's engine. Downloads the Chromium \
+                 Embedded Framework build this version of macaroni uses (about 175 MB)."
+                    .to_owned(),
+                "Download",
+                SettingsMessage::Chromium(true),
+            )
+        };
+        if let Some(error) = &state.error {
+            description = format!("{description}\n{error}");
+        }
+        Setting::new(
+            Section::Browser,
+            "Chromium",
+            "Chromium",
+            &description,
+            Control::Button(button.to_owned(), Message::Settings(message)),
+        )
     }
 
     /// VS Code: download or remove it, and its server while it runs. Nothing where browser
@@ -761,6 +842,18 @@ impl App {
             ),
             Setting::new(
                 Terminal,
+                "Shell",
+                "Default folder",
+                "Where terminals start in a workspace without a folder of its own. Empty is your \
+                 home folder; ~ stands for it. Press Enter to apply.",
+                Control::Text {
+                    key: "terminal.default_dir",
+                    value: terminal.default_dir.clone(),
+                    placeholder: "Home folder",
+                },
+            ),
+            Setting::new(
+                Terminal,
                 "Font",
                 "Font family",
                 "Any installed monospace font. Empty uses the bundled JetBrains Mono.",
@@ -863,6 +956,7 @@ impl App {
                 "Show an OS notification when a tab that isn't in view asks for attention.",
                 Control::Toggle("notifications.os", n.os),
             ),
+            number_row(Notifications, &LONG_COMMAND, n.long_command as f32),
             Setting::new(
                 Notifications,
                 "Bell",
@@ -991,10 +1085,10 @@ fn interface_choice(ui: UiTheme) -> Control {
     Control::Dropdown(
         "ui_theme",
         vec![
-            ("Glass".into(), str_value("glass")),
             ("Solid".into(), str_value("solid")),
+            ("Glass".into(), str_value("glass")),
         ],
-        Some(usize::from(ui == UiTheme::Solid)),
+        Some(usize::from(ui == UiTheme::Glass)),
     )
 }
 
@@ -1074,7 +1168,8 @@ fn item_rows(config: &Config, themes: Vec<(String, Value)>) -> Vec<Setting> {
         row(
             "Detail",
             "The line under the title; one that comes out empty is hidden. Custom: {activity}, \
-             {status}, {summary}, {tabs}, {panes}, {notice}, {agent}, {dir}, {path}, {title}.",
+             {status}, {summary}, {tabs}, {panes}, {notice}, {agent}, {dir}, {path}, {title}, \
+             {branch}, {dirty}, {sync}.",
             template(
                 "workspace_items.detail",
                 &ws.detail,
@@ -1087,6 +1182,7 @@ fn item_rows(config: &Config, themes: Vec<(String, Value)>) -> Vec<Setting> {
                     ("Notifications", "{notice}"),
                     ("Agent", "{agent}"),
                     ("Directory", "{path}"),
+                    ("Git branch", "{branch}{dirty} {sync}"),
                     ("Hidden", ""),
                 ],
             ),
@@ -1102,6 +1198,21 @@ fn item_rows(config: &Config, themes: Vec<(String, Value)>) -> Vec<Setting> {
                     ("Position", "{index}"),
                     ("Tab count", "{tabs}"),
                     ("Pane count", "{panes}"),
+                    ("Hidden", ""),
+                ],
+            ),
+        ),
+        row(
+            "Pane badge",
+            "A large faded label in the top right of each of the workspace's panes. Takes the \
+             same placeholders as the detail line.",
+            template(
+                "workspace_items.pane_badge",
+                &ws.pane_badge,
+                &[
+                    ("Name", "{name}"),
+                    ("Git branch", "{branch}"),
+                    ("Directory", "{dir}"),
                     ("Hidden", ""),
                 ],
             ),
@@ -1213,52 +1324,6 @@ fn thousands(n: i64) -> String {
     out
 }
 
-/// `new_tab` as "New tab", `workspace_3` as "Workspace 3".
-fn action_label(name: &str) -> String {
-    let words = name.replace('_', " ");
-    let mut chars = words.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
-}
-
-/// A chord as it's shown, e.g. Ctrl+Shift+T.
-fn chord_label(chord: &Chord) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    let logo = if cfg!(target_os = "macos") {
-        "Cmd"
-    } else {
-        "Win"
-    };
-    for (on, name) in [
-        (chord.mods.ctrl, "Ctrl"),
-        (
-            chord.mods.alt,
-            if cfg!(target_os = "macos") {
-                "Option"
-            } else {
-                "Alt"
-            },
-        ),
-        (chord.mods.shift, "Shift"),
-        (chord.mods.logo, logo),
-    ] {
-        if on {
-            parts.push(name.to_owned());
-        }
-    }
-    parts.push(match chord.key {
-        ChordKey::Char(c) => c.to_uppercase().to_string(),
-        ChordKey::Digit(d) => d.to_string(),
-        ChordKey::Named(NamedKey::F(n)) => format!("F{n}"),
-        ChordKey::Named(NamedKey::PageUp) => "PageUp".to_owned(),
-        ChordKey::Named(NamedKey::PageDown) => "PageDown".to_owned(),
-        ChordKey::Named(named) => format!("{named:?}"),
-    });
-    parts.join("+")
-}
-
 /// `14`, `12.5` or `0.55`: no trailing zeros, no float noise.
 pub(super) fn format_number(v: f32) -> String {
     let rounded = (f64::from(v) * 1000.0).round() / 1000.0;
@@ -1271,8 +1336,6 @@ mod tests {
 
     #[test]
     fn labels() {
-        assert_eq!(action_label("new_tab"), "New tab");
-        assert_eq!(action_label("workspace_3"), "Workspace 3");
         assert_eq!(thousands(100_000), "100,000");
         assert_eq!(thousands(500), "500");
         assert_eq!(format_number(14.0), "14");
@@ -1280,8 +1343,8 @@ mod tests {
         assert_eq!(format_number(0.55), "0.55");
         assert_eq!(to_hex(Color::from_rgb8(1, 2, 255)), "#0102ff");
         assert_eq!(to_hex(Color::from_rgba8(1, 2, 255, 0.5)), "#0102ff80");
-        let chord: Chord = "ctrl+shift+t".parse().unwrap();
-        assert_eq!(chord_label(&chord), "Ctrl+Shift+T");
+        let chord: macaroni_config::Chord = "ctrl+shift+t".parse().unwrap();
+        assert_eq!(crate::keymap::chord_label(&chord), "Ctrl+Shift+T");
     }
 
     #[test]
@@ -1300,6 +1363,10 @@ mod tests {
         assert_eq!(FONT_SIZE.default, config.font.size);
         assert_eq!(LINE_HEIGHT.default, config.font.line_height);
         assert_eq!(SCROLL_LINES.default, config.terminal.scroll_lines as f32);
+        assert_eq!(
+            LONG_COMMAND.default,
+            config.notifications.long_command as f32
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ use macaroni_core::{Axis, BrowserId, PaneId, TabKind};
 
 use super::tabs::strip_scrollbar_room;
 use super::tabs::tabs_flush;
-use super::widgets::{card_style, flat_button, input_style};
+use super::widgets::{card_style, flat_button, icon_button, input_style};
 use super::{pane_area, pane_overlap};
 use crate::browser::BrowserHost;
 use crate::icons::{Icon, icon};
@@ -41,19 +41,35 @@ const ADDRESS_BAR_PADDING: f32 = 2.0;
 /// Between the address bar and the page.
 const ADDRESS_BAR_GAP: f32 = 6.0;
 
+/// Inside the page find card, around its row.
+const FIND_CARD_PADDING: f32 = 6.0;
+
+/// The size of the letters `jump_to_pane` shows over the panes.
+const PANE_LETTER_SIZE: f32 = 44.0;
+
+/// The text size of `[workspace_items] pane_badge`.
+const PANE_BADGE_SIZE: f32 = 40.0;
+
+/// How strongly the pane badge shows over the terminal.
+const PANE_BADGE_ALPHA: f32 = 0.14;
+
+/// Between the pane badge and the pane's top and right edges.
+const PANE_BADGE_MARGIN: f32 = 16.0;
+
 /// The text size of the message shown when a page can't open.
 const ERROR_TEXT_SIZE: f32 = 13.0;
 
 impl App {
     /// The active workspace's panes and divider handles, laid out in `size` (the pane area,
-    /// from `responsive`). The focused pane gets a ring only when there's more than one pane
-    /// to tell apart; a waiting tab's attention ring wins over it.
+    /// from `responsive`); a maximized pane alone, without handles. The focused pane gets a ring
+    /// only when there's more than one pane on screen to tell apart; a waiting tab's attention
+    /// ring wins over it.
     pub(super) fn workspace(&self, size: Size) -> Element<'_, Message> {
         let c = self.chrome;
-        let ws = self.model.active_workspace();
+        let ws = self.shown_workspace();
         let area = pane_area(c, size);
 
-        let panes = ws.layout.panes(area);
+        let panes = ws.shown_panes(area);
         let split = panes.len() > 1;
         let inset = c.s.panes.gap / 2.0;
         let grow = pane_overlap(c) - c.s.panes.gap;
@@ -83,7 +99,7 @@ impl App {
 
         // Each handle fills the gap at its boundary (centered on `ratio`, a gap wide), so it's
         // grabbable exactly where the window background shows between the panes.
-        for divider in ws.layout.dividers(area) {
+        for divider in ws.shown_dividers(area) {
             let a = divider.area;
             let (x, y, width, height, interaction) = match divider.axis {
                 Axis::Row => (
@@ -110,6 +126,71 @@ impl App {
                     .y(y)
                     .into(),
             );
+        }
+
+        // `[workspace_items] pane_badge`: drawn over the terminal, faded, since an opaque terminal
+        // background would hide anything behind it.
+        let template = &self.config.workspace_items.pane_badge;
+        if !template.trim().is_empty() {
+            let index = self
+                .shown()
+                .workspaces
+                .iter()
+                .position(|w| w.id == ws.id)
+                .unwrap_or(0);
+            let values = super::sidebar::WorkspaceValues::new(self, index, ws);
+            let label = crate::label::fill(template, |key| values.get(key));
+            if !label.trim().is_empty() {
+                // Below the tab strip, so it sits on the terminal.
+                let top = c.s.tabs.height + c.s.tabs.gap + PANE_BADGE_MARGIN;
+                for (_, r) in ws.shown_panes(area) {
+                    layers.push(
+                        pin(container(
+                            text(label.clone())
+                                .size(PANE_BADGE_SIZE)
+                                .color(c.text.scale_alpha(PANE_BADGE_ALPHA)),
+                        )
+                        .align_right(r.width - PANE_BADGE_MARGIN * 2.0)
+                        .clip(true))
+                        .x(r.x + inset + PANE_BADGE_MARGIN)
+                        .y(r.y + inset + top)
+                        .into(),
+                    );
+                }
+            }
+        }
+
+        // `jump_to_pane`: a letter in the middle of each pane, in `shown_panes` order.
+        if self.pane_letters {
+            for (index, (_, r)) in ws.shown_panes(area).into_iter().enumerate() {
+                let Some(letter) = crate::update::shortcuts::pane_letter(index) else {
+                    break;
+                };
+                let badge = container(
+                    text(letter.to_ascii_uppercase().to_string())
+                        .size(PANE_LETTER_SIZE)
+                        .color(c.text),
+                )
+                .padding([6, 22])
+                .style(move |_| container::Style {
+                    background: Some(c.popup.into()),
+                    border: iced::Border {
+                        color: c.outline,
+                        width: 2.0,
+                        radius: 12.0.into(),
+                    },
+                    ..container::Style::default()
+                });
+                layers.push(
+                    pin(container(badge)
+                        .center(Fill)
+                        .width(r.width)
+                        .height(r.height))
+                    .x(r.x + inset)
+                    .y(r.y + inset)
+                    .into(),
+                );
+            }
         }
 
         stack(layers).width(Fill).height(Fill).into()
@@ -154,6 +235,11 @@ impl App {
                         && self.settings.is_none()
                         && self.icon_picker.is_none()
                         && self.folder_dialog.is_none()
+                        && self.command_palette.is_none()
+                        && self.worktree_dialog.is_none()
+                        && !self.dashboard
+                        && !self.pane_letters
+                        && self.env_dialog.is_none()
                         && !self.sidebar_search_focused,
                     move |event| Message::View(session, event),
                 )
@@ -162,6 +248,7 @@ impl App {
                 .enter_renames(self.item_focus.is_some())
                 .wheel_lines(self.config.terminal.scroll_lines as f32)
                 .copy_on_select(self.config.terminal.copy_on_select)
+                .highlights(self.triggers.highlights())
                 .into()
             }
             TabKind::Browser(id) => self.browser_body(id),
@@ -251,8 +338,60 @@ impl App {
                 .into(),
             None => BrowserHost::new(id, move |bounds| Message::BrowserBounds(id, bounds)).into(),
         };
-        column![container(bar).padding(ADDRESS_BAR_PADDING), page]
+        column![container(bar).padding(ADDRESS_BAR_PADDING)]
+            .push(self.page_find(id))
+            .push(page)
             .spacing(ADDRESS_BAR_GAP)
             .into()
+    }
+
+    /// The find card for page `id`, between the address bar and the page while the find bar
+    /// searches it; `None` otherwise. It can't float over the page: the page is a native window
+    /// that covers anything the app draws there, so the page gives up the card's height instead.
+    fn page_find(&self, id: BrowserId) -> Option<Element<'_, Message>> {
+        use macaroni_term::SearchDirection;
+        let search = self
+            .search
+            .as_ref()
+            .filter(|s| s.target == crate::state::SearchTarget::Page(id))?;
+        let c = self.chrome;
+        let status = if search.found { "" } else { "No matches" };
+        let card = row![
+            icon(Icon::Globe, NAV_ICON_SIZE, c.label),
+            text("Find in page")
+                .size(c.s.controls.field_text_size)
+                .color(c.label),
+            text_input("Text on this page", &search.query)
+                .id(super::SEARCH_INPUT)
+                .on_input(Message::SearchInput)
+                .on_submit(Message::SearchStep(SearchDirection::Newer))
+                .size(c.s.controls.field_text_size)
+                .padding(ADDRESS_PADDING)
+                .style(move |_, status| input_style(c, status))
+                .width(Fill),
+            text(status)
+                .size(c.s.controls.field_text_size - 1.0)
+                .color(c.danger),
+            icon_button(c, Icon::Up, Message::SearchStep(SearchDirection::Older)),
+            icon_button(c, Icon::Down, Message::SearchStep(SearchDirection::Newer)),
+            icon_button(c, Icon::Close, Message::SearchClose),
+        ]
+        .spacing(ADDRESS_SPACING)
+        .align_y(alignment::Vertical::Center);
+        Some(
+            container(container(card).padding(FIND_CARD_PADDING).style(move |_| {
+                container::Style {
+                    background: Some(c.popup.into()),
+                    border: Border {
+                        color: c.outline,
+                        width: 1.0,
+                        radius: c.s.controls.radius.into(),
+                    },
+                    ..container::Style::default()
+                }
+            }))
+            .padding(ADDRESS_BAR_PADDING)
+            .into(),
+        )
     }
 }

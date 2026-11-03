@@ -24,11 +24,11 @@ pub(crate) fn startup(saved: Option<Saved>) -> Startup {
     };
     let workspaces = saved.workspaces.clone();
     let saved_groups = saved.groups.clone();
-    let (specs, active, details) = session::into_spec(saved);
-    let (mut model, effects, tabs) = Model::restore(specs, active);
-    // `Model::restore` keeps the saved order of workspaces and tabs, so zipping by position
-    // pairs each new id with its saved details.
-    let ids: Vec<_> = model.workspaces().iter().map(|w| w.id).collect();
+    let (spec, details) = session::into_spec(saved);
+    let (mut model, effects, tabs) = Model::restore(spec);
+    // `Model::restore` keeps the saved order of windows, workspaces and tabs, so zipping by
+    // position pairs each new id with its saved details.
+    let ids: Vec<_> = model.all_workspaces().iter().map(|w| w.id).collect();
     restore_workspaces(&mut model, &ids, &workspaces, &saved_groups);
     restore_tabs(&mut model, &tabs, &details);
     (model, effects, tabs.into_iter().zip(details).collect())
@@ -49,6 +49,8 @@ fn restore_workspaces(
         model.apply(Command::SetWorkspaceIcon(id, saved.icon.clone()));
         model.apply(Command::SetWorkspaceColor(id, saved.color.clone()));
         model.apply(Command::SetWorkspaceCwd(id, saved.cwd.clone()));
+        model.apply(Command::SetWorkspaceEnv(id, saved.env.clone()));
+        model.apply(Command::SetWorkspaceStartup(id, saved.startup.clone()));
         if let Some(index) = saved.group {
             join_saved_group(model, id, index, saved_groups, &mut groups);
         }

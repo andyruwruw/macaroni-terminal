@@ -10,7 +10,7 @@ use iced::{Point, Task};
 use macaroni_core::{Command, MoveTo, PaneId, TabId, WorkspaceId};
 
 use crate::message::Message;
-use crate::state::{Dragged, DropTarget, ItemDrag, Renaming, SidebarHover};
+use crate::state::{Dragged, DropTarget, ItemDrag, Over, Renaming, SidebarHover};
 use crate::{App, pointer, view};
 
 /// How far (logical pixels) a pressed tab or workspace must move before it's dragged rather
@@ -43,6 +43,7 @@ impl App {
             from: None,
             at: Point::ORIGIN,
             dragging: false,
+            over: Over::Here,
         });
     }
 
@@ -53,13 +54,46 @@ impl App {
 
     /// Follows the pointer with a pressed item, which becomes a drag once it moved far enough.
     pub(crate) fn item_drag_move(&mut self, at: Point) -> Task<Message> {
+        let over = self.over(at);
         if let Some(drag) = &mut self.item_drag {
             // The press itself carries no position, so the first move is the starting point.
             let from = *drag.from.get_or_insert(at);
             drag.at = at;
             drag.dragging |= from.distance(at) > TAB_DRAG_THRESHOLD;
+            drag.over = over;
         }
         Task::none()
+    }
+
+    /// Which window `at` (in the focused window's coordinates) is over. Inside the focused
+    /// window, or when where it is on screen isn't known yet, it's that one.
+    fn over(&self, at: Point) -> Over {
+        let focused = self.model.focused_window();
+        let Some(win) = self.os_window(focused).and_then(|id| self.wins.get(&id)) else {
+            return Over::Here;
+        };
+        let inside = |size: iced::Size, p: Point| {
+            p.x >= 0.0 && p.y >= 0.0 && p.x < size.width && p.y < size.height
+        };
+        if inside(win.size, at) {
+            return Over::Here;
+        }
+        let Some(origin) = win.position else {
+            return Over::Here;
+        };
+        let screen = Point::new(origin.x + at.x, origin.y + at.y);
+        for (&id, other) in &self.wins {
+            if other.model == focused {
+                continue;
+            }
+            if let Some(o) = other.position {
+                let local = Point::new(screen.x - o.x, screen.y - o.y);
+                if inside(other.size, local) {
+                    return Over::Window(id, local);
+                }
+            }
+        }
+        Over::Outside(screen)
     }
 
     /// The button was released: drop the dragged tab or workspace where it is. A press that
@@ -75,6 +109,11 @@ impl App {
             self.sidebar_hover = None;
             self.hovered_tab = None;
         }
+        let over = self.item_drag.filter(|d| d.dragging).map(|d| d.over);
+        if let Some(Over::Outside(at)) = over {
+            // Where the new window a drop opens goes.
+            self.next_window_at = Some(at);
+        }
         match self.item_drag.take() {
             Some(ItemDrag {
                 item: Dragged::Tab(tab),
@@ -83,6 +122,22 @@ impl App {
                 Some(target) => self.drop_tab(tab, target),
                 None => Task::none(),
             },
+            Some(ItemDrag {
+                item: Dragged::Workspace(ws),
+                ..
+            }) if matches!(over, Some(Over::Window(..) | Over::Outside(_))) => {
+                let window = match over {
+                    Some(Over::Window(id, _)) => match self.wins.get(&id) {
+                        Some(win) => Some(win.model),
+                        None => return Task::none(),
+                    },
+                    _ => None,
+                };
+                self.apply(Command::MoveWorkspaceToWindow {
+                    workspace: ws,
+                    window,
+                })
+            }
             Some(ItemDrag {
                 item: Dragged::Workspace(ws),
                 ..
@@ -111,12 +166,13 @@ impl App {
                 pane,
                 side: Some(direction),
             } => MoveTo::SplitPane { pane, direction },
-            DropTarget::Edge(direction) => MoveTo::SplitWorkspace {
-                workspace: self.model.active_workspace().id,
+            DropTarget::Edge(workspace, direction) => MoveTo::SplitWorkspace {
+                workspace,
                 direction,
             },
             DropTarget::Workspace(ws) => MoveTo::Workspace(ws),
             DropTarget::NewWorkspace => MoveTo::NewWorkspace,
+            DropTarget::NewWindow => MoveTo::NewWindow,
         };
         self.apply(Command::MoveTab { tab, to })
     }

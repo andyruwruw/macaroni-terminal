@@ -215,6 +215,37 @@ impl SplitNode {
             .or_else(|| second.neighbour_of(target))
     }
 
+    /// Sets every split's ratio so panes side by side along the same axis get equal shares: a
+    /// split's first child gets its share of the run of same-axis splits it belongs to. Returns
+    /// how many panes this node puts side by side along `parent`'s axis (1 for a leaf or a split
+    /// across it).
+    pub(crate) fn equalize(&mut self, parent: Option<Axis>) -> u32 {
+        match self {
+            Self::Leaf(_) => 1,
+            Self::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let (a, b) = (first.equalize(Some(*axis)), second.equalize(Some(*axis)));
+                *ratio = (a as f32 / (a + b) as f32).clamp(MIN_RATIO, 1.0 - MIN_RATIO);
+                if parent == Some(*axis) { a + b } else { 1 }
+            }
+        }
+    }
+
+    /// Replaces each leaf's pane with `to(pane)`, keeping the tree's shape and ratios.
+    pub(crate) fn map_leaves(&mut self, to: &impl Fn(PaneId) -> PaneId) {
+        match self {
+            Self::Leaf(pane) => *pane = to(*pane),
+            Self::Split { first, second, .. } => {
+                first.map_leaves(to);
+                second.map_leaves(to);
+            }
+        }
+    }
+
     /// The node reached by following `path` from this one, or `None` if the path runs past a
     /// leaf. An empty path is this node.
     pub(crate) fn node_at_mut(&mut self, path: &[Side]) -> Option<&mut Self> {

@@ -52,8 +52,11 @@ pub enum AgentState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Call {
-    /// `list`: the workspace / pane / tab tree. Result: [`Tree`].
+    /// `list`: the workspace / pane / tab tree, every window's. Result: [`Tree`].
     List,
+    /// `new_window`: opens a window with a new workspace. Result: focused ids (in the new
+    /// window).
+    NewWindow,
     /// `new_workspace`: opens a workspace and switches to it. Result: focused ids (in the new
     /// workspace).
     NewWorkspace {
@@ -361,10 +364,26 @@ pub struct WorkspaceInfo {
     pub id: u64,
     /// Its name.
     pub name: String,
-    /// Whether it's the one on screen.
+    /// Whether it's the one on screen in its window.
     pub active: bool,
+    /// Which window it's in, counting from 1 in the order they opened.
+    #[serde(default = "first_window")]
+    pub window: u64,
+    /// Whether its window is the focused one.
+    #[serde(default = "focused_by_default")]
+    pub focused_window: bool,
     /// Its panes, in layout order.
     pub panes: Vec<PaneInfo>,
+}
+
+/// [`WorkspaceInfo::window`] from an app that had one window.
+fn first_window() -> u64 {
+    1
+}
+
+/// [`WorkspaceInfo::focused_window`] from an app that had one window.
+fn focused_by_default() -> bool {
+    true
 }
 
 /// One pane in a [`WorkspaceInfo`].

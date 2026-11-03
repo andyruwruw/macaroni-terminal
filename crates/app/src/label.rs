@@ -29,6 +29,17 @@ pub fn fill(template: &str, mut value: impl FnMut(&str) -> Option<String>) -> St
         .to_owned()
 }
 
+/// A length of time as "45s", "2m 05s" or "1h 03m": a command's run time, how long an agent
+/// has been in its state.
+pub fn duration(elapsed: std::time::Duration) -> String {
+    let s = elapsed.as_secs();
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m {:02}s", s / 60, s % 60),
+        _ => format!("{}h {:02}m", s / 3600, s % 3600 / 60),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::fill;
