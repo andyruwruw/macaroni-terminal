@@ -2,7 +2,7 @@
 //! against, so the app itself ships without it.
 //!
 //! Nothing is downloaded until the user asks (Settings > Integrations > Browser, which calls
-//! [`install`]): CEF's "minimal" distribution ([`macaroni_browser::CHROMIUM_ARCHIVE`], about
+//! [`install`]): CEF's "minimal" distribution (`macaroni_browser::CHROMIUM_ARCHIVE`, about
 //! 175 MB) comes from Spotify's CEF CDN with the system's `curl`, is checked against the SHA-1
 //! the build recorded, and its runtime (`Release` and `Resources`, flattened) is unpacked into
 //! [`dir`] with the system's `tar`. A [`macaroni_browser::CHROMIUM_VERSION_FILE`] names the

@@ -9,7 +9,7 @@
 //! - **Chromium** (`chromium.rs`, Windows only): CEF, with its own UI thread. Its helper
 //!   processes (renderer, GPU, ...) are macaroni.exe itself, started with `--type=...`:
 //!   [`helper_process`] must run first thing in `main`. Its runtime isn't shipped: the app
-//!   downloads it ([`CHROMIUM_ARCHIVE`]) and [`chromium_available`] says whether it's there.
+//!   downloads it (`CHROMIUM_ARCHIVE`, Windows only, so not a link) and [`chromium_available`] says whether it's there.
 //!   Elsewhere it falls back to the system engine.
 //!
 //! This is the only crate that touches either engine. The app's `browser.rs` and
