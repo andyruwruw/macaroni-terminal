@@ -80,6 +80,8 @@ pub enum BrowserMessage {
     Action(Action),
     /// Page text asked for over the control API: the request's id and the text.
     Text(u64, String),
+    /// Whether a find in the page matched, for the query it was for.
+    Found(String, bool),
 }
 
 /// The app's state for one browser tab, in `App.browsers`. Created when the tab is opened; the
@@ -100,6 +102,32 @@ pub struct Panel {
     pub bounds: Option<Rectangle>,
     /// Why the browser couldn't start.
     pub error: Option<String>,
+    /// The page's zoom, 1.0 for 100% (one of [`PAGE_ZOOMS`]).
+    pub zoom: f64,
+}
+
+/// The zoom steps `zoom_in` and `zoom_out` move a page through, as browsers have them.
+pub const PAGE_ZOOMS: [f64; 13] = [
+    0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
+];
+
+/// The zoom one step from `current` (`Some(true)` in, `Some(false)` out), or 100% for `None`;
+/// clamped to [`PAGE_ZOOMS`]' ends.
+pub fn next_zoom(current: f64, step: Option<bool>) -> f64 {
+    match step {
+        None => 1.0,
+        Some(true) => PAGE_ZOOMS
+            .iter()
+            .copied()
+            .find(|z| *z > current + 1e-6)
+            .unwrap_or(PAGE_ZOOMS[PAGE_ZOOMS.len() - 1]),
+        Some(false) => PAGE_ZOOMS
+            .iter()
+            .rev()
+            .copied()
+            .find(|z| *z < current - 1e-6)
+            .unwrap_or(PAGE_ZOOMS[0]),
+    }
 }
 
 impl Panel {
@@ -113,6 +141,7 @@ impl Panel {
             forward: false,
             bounds: None,
             error: None,
+            zoom: 1.0,
         }
     }
 }
@@ -185,7 +214,7 @@ pub fn shortcuts(
             .unwrap_or_else(|e| e.into_inner())
             .lookup(&key, physical, mods);
         match action {
-            None | Some(Action::Copy | Action::Paste | Action::Find) => false,
+            None | Some(Action::Copy | Action::Paste) => false,
             Some(action) => {
                 send(action);
                 true
@@ -195,7 +224,8 @@ pub fn shortcuts(
 }
 
 /// A Windows virtual-key code as the iced key a US layout produces, for the keymap. Only the
-/// keys default shortcuts use (letters, digits, Tab, arrows, `,` `[` `]`); `None` for the rest.
+/// keys default shortcuts use (letters, digits, Tab, Enter, arrows, `,` `[` `]` `=` `-`); `None`
+/// for the rest.
 fn iced_key(vk: u32) -> Option<(Key, Physical)> {
     const LETTERS: [Code; 26] = [
         Code::KeyA,
@@ -250,11 +280,14 @@ fn iced_key(vk: u32) -> Option<(Key, Physical)> {
             character((b'0' + i as u8) as char, DIGITS[i])
         }
         0x09 => named(Named::Tab, Code::Tab),
+        0x0D => named(Named::Enter, Code::Enter),
         0x25 => named(Named::ArrowLeft, Code::ArrowLeft),
         0x26 => named(Named::ArrowUp, Code::ArrowUp),
         0x27 => named(Named::ArrowRight, Code::ArrowRight),
         0x28 => named(Named::ArrowDown, Code::ArrowDown),
+        0xBB => character('=', Code::Equal),
         0xBC => character(',', Code::Comma),
+        0xBD => character('-', Code::Minus),
         0xDB => character('[', Code::BracketLeft),
         0xDD => character(']', Code::BracketRight),
         _ => None,
@@ -355,6 +388,15 @@ impl<'a, M: 'a> From<BrowserHost<M>> for Element<'a, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_steps_through_and_stops_at_the_ends() {
+        assert_eq!(next_zoom(1.0, Some(true)), 1.1);
+        assert_eq!(next_zoom(1.0, Some(false)), 0.9);
+        assert_eq!(next_zoom(3.0, Some(true)), 3.0);
+        assert_eq!(next_zoom(0.5, Some(false)), 0.5);
+        assert_eq!(next_zoom(1.75, None), 1.0);
+    }
 
     #[test]
     fn address_bar_input_resolves_to_a_url() {

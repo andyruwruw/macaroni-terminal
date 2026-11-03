@@ -8,7 +8,7 @@ I work on many projects at once, and want them split into workspaces, and to all
 
 This terminal seeks to provide that. Run your agent, dev server, code and browser all in one spot.
 
-> macaroni is an early alpha (0.1.0-alpha.2): expect rough edges, and settings and the control API may still change.
+> macaroni is an early alpha (0.1.0-alpha.3): expect rough edges, and settings and the control API may still change.
 
 - **Native and fast.** Rust on the GPU, not a web view, so it keeps up with whatever your agents print.
 - **Made for agents.** Claude Code's live state shows in every pane and in the sidebar, and you get a ping the moment one needs you.
@@ -33,7 +33,8 @@ This terminal seeks to provide that. Run your agent, dev server, code and browse
 
 - **Scriptable.** `macaroni-cli` lists, splits, types, reads, notifies and streams events over a local socket.
 - **Configurable everything.** One live-reloading `config.toml` with a settings dialog over it: themes, a glass look, colors, sizes and every shortcut.
-- **Session restore.** Layout, directories and agent sessions come back after a restart.
+- **Session restore.** Layout, directories, scrollback and agent sessions come back after a restart, and closed tabs reopen with Ctrl+Shift+R.
+- **Triggers and inline images.** Regex rules on output highlight, notify or badge a tab; programs can show pictures inline (iTerm2's OSC 1337, as `imgcat` sends).
 - **Good shells by default.** Your login shell on macOS, Git Bash on Windows (with PowerShell as a fallback and a one-click install).
 - **SSH profiles.** Save hosts once and open them from the new-tab menu; a dropped connection reconnects with Enter.
 
@@ -66,7 +67,9 @@ It shows the change to `~/.claude/settings.json` and asks first; `--remove` undo
 | New tab / close tab | Ctrl+Shift+T / Ctrl+Shift+W | Cmd+T / Cmd+W |
 | New workspace, switch | Ctrl+Shift+N, Ctrl+Shift+1..9 | Cmd+N, Cmd+1..9 |
 | Move focus | Ctrl+Alt+arrows | Cmd+Alt+arrows |
-| Find | Ctrl+F | Cmd+F |
+| Find, search every tab | Ctrl+F, Ctrl+Shift+G | Cmd+F, Cmd+Option+F |
+| Command palette | Ctrl+Shift+P | Cmd+Shift+P |
+| Jump to a pane by letter | Ctrl+Shift+J | Cmd+Shift+J |
 | Toggle sidebar | Ctrl+B | Cmd+B |
 | Settings | Ctrl+, | Cmd+, |
 

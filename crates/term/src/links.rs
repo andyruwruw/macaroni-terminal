@@ -1,4 +1,10 @@
-//! Finds a plain-text URL under a cell, for Ctrl/Cmd+click, and decides which URLs may be opened.
+//! Finds a plain-text URL or file reference under a cell, for Ctrl/Cmd+click, and decides which
+//! URLs may be opened.
+//!
+//! [`file_at`] finds compiler- and grep-style references (`src/main.rs:12:5`, `C:\x\y.py:3`,
+//! MSVC's `y.cpp(12,5)`). It only parses; the app checks the file exists (relative to the
+//! terminal's directory) and opens it in a text editor, never with the system's default
+//! handler, since output is untrusted.
 //!
 //! Pure and unit tested. The app calls [`url_at`] on a row of a [`Snapshot`](crate::Snapshot)
 //! when the pointer hovers or clicks with the link modifier, and [`is_openable`] before opening
@@ -103,6 +109,109 @@ pub fn url_at(row: &[Cell], col: usize) -> Option<Link> {
     })
 }
 
+/// A file reference found in a row of cells: `path:line[:col]`, `path(line[,col])`, or a bare
+/// path with a separator and an extension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRef {
+    /// First column the reference covers.
+    pub start: usize,
+    /// Last column it covers, inclusive.
+    pub end: usize,
+    /// The path as written (relative paths are the caller's to resolve).
+    pub path: String,
+    /// The line, from 1.
+    pub line: Option<u32>,
+    /// The column, from 1.
+    pub column: Option<u32>,
+}
+
+/// Characters that end a file reference token: [`is_delimiter`]'s, plus the brackets and
+/// punctuation paths sit between in compiler output (`--> src/a.rs:1:2`, `(x.rs:3)`, `x.rs,`).
+fn is_file_delimiter(c: char) -> bool {
+    is_delimiter(c) || matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | '=')
+}
+
+/// The file reference covering `col` in `row`, if any. To keep ordinary words from looking like
+/// files, the path needs an extension, and either a line number or a folder separator.
+pub fn file_at(row: &[Cell], col: usize) -> Option<FileRef> {
+    let cells: Vec<(usize, char)> = row
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !c.flags.contains(CellFlags::WIDE_SPACER))
+        .map(|(i, c)| (i, c.ch))
+        .collect();
+    let at = cells.iter().rposition(|(i, _)| *i <= col)?;
+    if is_file_delimiter(cells[at].1) {
+        return None;
+    }
+    let mut start = at;
+    while start > 0 && !is_file_delimiter(cells[start - 1].1) {
+        start -= 1;
+    }
+    let mut end = at;
+    while end + 1 < cells.len() && !is_file_delimiter(cells[end + 1].1) {
+        end += 1;
+    }
+    // MSVC's `file(12,5)`: bracketed numbers right after the token, and the index of the `)`.
+    let mut paren: Option<(u32, Option<u32>, usize)> = None;
+    if cells.get(end + 1).is_some_and(|(_, c)| *c == '(') {
+        let rest: Vec<char> = cells[end + 2..].iter().map(|(_, c)| *c).take(24).collect();
+        if let Some(close) = rest.iter().position(|c| *c == ')') {
+            let inside: String = rest[..close].iter().collect();
+            let mut numbers = inside.split(',').map(|n| n.trim().parse::<u32>());
+            if let Some(Ok(line)) = numbers.next() {
+                let column = numbers.next().and_then(Result::ok);
+                paren = Some((line, column, end + 2 + close));
+            }
+        }
+    }
+
+    let token: String = cells[start..=end].iter().map(|(_, c)| *c).collect();
+    // Sentence punctuation after the reference isn't part of it.
+    let trimmed = token.trim_end_matches(['.', ':', '!', '?', '\'']);
+    let mut last = start + trimmed.chars().count().checked_sub(1)?;
+    let mut path = trimmed;
+    let mut numbers = Vec::new();
+    // Up to two `:<digits>` suffixes, from the right: `:line` and `:line:col`. A drive letter's
+    // colon (`C:\`) is never followed by only digits, so it stays in the path.
+    while numbers.len() < 2
+        && let Some((head, tail)) = path.rsplit_once(':')
+        && !tail.is_empty()
+        && tail.chars().all(|c| c.is_ascii_digit())
+    {
+        numbers.insert(0, tail.parse::<u32>().ok()?);
+        path = head;
+    }
+    let (mut line, mut column) = (numbers.first().copied(), numbers.get(1).copied());
+    if let Some((l, c, close)) = paren
+        && line.is_none()
+    {
+        (line, column) = (Some(l), c);
+        last = close;
+    }
+
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let has_extension = name.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty()
+            && (1..=8).contains(&ext.len())
+            && ext.chars().all(|c| c.is_ascii_alphanumeric())
+    });
+    let has_separator = path.contains(['/', '\\']);
+    if !has_extension || !(line.is_some() || has_separator) || path.contains("://") {
+        return None;
+    }
+    if at > last {
+        return None;
+    }
+    Some(FileRef {
+        start: cells[start].0,
+        end: cells[last].0,
+        path: path.to_owned(),
+        line,
+        column,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +254,39 @@ mod tests {
         assert!(is_openable("HTTPS://Example.com"));
         assert!(!is_openable("https://"));
         assert!(!is_openable("ms-settings:display"));
+    }
+
+    #[test]
+    fn finds_file_references() {
+        let r = row("  --> crates/app/src/main.rs:12:5");
+        let f = file_at(&r, 12).unwrap();
+        assert_eq!(f.path, "crates/app/src/main.rs");
+        assert_eq!((f.line, f.column), (Some(12), Some(5)));
+        assert_eq!((f.start, f.end), (6, 32));
+
+        let f = file_at(&row(r"error at C:\work\x.py:3."), 12).unwrap();
+        assert_eq!(
+            (f.path.as_str(), f.line, f.column),
+            (r"C:\work\x.py", Some(3), None)
+        );
+
+        let f = file_at(&row("main.cpp(40,7): error C2065"), 2).unwrap();
+        assert_eq!(
+            (f.path.as_str(), f.line, f.column),
+            ("main.cpp", Some(40), Some(7))
+        );
+        assert_eq!(f.end, 13);
+
+        let f = file_at(&row("see docs/guide.md for more"), 6).unwrap();
+        assert_eq!((f.path.as_str(), f.line), ("docs/guide.md", None));
+    }
+
+    #[test]
+    fn ordinary_words_and_urls_are_not_files() {
+        assert_eq!(file_at(&row("version 1.2 is out"), 9), None);
+        assert_eq!(file_at(&row("readme.md alone"), 2), None);
+        assert_eq!(file_at(&row("https://a.dev/x.html"), 10), None);
+        assert_eq!(file_at(&row("time 12:30"), 7), None);
     }
 
     #[test]

@@ -264,4 +264,9 @@ pub struct Snapshot {
     /// Palette entries changed at runtime via OSC 4/10/11: indices 0-255, 256 = foreground,
     /// 257 = background.
     pub color_overrides: Vec<(u16, Rgb)>,
+    /// Visible rows where a shell-marked prompt (OSC 133) starts, with the exit code of the
+    /// command before it; prompts with no command before them aren't listed.
+    pub prompts: Vec<(usize, i32)>,
+    /// Inline images (OSC 1337) with at least one row on screen.
+    pub images: Vec<crate::images::ImagePlacement>,
 }

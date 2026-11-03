@@ -353,6 +353,41 @@ impl Browser {
         host.show_dev_tools(Some(&info), None, None, None);
     }
 
+    /// Scales the page by `factor` (1.0 is 100%). CEF's zoom level is logarithmic: each step
+    /// of 1 is 20% more.
+    pub fn zoom(&self, factor: f64) {
+        if let Some(host) = self.with(|b| b.host()).flatten() {
+            host.set_zoom_level(factor.ln() / 1.2f64.ln());
+        }
+    }
+
+    /// Finds `query` with CEF's own find, which also highlights every match. Its result comes
+    /// back through a find handler this client doesn't have, so `done` always gets `true`.
+    pub fn find(
+        &self,
+        query: &str,
+        forward: bool,
+        again: bool,
+        done: impl FnOnce(bool) + Send + 'static,
+    ) {
+        if let Some(host) = self.with(|b| b.host()).flatten() {
+            host.find(
+                Some(&CefString::from(query)),
+                i32::from(forward),
+                0,
+                i32::from(again),
+            );
+        }
+        done(true);
+    }
+
+    /// Ends `find`, clearing its selection and highlights.
+    pub fn stop_find(&self) {
+        if let Some(host) = self.with(|b| b.host()).flatten() {
+            host.stop_finding(1);
+        }
+    }
+
     /// Runs `f` on the CEF browser, or returns `None` if it doesn't exist (yet, or anymore).
     /// Holds the shared lock while `f` runs.
     fn with<T>(&self, f: impl FnOnce(&cef::Browser) -> T) -> Option<T> {

@@ -23,13 +23,15 @@
 - `[colors.*]` are maps, so serde can't catch typos; `Colors::check` rejects unknown names, references to missing theme colors, and a theme color pointing at another (theme colors end the chain).
 - Errors vs warnings: a parse or check error keeps the last good config and shows a banner. An unknown action (skipped by `Keymap::new`) or an uninstalled `font.family` (`fonts::resolve` falls back) is a warning; the rest applies.
 - `[tab_items] new_buttons` turns the tab strip's new tab buttons on and off; it's an `item_rows` key placed on the Tabs page's "What tabs show" card.
+- `[font] fallback` is a list of installed families; `fonts::set_fallback` (called by `apply_config` before measuring) resolves them, warning about missing ones, and the renderer uses them per character (see [`rendering-and-text.md`](rendering-and-text.md)).
+- `[[trigger]]` (`Trigger`, `Config.triggers`): each needs a non-empty `pattern` that compiles as a Rust regex and at least one of `highlight`, `notify`, `badge`; `highlight` is a workspace color name or `#rrggbb` (an unknown name falls back to amber, so it isn't checked here). The app compiles them in `crates/app/src/triggers.rs` (`Triggers`): highlights go to the renderer, the notifying and badging patterns to every session as one `RegexSet`, and `Triggers::fire` expands the badge's `$1` and holds a notify back for `NOTIFY_COOLDOWN` per terminal. `apply_config` rebuilds them (and calls `Session::set_triggers`) only when the rules change. Not in the settings dialog.
 - `[[ssh]]` is an array of tables (`SshProfile`); each needs a `host`. The dialog edits it with `write_ssh`, which replaces the whole array, since `write_setting` only sets dotted keys.
 - Font, theme and ligature changes apply live (new `Metrics` resize every view's grid); `shell` and `scrollback` apply to new terminals only.
 - Themes color the terminal only. UI colors come from `ui_theme` (`Chrome`), except pane cards take the terminal background.
 
 ## Solid vs glass defaults
 
-`ui_theme` (`UiTheme::Glass`/`Solid`) changes some defaults. Serde fills glass defaults first, so when the file is solid, `Config::parse` re-reads it as a `toml::Table` and `Style::apply_solid_defaults` gives each `SOLID_DEFAULTS` key the file doesn't set its solid value. `NumberSetting::default_for(ui)` is what the dialog shows and resets to. Two `[workspace_items]` booleans (`search`, `icon_background`) are `Option<bool>` read through `WorkspaceItemSettings::search(ui)` / `icon_background(ui)` for the same reason.
+`ui_theme` (`UiTheme::Solid`, the default, or `Glass`) changes some defaults. Serde fills glass defaults first, so when the file is solid (including one that doesn't set it), `Config::parse` re-reads it as a `toml::Table` and `Style::apply_solid_defaults` gives each `SOLID_DEFAULTS` key the file doesn't set its solid value. `Config::default()` (no file at all) applies them too, so a missing file and an empty one match. The template shows solid's value for those keys with glass's in parentheses (`# key = 0  (glass: 12)`), which `template_lists_every_style_setting` checks. `NumberSetting::default_for(ui)` is what the dialog shows and resets to. Two `[workspace_items]` booleans (`search`, `icon_background`) are `Option<bool>` read through `WorkspaceItemSettings::search(ui)` / `icon_background(ui)` for the same reason.
 
 ## Colors
 

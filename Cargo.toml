@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*", "xtask"]
 
 [workspace.package]
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -22,6 +22,8 @@ toml = "1"
 toml_edit = "0.25"
 notify = "8"
 notify-rust = "4"
+tauri-winrt-notification = "0.8"
+mac-notification-sys = "0.6"
 interprocess = "2"
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
@@ -33,6 +35,8 @@ webview2-com = "0.39"
 cef-dll-sys = { version = "=156.1.0", default-features = false }
 windows-sys = "0.61"
 rfd = "0.15"
+regex = "1"
+base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [workspace.lints.rust]

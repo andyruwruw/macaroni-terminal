@@ -25,6 +25,7 @@ use crate::grid::{
     Cell, CellFlags, CellSide, Color, Cursor, CursorShape, DefaultColors, GridPoint, GridSize,
     Modes, Rgb, Scroll, SearchDirection, SelectionKind, Snapshot,
 };
+use crate::images::{IMAGE_PREFIX, ImagePlacement, InlineImage};
 
 /// Something the emulator raised while parsing output. Delivered synchronously from inside
 /// [`Emulator::feed`], so on the reader thread and with the session lock held.
@@ -66,8 +67,23 @@ pub trait Emulator: Send {
     fn clear_selection(&mut self);
     /// The selected text, or `None` when nothing (or only an empty range) is selected.
     fn selection_text(&self) -> Option<String>;
-    /// The OSC 8 hyperlink target of the cell, if a program attached one.
+    /// The OSC 8 hyperlink target of the cell, if a program attached one. Prompt marks' and
+    /// image anchors' internal links (`MARK_PREFIX`, `IMAGE_PREFIX`) don't count.
     fn hyperlink_at(&self, at: GridPoint) -> Option<String>;
+    /// Scrolls the view so the previous (`up`) or next prompt the shell marked (OSC 133) is the
+    /// top row; false, leaving the view, when there's none that way.
+    fn jump_to_prompt(&mut self, up: bool) -> bool;
+    /// Every line's text, scrollback and screen, trailing blank lines dropped.
+    fn all_text(&self) -> String;
+    /// The grid's size, as last set.
+    fn size(&self) -> GridSize;
+    /// Keeps an inline image for the snapshot to list where its anchors show
+    /// ([`InlineImage::anchors`], fed separately). The oldest images are dropped once they take
+    /// more than `MAX_KEPT_IMAGE_BYTES` (64 MiB) together.
+    fn add_image(&mut self, image: InlineImage);
+    /// The output of the last command the shell marked: from its output mark to the next prompt
+    /// (or the cursor), trailing blank lines dropped. `None` without one.
+    fn last_output(&self) -> Option<String>;
     /// Selects and scrolls to the next match of `query` (plain text, case-insensitive unless it
     /// has capitals), continuing from the previous match. After [`Emulator::reset_search`],
     /// [`SearchDirection::Older`] starts from the bottom of the screen and
@@ -188,7 +204,13 @@ pub struct AlacrittyEmulator {
     colors: Option<DefaultColors>,
     /// Lines of history, kept to pass back to alacritty with every config change.
     scrollback: usize,
+    /// Inline images by id (oldest first), whatever their anchors' state: an image whose
+    /// anchors were erased or trimmed stays until it's among the oldest past the limit.
+    images: std::collections::BTreeMap<u64, Arc<InlineImage>>,
 }
+
+/// How many bytes of inline images (encoded) an emulator keeps.
+pub const MAX_KEPT_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
 impl AlacrittyEmulator {
     /// Creates an emulator of `size` keeping `scrollback` lines of history. `on_event` is called
@@ -218,6 +240,7 @@ impl AlacrittyEmulator {
             size,
             colors: None,
             scrollback,
+            images: std::collections::BTreeMap::new(),
         }
     }
 
@@ -279,6 +302,110 @@ impl AlacrittyEmulator {
             Line(at.row.min(rows) as i32 - offset),
             Column(at.col.min(cols)),
         )
+    }
+}
+
+/// The URI prefix of the links the session's reader puts on OSC 133 marks (see `Marks` in
+/// `session.rs`); [`Emulator::hyperlink_at`] hides them.
+pub const MARK_PREFIX: &str = "macaroni-mark:";
+
+/// Where a mark starts: its first row, whether it's a prompt (else command output), and for a
+/// prompt the exit code of the command before it.
+struct MarkStart {
+    /// The row, in alacritty's coordinates (negative in the scrollback).
+    line: Line,
+    /// A prompt (`macaroni-mark:prompt`), else output.
+    prompt: bool,
+    /// From `macaroni-mark:prompt:<code>`: how the command before this prompt ended.
+    exit: Option<i32>,
+}
+
+impl AlacrittyEmulator {
+    /// Every mark in the scrollback and screen, top to bottom.
+    fn marks(&self) -> Vec<MarkStart> {
+        let grid = self.term.grid();
+        self.marks_between(grid.topmost_line(), grid.bottommost_line())
+    }
+
+    /// The marks starting in rows `top..=bottom`: each row whose marked cells start a different
+    /// mark (by link id) than the row above ended with. The row above `top` is read too, so a
+    /// mark that began above the range isn't taken to start at its top.
+    fn marks_between(&self, top: Line, bottom: Line) -> Vec<MarkStart> {
+        let grid = self.term.grid();
+        let mut found = Vec::new();
+        let mut previous = (top > grid.topmost_line())
+            .then(|| self.row_marks(top - 1).1)
+            .flatten()
+            .map(|(id, _)| id);
+        for line in top.0..=bottom.0 {
+            let (first, last) = self.row_marks(Line(line));
+            if let Some((id, uri)) = first
+                && previous.as_deref() != Some(id.as_str())
+            {
+                let kind = &uri[MARK_PREFIX.len()..];
+                found.push(MarkStart {
+                    line: Line(line),
+                    prompt: kind.starts_with("prompt"),
+                    exit: kind
+                        .strip_prefix("prompt:")
+                        .and_then(|code| code.parse().ok()),
+                });
+            }
+            if let Some((id, _)) = last {
+                previous = Some(id);
+            }
+        }
+        found
+    }
+
+    /// The images anchored in visible rows `0..lines` of the view `top` starts at: each one
+    /// once, placed by the first of its anchors found.
+    fn images_between(&self, top: Line, lines: usize) -> Vec<ImagePlacement> {
+        let mut found: Vec<ImagePlacement> = Vec::new();
+        if self.images.is_empty() {
+            return found;
+        }
+        let grid = self.term.grid();
+        for visible in 0..lines {
+            let row = &grid[top + visible as i32];
+            for column in 0..self.term.columns() {
+                let Some(link) = row[Column(column)].hyperlink() else {
+                    continue;
+                };
+                let Some((id, image_row)) = crate::images::anchor(link.uri()) else {
+                    continue;
+                };
+                if found.iter().any(|p| p.image.id == id) {
+                    continue;
+                }
+                if let Some(image) = self.images.get(&id) {
+                    found.push(ImagePlacement {
+                        image: image.clone(),
+                        row: visible as i32 - i32::from(image_row),
+                        col: column,
+                    });
+                }
+            }
+        }
+        found
+    }
+
+    /// A row's first and last marked cells, as (link id, URI).
+    #[allow(clippy::type_complexity)]
+    fn row_marks(&self, line: Line) -> (Option<(String, String)>, Option<(String, String)>) {
+        let row = &self.term.grid()[line];
+        let mut first = None;
+        let mut last = None;
+        for column in 0..self.term.columns() {
+            if let Some(link) = row[Column(column)].hyperlink()
+                && link.uri().starts_with(MARK_PREFIX)
+            {
+                let mark = (link.id().to_owned(), link.uri().to_owned());
+                first.get_or_insert_with(|| mark.clone());
+                last = Some(mark);
+            }
+        }
+        (first, last)
     }
 }
 
@@ -362,6 +489,16 @@ impl Emulator for AlacrittyEmulator {
             .filter_map(|i| content.colors[i].map(|c| (i as u16, Rgb::new(c.r, c.g, c.b))))
             .collect();
 
+        // Only the visible rows are scanned for marks (this runs on every wakeup).
+        let top = Line(-(offset as i32));
+        let prompts = self
+            .marks_between(top, top + (lines as i32 - 1))
+            .into_iter()
+            .filter(|m| m.prompt)
+            .filter_map(|m| Some(((m.line - top).0 as usize, m.exit?)))
+            .collect();
+        let images = self.images_between(top, lines);
+
         Snapshot {
             cols,
             rows,
@@ -370,6 +507,8 @@ impl Emulator for AlacrittyEmulator {
             modes: modes(content.mode),
             has_selection: selection.is_some(),
             color_overrides,
+            prompts,
+            images,
         }
     }
 
@@ -408,6 +547,76 @@ impl Emulator for AlacrittyEmulator {
         self.term.grid()[point]
             .hyperlink()
             .map(|link| link.uri().to_owned())
+            .filter(|uri| !uri.starts_with(MARK_PREFIX) && !uri.starts_with(IMAGE_PREFIX))
+    }
+
+    fn size(&self) -> GridSize {
+        self.size
+    }
+
+    fn add_image(&mut self, image: InlineImage) {
+        self.images.insert(image.id, Arc::new(image));
+        let mut kept: usize = self.images.values().map(|i| i.data.len()).sum();
+        while kept > MAX_KEPT_IMAGE_BYTES
+            && let Some((_, oldest)) = self.images.pop_first()
+        {
+            kept -= oldest.data.len();
+        }
+    }
+
+    fn jump_to_prompt(&mut self, up: bool) -> bool {
+        let top = -(self.term.grid().display_offset() as i32);
+        let mut prompts = self
+            .marks()
+            .into_iter()
+            .filter(|m| m.prompt)
+            .map(|m| m.line);
+        let target = if up {
+            prompts.rfind(|l| l.0 < top)
+        } else {
+            prompts.find(|l| l.0 > top)
+        };
+        let Some(line) = target else {
+            return false;
+        };
+        // The top row is `-display_offset`, so showing `line` there means an offset of
+        // `-line`, clamped to the scrollback (a prompt on the live screen just scrolls to the
+        // bottom).
+        let history = self.term.grid().history_size() as i32;
+        let want = (-line.0).clamp(0, history);
+        let delta = want - self.term.grid().display_offset() as i32;
+        self.term.scroll_display(AlacrittyScroll::Delta(delta));
+        true
+    }
+
+    fn all_text(&self) -> String {
+        let grid = self.term.grid();
+        let last_column = Column(self.term.columns().saturating_sub(1));
+        self.term
+            .bounds_to_string(
+                Point::new(grid.topmost_line(), Column(0)),
+                Point::new(grid.bottommost_line(), last_column),
+            )
+            .trim_end()
+            .to_owned()
+    }
+
+    fn last_output(&self) -> Option<String> {
+        let marks = self.marks();
+        let at = marks.iter().rposition(|m| !m.prompt)?;
+        let start = marks[at].line;
+        let end = marks
+            .get(at + 1)
+            .map_or(self.term.grid().cursor.point.line, |next| next.line);
+        if end <= start {
+            return Some(String::new());
+        }
+        let last_column = Column(self.term.columns().saturating_sub(1));
+        let text = self.term.bounds_to_string(
+            Point::new(start, Column(0)),
+            Point::new(end - 1, last_column),
+        );
+        Some(text.trim_end().to_owned())
     }
 
     fn search(&mut self, query: &str, direction: SearchDirection) -> bool {
@@ -796,6 +1005,67 @@ mod tests {
         emu.reset_search();
         assert!(!emu.search("", SearchDirection::Older));
         assert!(!emu.snapshot().has_selection);
+    }
+
+    #[test]
+    fn prompt_marks_jump_and_copy_output() {
+        let (mut emu, _) = emulator();
+        // What the session's reader feeds for two commands: each prompt and output carries a
+        // mark link with an id of its own.
+        let command = |n: u32, output: &str| {
+            format!(
+                "\x1b]8;id=p{n};macaroni-mark:prompt\x07$ cmd{n}\r\n\x1b]8;id=o{n};macaroni-mark:output\x07{output}\x1b]8;;\x07"
+            )
+        };
+        emu.feed(command(1, "a\r\nb\r\nc\r\n").as_bytes());
+        emu.feed(command(2, "one\r\ntwo\r\n").as_bytes());
+        emu.feed(b"\x1b]8;id=p3;macaroni-mark:prompt:0\x07$ ");
+
+        assert_eq!(emu.last_output().as_deref(), Some("one\ntwo"));
+        // Only the third prompt has an exit code before it, and it's on the bottom row.
+        assert_eq!(emu.snapshot().prompts, vec![(3, 0)]);
+        // The marks' links are internal, not links to open.
+        assert_eq!(emu.hyperlink_at(GridPoint { row: 3, col: 0 }), None);
+
+        // 4 rows on screen: "$ cmd2" is the top row, and the first prompt is up in the
+        // scrollback.
+        assert!(dump(&emu.snapshot()).starts_with("$ cmd2"));
+        assert!(emu.jump_to_prompt(true));
+        assert!(dump(&emu.snapshot()).starts_with("$ cmd1"));
+        assert!(!emu.jump_to_prompt(true), "no prompt above the first");
+        assert!(emu.jump_to_prompt(false));
+        assert!(dump(&emu.snapshot()).starts_with("$ cmd2"));
+    }
+
+    #[test]
+    fn images_show_where_their_anchors_are() {
+        let (mut emu, _) = emulator();
+        let image = InlineImage {
+            id: 7,
+            data: Arc::from(vec![0u8]),
+            width: 24,
+            height: 32,
+            cols: 3,
+            rows: 2,
+            stretch: false,
+        };
+        emu.feed(b"ab");
+        emu.feed(&image.anchors());
+        emu.add_image(image);
+        emu.feed(b"!");
+        let snapshot = emu.snapshot();
+        assert_eq!(snapshot.images.len(), 1);
+        assert_eq!((snapshot.images[0].row, snapshot.images[0].col), (0, 2));
+        // The cursor ends right of the block's last row, and the anchors aren't links.
+        assert_eq!(snapshot.rows[1][5].ch, '!');
+        assert_eq!(emu.hyperlink_at(GridPoint { row: 0, col: 2 }), None);
+        // Scrolled so only its last row shows, it starts a row above the view.
+        emu.feed(b"\r\n\r\n\r\n");
+        let snapshot = emu.snapshot();
+        assert_eq!((snapshot.images[0].row, snapshot.images[0].col), (-1, 2));
+        // Gone once both rows have scrolled off.
+        emu.feed(b"\r\n");
+        assert!(emu.snapshot().images.is_empty());
     }
 
     #[test]

@@ -25,8 +25,9 @@ impl App {
         Task::none()
     }
 
-    /// Makes `config` current. Font and theme changes apply to every terminal immediately (the
-    /// views re-measure and resize their sessions); shell and scrollback apply to new terminals.
+    /// Makes `config` current. Font, theme and trigger changes apply to every terminal
+    /// immediately (the views re-measure and resize their sessions); shell and scrollback apply
+    /// to new terminals.
     /// Replaces `config_errors` with the keymap's and font's problems.
     pub(crate) fn apply_config(&mut self, config: Config) {
         let mut errors = Vec::new();
@@ -34,6 +35,8 @@ impl App {
         errors.extend(keymap_errors);
         let (font, font_error) = fonts::resolve(config.font.family.as_deref());
         errors.extend(font_error);
+        // Before measuring: `Metrics` records which list is in effect.
+        errors.extend(fonts::set_fallback(font, &config.font.fallback));
 
         // A poisoned lock only means a browser thread panicked mid-lookup; the keymap inside is
         // still whole, and it's replaced wholesale here anyway.
@@ -45,11 +48,19 @@ impl App {
         let colors = self.palette.default_colors();
         let cursor = (config.terminal.cursor_style != self.config.terminal.cursor_style)
             .then(|| cursor_shape(config.terminal.cursor_style));
+        let triggers = (!self.triggers.same_rules(&config.triggers))
+            .then(|| crate::triggers::Triggers::new(&config.triggers));
         for running in self.running.values() {
             running.session.set_default_colors(colors.clone());
             if let Some(cursor) = cursor {
                 running.session.set_default_cursor(cursor);
             }
+            if let Some(triggers) = &triggers {
+                running.session.set_triggers(triggers.watched());
+            }
+        }
+        if let Some(triggers) = triggers {
+            self.triggers = triggers;
         }
         self.iced_theme = self.chrome.iced_theme(&config.theme_name);
         self.metrics = Metrics::measure(

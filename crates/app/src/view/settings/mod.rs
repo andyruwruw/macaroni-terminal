@@ -12,6 +12,7 @@
 
 mod color_picker;
 mod dialog;
+pub(crate) use dialog::toggle;
 mod list;
 mod preview;
 
@@ -107,7 +108,7 @@ impl Section {
     }
 
     /// The sections the dialog lists, in order ([`Section::shown_in_build`]).
-    fn shown() -> impl Iterator<Item = Self> {
+    pub(crate) fn shown() -> impl Iterator<Item = Self> {
         Self::ALL.into_iter().filter(|s| s.shown_in_build())
     }
 
@@ -122,7 +123,7 @@ impl Section {
     }
 
     /// The section's name, in the dialog's list and over its rows.
-    fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Terminal => "Terminal",

@@ -157,6 +157,89 @@ fn split_focuses_the_new_pane_and_spawns_a_shell() {
 }
 
 #[test]
+fn a_maximized_pane_fills_the_workspace_until_focus_leaves_it() {
+    let (mut model, _) = Model::new();
+    let first = model.active_workspace().focused;
+    model.apply(Command::ToggleMaximize);
+    assert_eq!(
+        model.active_workspace().maximized,
+        None,
+        "a single pane can't maximize"
+    );
+
+    model.apply(Command::SplitPane(Direction::Right));
+    let second = model.active_workspace().focused;
+    let second_tab = model.pane(second).unwrap().active;
+    let first_tab = model.pane(first).unwrap().active;
+    model.apply(Command::ToggleMaximize);
+    let ws = model.active_workspace();
+    assert_eq!(ws.maximized, Some(second));
+    assert_eq!(ws.shown_panes(Rect::UNIT), vec![(second, Rect::UNIT)]);
+    assert!(ws.shown_dividers(Rect::UNIT).is_empty());
+    assert!(model.tab_visible(second_tab));
+    assert!(!model.tab_visible(first_tab));
+
+    model.apply(Command::ToggleMaximize);
+    assert_eq!(model.active_workspace().maximized, None);
+
+    model.apply(Command::ToggleMaximize);
+    model.apply(Command::FocusDirection(Direction::Left));
+    let ws = model.active_workspace();
+    assert_eq!((ws.focused, ws.maximized), (first, None));
+    assert_eq!(ws.shown_panes(Rect::UNIT).len(), 2);
+}
+
+#[test]
+fn next_waiting_visits_waiting_tabs_oldest_first() {
+    let (mut model, _) = Model::new();
+    let first = model.focused_tab().id;
+    let s1 = session_of(&model, first);
+    model.apply(Command::NewWorkspace);
+    let second = model.focused_tab().id;
+    let s2 = session_of(&model, second);
+    // A third tab that never asks for anything is skipped.
+    model.apply(Command::NewTab);
+    let notify = |session| Command::Notify {
+        session,
+        title: None,
+        body: "waiting".into(),
+    };
+    model.apply(notify(s2));
+    model.apply(notify(s1));
+    assert_eq!(model.waiting_tabs(), vec![second, first]);
+
+    model.apply(Command::NextWaiting);
+    assert_eq!(model.focused_tab().id, second);
+    model.apply(Command::NextWaiting);
+    assert_eq!(model.focused_tab().id, first);
+    model.apply(Command::NextWaiting);
+    assert_eq!(model.focused_tab().id, second, "wraps around");
+    assert!(
+        model.tab(second).unwrap().attention.is_some(),
+        "a glance doesn't clear it"
+    );
+}
+
+#[test]
+fn workspace_env_and_startup_are_set_and_cleared() {
+    let (mut model, _) = Model::new();
+    let ws = model.active_workspace().id;
+    model.apply(Command::SetWorkspaceEnv(
+        ws,
+        vec![("A".into(), "1".into()), (" ".into(), "x".into())],
+    ));
+    model.apply(Command::SetWorkspaceStartup(
+        ws,
+        Some("source .venv/bin/activate".into()),
+    ));
+    let w = model.active_workspace();
+    assert_eq!(w.env, vec![("A".to_owned(), "1".to_owned())]);
+    assert_eq!(w.startup.as_deref(), Some("source .venv/bin/activate"));
+    model.apply(Command::SetWorkspaceStartup(ws, Some("  ".into())));
+    assert_eq!(model.active_workspace().startup, None);
+}
+
+#[test]
 fn split_left_puts_the_new_pane_first() {
     let (mut model, _) = Model::new();
     let first = model.active_workspace().focused;
@@ -257,6 +340,55 @@ fn notices_mark_tabs_until_cleared() {
     model.apply(Command::ClearAttention(first_tab));
     assert!(!model.pane_attention(pane));
     assert_eq!(model.workspace_notice(ws), None);
+}
+
+#[test]
+fn panes_equalize_swap_and_rotate() {
+    let (mut model, _) = Model::new();
+    let a = model.active_workspace().focused;
+    model.apply(Command::SplitPane(Direction::Right));
+    let b = model.active_workspace().focused;
+    model.apply(Command::SplitPane(Direction::Right));
+    let c = model.active_workspace().focused;
+    model.apply(Command::EqualizePanes);
+    let widths: Vec<f32> = model
+        .active_workspace()
+        .layout
+        .panes(Rect::UNIT)
+        .iter()
+        .map(|(_, r)| r.width)
+        .collect();
+    assert!(
+        widths.iter().all(|w| (w - 1.0 / 3.0).abs() < 1e-5),
+        "{widths:?}"
+    );
+
+    model.apply(Command::SwapPane(Direction::Left));
+    assert_eq!(model.active_workspace().layout.leaves(), [a, c, b]);
+    assert_eq!(model.active_workspace().focused, c);
+    model.apply(Command::SwapPane(Direction::Left));
+    model.apply(Command::SwapPane(Direction::Left));
+    assert_eq!(model.active_workspace().layout.leaves(), [c, a, b]);
+
+    model.apply(Command::RotatePanes);
+    assert_eq!(model.active_workspace().layout.leaves(), [b, c, a]);
+    assert_eq!(model.active_workspace().focused, c);
+}
+
+#[test]
+fn trigger_badges_clear_with_attention_and_skip_muted_tabs() {
+    let (mut model, _) = Model::new();
+    let tab = model.focused_tab().id;
+    let TabKind::Terminal(session) = model.focused_tab().kind else {
+        panic!("the first tab is a terminal");
+    };
+    model.apply(Command::SetTabBadge(session, Some("error".into())));
+    assert_eq!(model.tab(tab).unwrap().badge.as_deref(), Some("error"));
+    model.apply(Command::ClearAttention(tab));
+    assert_eq!(model.tab(tab).unwrap().badge, None);
+    model.apply(Command::SetTabMuted(tab, true));
+    model.apply(Command::SetTabBadge(session, Some("error".into())));
+    assert_eq!(model.tab(tab).unwrap().badge, None);
 }
 
 #[test]
@@ -816,10 +948,10 @@ const DIRECTIONS: [Direction; 4] = [
 
 /// A random command that refers only to things that currently exist.
 ///
-/// Arms are weighted by how many of the 25 buckets map to them; the unlisted buckets (and 16
-/// when there are no sessions) end a random tab's session or browser, so tabs churn steadily.
-/// Ratios range over -1..2 to exercise clamping, and some picks (moves, placements) are
-/// pointless, which covers the ignore paths.
+/// Arms are weighted by how many of the 28 buckets map to them; the unlisted buckets (and 16
+/// and 26 when there are no sessions) end a random tab's session or browser, so tabs churn
+/// steadily. Ratios range over -1..2 to exercise clamping, and some picks (moves, placements)
+/// are pointless, which covers the ignore paths.
 fn random_command(rng: &mut Rng, model: &Model) -> Command {
     let workspaces: Vec<_> = model.workspaces().iter().map(|w| w.id).collect();
     let panes: Vec<_> = model
@@ -832,7 +964,14 @@ fn random_command(rng: &mut Rng, model: &Model) -> Command {
         .flat_map(|p| model.pane(*p).unwrap().tabs.clone())
         .collect();
     let sessions: Vec<_> = model.sessions().collect();
-    match rng.below(25) {
+    match rng.below(28) {
+        25 => match rng.below(3) {
+            0 => Command::ToggleMaximize,
+            1 => Command::EqualizePanes,
+            _ => Command::RotatePanes,
+        },
+        27 => Command::SwapPane(rng.pick(&DIRECTIONS)),
+        20 => Command::NextWaiting,
         15 => Command::CloseActiveWorkspace,
         16 if !sessions.is_empty() => Command::Notify {
             session: rng.pick(&sessions),
@@ -840,6 +979,7 @@ fn random_command(rng: &mut Rng, model: &Model) -> Command {
             body: "x".into(),
         },
         17 => Command::ClearAttention(rng.pick(&tabs)),
+        26 if !sessions.is_empty() => Command::SetTabBadge(rng.pick(&sessions), Some("!".into())),
         0 => Command::NewWorkspace,
         1 => Command::CloseWorkspace(rng.pick(&workspaces)),
         2 => Command::SelectWorkspace(rng.pick(&workspaces)),

@@ -23,13 +23,22 @@ pub(crate) struct Running {
 
 /// The search bar, attached to one session (the focused pane's active tab when opened).
 pub(crate) struct Search {
-    /// The terminal being searched.
-    pub(crate) session: SessionId,
+    /// The terminal or page being searched.
+    pub(crate) target: SearchTarget,
     /// What's typed in the bar.
     pub(crate) query: String,
     /// Whether the last search found a match (an empty query counts as found); the bar says
     /// "No matches" otherwise.
     pub(crate) found: bool,
+}
+
+/// What the find bar searches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchTarget {
+    /// A terminal's scrollback.
+    Terminal(SessionId),
+    /// A browser tab's page.
+    Page(macaroni_core::BrowserId),
 }
 
 /// What's being renamed in place, or (as `App.item_focus`) what Enter would rename.

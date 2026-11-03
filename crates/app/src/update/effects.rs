@@ -27,7 +27,26 @@ impl App {
     pub(crate) fn apply(&mut self, command: Command) -> Task<Message> {
         let before = workspace_names(&self.model);
         let open = open_tabs(&self.model);
+        // Tabs the user closes can be reopened; a program that ended (`exit`, a page's
+        // `window.close()`) or quitting isn't a close to undo. Only these commands close tabs,
+        // so others skip the bookkeeping (titles and folders change on every prompt).
+        let closable = matches!(
+            command,
+            Command::CloseTab(_)
+                | Command::CloseActiveTab
+                | Command::ClosePane
+                | Command::CloseWorkspace(_)
+                | Command::CloseActiveWorkspace
+        );
+        let closing = if closable {
+            self.closing_tabs()
+        } else {
+            Vec::new()
+        };
         let effects = self.model.apply(command);
+        if !effects.iter().any(|e| matches!(e, Effect::Quit)) {
+            self.remember_closed(closing);
+        }
         self.broadcast_workspace_changes(&before);
         let task = self.run_effects(effects);
         let changed: Vec<_> = open_tabs(&self.model)
@@ -44,6 +63,86 @@ impl App {
         self.session_dirty = true;
         self.save_session(false);
         task
+    }
+
+    /// What every tab would be reopened from, before a command that may close some of them;
+    /// [`App::remember_closed`] keeps those that are gone afterwards.
+    fn closing_tabs(&self) -> Vec<(TabId, crate::ClosedTab)> {
+        let mut tabs = Vec::new();
+        for ws in self.model.workspaces() {
+            for pane in ws.layout.leaves() {
+                for &tab in self
+                    .model
+                    .pane(pane)
+                    .map(|p| p.tabs.as_slice())
+                    .unwrap_or_default()
+                {
+                    tabs.push((
+                        tab,
+                        crate::ClosedTab {
+                            saved: crate::session::saved_tab(
+                                &self.model,
+                                &self.restored,
+                                &self.ssh_tabs,
+                                tab,
+                            ),
+                            pane,
+                            workspace: ws.id,
+                        },
+                    ));
+                }
+            }
+        }
+        tabs
+    }
+
+    /// Keeps the tabs of `before` that no longer exist, newest last, at most
+    /// [`crate::CLOSED_TABS_KEPT`].
+    fn remember_closed(&mut self, before: Vec<(TabId, crate::ClosedTab)>) {
+        for (tab, closed) in before {
+            if self.model.tab(tab).is_none() {
+                self.closed_tabs.push(closed);
+            }
+        }
+        let extra = self
+            .closed_tabs
+            .len()
+            .saturating_sub(crate::CLOSED_TABS_KEPT);
+        self.closed_tabs.drain(..extra);
+    }
+
+    /// Reopens the most recently closed tab: in its old pane if that's still there, else the
+    /// focused one. A terminal starts in its old directory and resumes its Claude Code session
+    /// (as a restored tab does); a browser tab reopens its page. Its name and look come back.
+    pub(crate) fn reopen_tab(&mut self) -> Task<Message> {
+        let Some(closed) = self.closed_tabs.pop() else {
+            return Task::none();
+        };
+        let mut tasks = Vec::new();
+        if self.model.pane(closed.pane).is_some() {
+            tasks.push(self.apply(Command::FocusPane(closed.pane)));
+        } else if self.model.workspace(closed.workspace).is_some() {
+            tasks.push(self.apply(Command::SelectWorkspace(closed.workspace)));
+        }
+        let saved = closed.saved;
+        match saved.url.clone() {
+            Some(url) => tasks.push(self.apply(Command::OpenBrowser { url, split: None })),
+            None => {
+                // The terminal spawns later, at its real size; `spawn` reads this then, as for
+                // a restored tab.
+                tasks.push(self.apply(Command::NewTab));
+                let tab = self.model.focused_tab().id;
+                self.restored.insert(tab, saved.clone());
+            }
+        }
+        let tab = self.model.focused_tab().id;
+        tasks.push(self.apply(Command::RenameTab(tab, saved.name.clone())));
+        tasks.push(self.apply(Command::SetTabIcon(tab, saved.icon.clone())));
+        tasks.push(self.apply(Command::SetTabColor(tab, saved.color.clone())));
+        if saved.muted {
+            tasks.push(self.apply(Command::SetTabMuted(tab, true)));
+        }
+        Task::batch(tasks)
     }
 
     /// Applies each command in turn, batching their tasks.
@@ -102,7 +201,12 @@ impl App {
         let path = session::path(&self.config_dir);
         let saved = session::Saved {
             sidebar: Some(self.sidebar),
-            ..session::capture(&self.model, &self.restored, &self.ssh_tabs)
+            ..session::capture(
+                &self.model,
+                &self.restored,
+                &self.ssh_tabs,
+                &self.scrollback_files,
+            )
         };
         if let Err(err) = session::save(&path, &saved) {
             self.config_errors.push(format!(
@@ -157,7 +261,11 @@ impl App {
         if let Some(tab) = self.ipc.session_tabs.remove(&id) {
             self.broadcast(macaroni_ipc::Event::TabClosed { tab: tab.0 });
         }
-        if self.search.as_ref().is_some_and(|s| s.session == id) {
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|s| s.target == crate::state::SearchTarget::Terminal(id))
+        {
             self.search = None;
         }
     }
@@ -185,6 +293,13 @@ impl App {
             self.blur_page();
         }
         self.browsers.remove(&id);
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|s| s.target == crate::state::SearchTarget::Page(id))
+        {
+            self.search = None;
+        }
         if let Some(tab) = self.ipc.browser_tabs.remove(&id) {
             self.broadcast(macaroni_ipc::Event::TabClosed { tab: tab.0 });
         }

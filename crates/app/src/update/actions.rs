@@ -36,6 +36,13 @@ impl App {
             TabAction::Mute(muted) => self.apply(Command::SetTabMuted(tab, muted)),
             TabAction::Pin(pinned) => self.apply(Command::SetTabPinned(tab, pinned)),
             TabAction::CopyId => iced::clipboard::write(tab.0.to_string()),
+            TabAction::Maximize => {
+                let focus = match self.model.pane_of_tab(tab) {
+                    Some(pane) => self.apply(Command::FocusPane(pane)),
+                    None => Task::none(),
+                };
+                Task::batch([focus, self.apply(Command::ToggleMaximize)])
+            }
             TabAction::Icon(icon) => self.apply(Command::SetTabIcon(tab, icon.map(str::to_owned))),
             TabAction::Color(color) => {
                 self.apply(Command::SetTabColor(tab, color.map(str::to_owned)))
@@ -97,6 +104,47 @@ impl App {
             .or_else(|| self.default_folder())
             .or_else(|| home_dir().map(|h| h.to_string_lossy().into_owned()))
             .unwrap_or_default()
+    }
+
+    /// The folder a workspace's git state comes from: its focused tab's directory, else its
+    /// own folder, else `[terminal] default_dir`; `None` when none is known.
+    pub(crate) fn workspace_dir(&self, ws: &macaroni_core::Workspace) -> Option<String> {
+        self.model
+            .pane(ws.focused)
+            .and_then(|p| self.model.tab(p.active))
+            .and_then(|t| t.cwd.clone())
+            .or_else(|| ws.cwd.clone())
+            .or_else(|| self.default_folder())
+    }
+
+    /// Whether a `[workspace_items]` template shows `{branch}`, `{dirty}` or `{sync}`, so git
+    /// state is worth looking up.
+    pub(crate) fn sidebar_shows_git(&self) -> bool {
+        let items = &self.config.workspace_items;
+        [&items.title, &items.detail, &items.badge].iter().any(|t| {
+            ["{branch}", "{dirty}", "{sync}"]
+                .iter()
+                .any(|k| t.contains(k))
+        })
+    }
+
+    /// Looks up every workspace's git state off the UI thread, unless a lookup is running;
+    /// [`Message::GitInfo`] brings it back.
+    pub(crate) fn git_tick(&mut self) -> Task<Message> {
+        if self.git_busy {
+            return Task::none();
+        }
+        let mut dirs: Vec<String> = self
+            .model
+            .workspaces()
+            .iter()
+            .filter_map(|ws| self.workspace_dir(ws))
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        self.git_busy = true;
+        Task::future(crate::vscode::off_thread(move || crate::git::look(dirs)))
+            .map(Message::GitInfo)
     }
 
     /// `[terminal] default_dir` with a leading `~` expanded; `None` when it's blank.

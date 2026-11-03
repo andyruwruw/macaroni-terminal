@@ -3,12 +3,17 @@
 //! Also where keyboard focus moves between macaroni and a browser page's native window, which
 //! iced knows nothing about (see `update/browser.rs`).
 
+use std::collections::BTreeMap;
+
 use iced::{Size, Task, window};
 
 use crate::message::{Message, WindowOp};
 #[cfg(windows)]
 use crate::move_dpi;
 use crate::{App, native_handle};
+
+/// The most of a terminal's text kept across a restart, from its end.
+const SCROLLBACK_KEPT_BYTES: usize = 1 << 20;
 
 impl App {
     /// Remembers the main window and asks for its native handle and scale factor. On Windows,
@@ -69,7 +74,62 @@ impl App {
 
     /// Saves the session now, then quits (after the browsers close; see [`App::exit`]).
     pub(crate) fn close_requested(&mut self) -> Task<Message> {
+        self.write_scrollback();
         self.save_session(true);
         self.exit()
+    }
+
+    /// With `[session] keep_scrollback`, writes each running terminal's text to its own file
+    /// for the final session save to name, then deletes the files no tab refers to any more
+    /// (tabs not yet started keep the file they were restored with). Files are named by time
+    /// and tab id, since tab ids start over in each run. Failures just leave a tab without its
+    /// text.
+    fn write_scrollback(&mut self) {
+        let dir = crate::session::scrollback_dir(&self.config_dir);
+        if !self.config.session.restore || !self.config.session.keep_scrollback || self.ran_program
+        {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let _ = std::fs::create_dir_all(&dir);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        let mut files = BTreeMap::new();
+        for (&session, running) in &self.running {
+            let Some(tab) = self.model.tab_for_session(session) else {
+                continue;
+            };
+            let mut text = running.session.all_text();
+            // Long histories keep their end: the most recent output is what matters.
+            if text.len() > SCROLLBACK_KEPT_BYTES {
+                let mut cut = text.len() - SCROLLBACK_KEPT_BYTES;
+                while !text.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                text = text.split_off(cut);
+            }
+            if text.trim().is_empty() {
+                continue;
+            }
+            let name = format!("{stamp}-{}.txt", tab.0);
+            if std::fs::write(dir.join(&name), text).is_ok() {
+                files.insert(tab, name);
+            }
+        }
+        let keep: std::collections::BTreeSet<String> = files
+            .values()
+            .cloned()
+            .chain(self.restored.values().filter_map(|r| r.scrollback.clone()))
+            .collect();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if !keep.contains(&entry.file_name().to_string_lossy().into_owned()) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+        self.scrollback_files = files;
+        self.session_dirty = true;
     }
 }

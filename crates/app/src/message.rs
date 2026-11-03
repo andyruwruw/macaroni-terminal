@@ -48,6 +48,8 @@ pub(crate) enum TabAction {
     UseAsFolder,
     /// Types `cd` to its workspace's folder into the tab's shell.
     GoToFolder,
+    /// Focuses the tab's pane and maximizes it, or brings the layout back.
+    Maximize,
 }
 
 /// An item on a sidebar workspace's right-click menu.
@@ -202,6 +204,14 @@ pub(crate) enum Message {
     /// A tick while the session has unsaved changes, so the last change is saved within a
     /// second even if no command follows it.
     SaveTick,
+    /// The user clicked the OS notification for this tab.
+    NotificationClicked(TabId),
+    /// Answer the permission prompt of the coding agent in this tab: allow (`true`) or deny.
+    PermissionAnswer(TabId, bool),
+    /// Time to look up the workspaces' git state again.
+    GitTick,
+    /// The workspaces' git state, by folder.
+    GitInfo(std::collections::HashMap<String, crate::git::Repo>),
     /// Something in the settings dialog: picking a section, searching, or changing a setting
     /// (which writes the config file).
     Settings(view::settings::SettingsMessage),
@@ -209,6 +219,16 @@ pub(crate) enum Message {
     IconPicker(view::icon_picker::IconPickerMessage),
     /// Something in the workspace folder dialog.
     Folder(view::folder_dialog::FolderMessage),
+    /// Something in the command palette.
+    Palette(view::palette::PaletteMessage),
+    /// Something in the new worktree dialog.
+    Worktree(view::worktree_dialog::WorktreeMessage),
+    /// Something in the agent dashboard.
+    Dashboard(view::dashboard::DashboardMessage),
+    /// Something in the workspace environment dialog.
+    Env(view::env_dialog::EnvMessage),
+    /// A key pressed while pane letters show: its letter, else a space.
+    PaneLetter(char),
     /// A press on the dimmed backdrop around the settings dialog: closes it.
     SettingsClose,
     /// The cursor entered a menu item: a submenu's, or (`None`) a plain one.

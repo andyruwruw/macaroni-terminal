@@ -1228,7 +1228,7 @@ fn field<'a>(
 }
 
 /// An on/off switch: off, its track is a field's (sunken and outlined); on, the accent.
-fn toggle<'a>(c: Chrome, on: bool, message: Message) -> Element<'a, Message> {
+pub(crate) fn toggle<'a>(c: Chrome, on: bool, message: Message) -> Element<'a, Message> {
     let knob = container(Space::new().width(14).height(14)).style(move |_| card_style(c.knob, 7.0));
     let track = container(knob)
         .width(34)

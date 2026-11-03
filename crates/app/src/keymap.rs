@@ -31,6 +31,26 @@ pub enum Action {
     Find,
     /// Fold the sidebar away, or bring it back.
     ToggleSidebar,
+    /// Open the command palette.
+    CommandPalette,
+    /// Open the palette listing the tabs waiting for the user.
+    ShowWaiting,
+    /// Open the new worktree dialog for the active workspace.
+    NewWorktree,
+    /// Scroll the focused terminal to the previous (`true`) or next prompt its shell marked.
+    Prompt(bool),
+    /// Copy the output of the focused terminal's last command its shell marked.
+    CopyOutput,
+    /// Open or close the agent dashboard.
+    AgentDashboard,
+    /// Show a letter over each pane; the next key focuses that pane.
+    JumpToPane,
+    /// Bring back the most recently closed tab.
+    ReopenTab,
+    /// Save the focused terminal's text to a file.
+    SaveScrollback,
+    /// Search the scrollback of every terminal (`true`) or the active workspace's.
+    SearchScrollback(bool),
     /// The terminal font size, for this run only (Ctrl+scroll does this too).
     Zoom(Zoom),
 }
@@ -58,6 +78,11 @@ const DEFAULTS_MAC: &[(&str, &str)] = &[
     ("cmd+alt+right", "focus_right"),
     ("cmd+alt+up", "focus_up"),
     ("cmd+alt+down", "focus_down"),
+    ("cmd+alt+shift+left", "swap_left"),
+    ("cmd+alt+shift+right", "swap_right"),
+    ("cmd+alt+shift+up", "swap_up"),
+    ("cmd+alt+shift+down", "swap_down"),
+    ("cmd+shift+enter", "maximize_pane"),
     ("cmd+n", "new_workspace"),
     ("cmd+shift+]", "next_workspace"),
     ("cmd+shift+[", "previous_workspace"),
@@ -72,6 +97,16 @@ const DEFAULTS_MAC: &[(&str, &str)] = &[
     ("cmd+9", "workspace_9"),
     ("cmd+,", "open_settings"),
     ("cmd+b", "toggle_sidebar"),
+    ("cmd+shift+p", "command_palette"),
+    ("cmd+shift+i", "show_waiting"),
+    ("cmd+shift+u", "next_waiting"),
+    ("cmd+up", "previous_prompt"),
+    ("cmd+down", "next_prompt"),
+    ("cmd+shift+o", "copy_output"),
+    ("cmd+shift+a", "agent_dashboard"),
+    ("cmd+shift+j", "jump_to_pane"),
+    ("cmd+shift+r", "reopen_tab"),
+    ("cmd+alt+f", "search_all"),
     ("cmd+shift+,", "open_config"),
     ("cmd+c", "copy"),
     ("cmd+v", "paste"),
@@ -93,6 +128,11 @@ const DEFAULTS_OTHER: &[(&str, &str)] = &[
     ("ctrl+alt+right", "focus_right"),
     ("ctrl+alt+up", "focus_up"),
     ("ctrl+alt+down", "focus_down"),
+    ("ctrl+alt+shift+left", "swap_left"),
+    ("ctrl+alt+shift+right", "swap_right"),
+    ("ctrl+alt+shift+up", "swap_up"),
+    ("ctrl+alt+shift+down", "swap_down"),
+    ("ctrl+shift+enter", "maximize_pane"),
     ("ctrl+shift+n", "new_workspace"),
     ("ctrl+shift+pagedown", "next_workspace"),
     ("ctrl+shift+pageup", "previous_workspace"),
@@ -107,6 +147,16 @@ const DEFAULTS_OTHER: &[(&str, &str)] = &[
     ("ctrl+shift+9", "workspace_9"),
     ("ctrl+,", "open_settings"),
     ("ctrl+b", "toggle_sidebar"),
+    ("ctrl+shift+p", "command_palette"),
+    ("ctrl+shift+i", "show_waiting"),
+    ("ctrl+shift+u", "next_waiting"),
+    ("ctrl+shift+up", "previous_prompt"),
+    ("ctrl+shift+down", "next_prompt"),
+    ("ctrl+shift+o", "copy_output"),
+    ("ctrl+shift+a", "agent_dashboard"),
+    ("ctrl+shift+j", "jump_to_pane"),
+    ("ctrl+shift+r", "reopen_tab"),
+    ("ctrl+shift+g", "search_all"),
     ("ctrl+shift+,", "open_config"),
     ("ctrl+shift+c", "copy"),
     ("ctrl+shift+v", "paste"),
@@ -127,6 +177,18 @@ pub fn action(name: &str) -> Option<Action> {
         "open_config" => return Some(Action::OpenConfig),
         "open_settings" => return Some(Action::OpenSettings),
         "toggle_sidebar" => return Some(Action::ToggleSidebar),
+        "command_palette" => return Some(Action::CommandPalette),
+        "show_waiting" => return Some(Action::ShowWaiting),
+        "new_worktree" => return Some(Action::NewWorktree),
+        "previous_prompt" => return Some(Action::Prompt(true)),
+        "next_prompt" => return Some(Action::Prompt(false)),
+        "copy_output" => return Some(Action::CopyOutput),
+        "agent_dashboard" => return Some(Action::AgentDashboard),
+        "jump_to_pane" => return Some(Action::JumpToPane),
+        "reopen_tab" => return Some(Action::ReopenTab),
+        "save_scrollback" => return Some(Action::SaveScrollback),
+        "search_workspace" => return Some(Action::SearchScrollback(false)),
+        "search_all" => return Some(Action::SearchScrollback(true)),
         "copy" => return Some(Action::Copy),
         "paste" => return Some(Action::Paste),
         "find" => return Some(Action::Find),
@@ -146,6 +208,14 @@ pub fn action(name: &str) -> Option<Action> {
         "focus_right" => Command::FocusDirection(Direction::Right),
         "focus_up" => Command::FocusDirection(Direction::Up),
         "focus_down" => Command::FocusDirection(Direction::Down),
+        "maximize_pane" => Command::ToggleMaximize,
+        "equalize_panes" => Command::EqualizePanes,
+        "rotate_panes" => Command::RotatePanes,
+        "swap_left" => Command::SwapPane(Direction::Left),
+        "swap_right" => Command::SwapPane(Direction::Right),
+        "swap_up" => Command::SwapPane(Direction::Up),
+        "swap_down" => Command::SwapPane(Direction::Down),
+        "next_waiting" => Command::NextWaiting,
         "new_workspace" => Command::NewWorkspace,
         "close_workspace" => Command::CloseActiveWorkspace,
         "next_workspace" => Command::NextWorkspace,
@@ -159,6 +229,103 @@ pub fn action(name: &str) -> Option<Action> {
         }
     };
     Some(Action::Command(command))
+}
+
+/// Every action's config name, for the command palette: [`action`]'s names in the order the
+/// palette lists them, with `workspace_1`..`workspace_9` left out (it lists the workspaces
+/// themselves).
+pub const NAMES: &[&str] = &[
+    "new_tab",
+    "close_tab",
+    "reopen_tab",
+    "next_tab",
+    "previous_tab",
+    "split_right",
+    "split_down",
+    "split_left",
+    "split_up",
+    "close_pane",
+    "maximize_pane",
+    "equalize_panes",
+    "rotate_panes",
+    "swap_left",
+    "swap_right",
+    "swap_up",
+    "swap_down",
+    "jump_to_pane",
+    "show_waiting",
+    "agent_dashboard",
+    "next_waiting",
+    "focus_left",
+    "focus_right",
+    "focus_up",
+    "focus_down",
+    "new_workspace",
+    "new_worktree",
+    "close_workspace",
+    "next_workspace",
+    "previous_workspace",
+    "toggle_sidebar",
+    "find",
+    "search_workspace",
+    "search_all",
+    "previous_prompt",
+    "next_prompt",
+    "copy_output",
+    "save_scrollback",
+    "copy",
+    "paste",
+    "zoom_in",
+    "zoom_out",
+    "reset_zoom",
+    "open_settings",
+    "open_config",
+];
+
+/// `new_tab` as "New tab", `workspace_3` as "Workspace 3".
+pub fn label(name: &str) -> String {
+    let words = name.replace('_', " ");
+    let mut chars = words.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// A chord as it's shown, e.g. Ctrl+Shift+T.
+pub fn chord_label(chord: &Chord) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let logo = if cfg!(target_os = "macos") {
+        "Cmd"
+    } else {
+        "Win"
+    };
+    for (on, name) in [
+        (chord.mods.ctrl, "Ctrl"),
+        (
+            chord.mods.alt,
+            if cfg!(target_os = "macos") {
+                "Option"
+            } else {
+                "Alt"
+            },
+        ),
+        (chord.mods.shift, "Shift"),
+        (chord.mods.logo, logo),
+    ] {
+        if on {
+            parts.push(name.to_owned());
+        }
+    }
+    parts.push(match chord.key {
+        ChordKey::Char(c) => c.to_uppercase().to_string(),
+        ChordKey::Digit(d) => d.to_string(),
+        ChordKey::Named(NamedKey::F(n)) => format!("F{n}"),
+        ChordKey::Named(NamedKey::PageUp) => "PageUp".to_owned(),
+        ChordKey::Named(NamedKey::PageDown) => "PageDown".to_owned(),
+        ChordKey::Named(named) => format!("{named:?}"),
+    });
+    parts.join("+")
 }
 
 /// The shortcuts in effect.

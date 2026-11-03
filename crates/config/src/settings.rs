@@ -29,6 +29,9 @@ pub const TEMPLATE: &str = include_str!("template.toml");
 pub struct FontSettings {
     /// `None` uses the bundled JetBrains Mono.
     pub family: Option<String>,
+    /// Installed families tried in order for a character `family` lacks, before the bundled
+    /// symbols font and the system's fallback.
+    pub fallback: Vec<String>,
     /// In points; [`Config::parse`] rejects anything outside 6 to 72.
     pub size: f32,
     /// Programming ligatures (`=>`, `!=`) in terminal text.
@@ -42,6 +45,7 @@ impl Default for FontSettings {
     fn default() -> Self {
         Self {
             family: None,
+            fallback: Vec::new(),
             size: 14.0,
             ligatures: false,
             line_height: 1.3,
@@ -75,6 +79,24 @@ pub struct SshProfile {
     pub identity_file: Option<String>,
     /// More `ssh` arguments, placed before the destination.
     pub args: Vec<String>,
+}
+
+/// One `[[trigger]]`: a regex run over each line of terminal output, and what a match does.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Trigger {
+    /// The regex (Rust `regex` syntax), matched against each line of output with its colors and
+    /// other escape sequences taken out.
+    pub pattern: String,
+    /// Colors the matching text on screen: a workspace color name or `#rrggbb`.
+    pub highlight: Option<String>,
+    /// Marks the tab and sends a notification, with the matching line as its text.
+    pub notify: bool,
+    /// Sets the tab's badge to this until the tab is looked at. `$1` or `${name}` put in the
+    /// match's groups.
+    pub badge: Option<String>,
+    /// The notification's title; empty uses the tab's.
+    pub name: String,
 }
 
 impl SshProfile {
@@ -159,6 +181,9 @@ pub struct NotificationSettings {
     /// What the terminal bell sounds like: `"off"`, `"system"` (the system's alert sound) or
     /// the path of a sound file (`.wav` on Windows; anything `afplay` plays on macOS).
     pub bell_sound: String,
+    /// Seconds a command the shell marked (OSC 133) has to run for its finish to ask for
+    /// attention; 0 never does. [`Config::parse`] rejects more than a day.
+    pub long_command: u32,
 }
 
 impl Default for NotificationSettings {
@@ -167,6 +192,7 @@ impl Default for NotificationSettings {
             os: true,
             bell: false,
             bell_sound: "off".to_owned(),
+            long_command: 30,
         }
     }
 }
@@ -201,6 +227,8 @@ pub struct SessionSettings {
     pub restore: bool,
     /// In restored tabs that were running Claude Code, run `claude --resume <session>`.
     pub resume_agents: bool,
+    /// Save each terminal's text on quit and show it again, dimmed, in its restored tab.
+    pub keep_scrollback: bool,
 }
 
 impl Default for SessionSettings {
@@ -208,6 +236,7 @@ impl Default for SessionSettings {
         Self {
             restore: true,
             resume_agents: true,
+            keep_scrollback: true,
         }
     }
 }
@@ -218,9 +247,9 @@ impl Default for SessionSettings {
 #[serde(rename_all = "snake_case")]
 pub enum UiTheme {
     /// Flat layered greys.
+    #[default]
     Solid,
     /// Translucent sheets with lit edges over a deep gradient.
-    #[default]
     Glass,
 }
 
@@ -284,6 +313,8 @@ pub struct WorkspaceItemSettings {
     pub detail: String,
     /// Small text on the right.
     pub badge: String,
+    /// A large faded label in the top right of each of the workspace's panes; empty shows none.
+    pub pane_badge: String,
     /// The muted and pinned marks.
     pub status_icons: bool,
     /// The row's close button.
@@ -316,6 +347,7 @@ impl Default for WorkspaceItemSettings {
             title: "{name}".to_owned(),
             detail: "{activity}".to_owned(),
             badge: "{shortcut}".to_owned(),
+            pane_badge: String::new(),
             status_icons: true,
             close_button: true,
             search_set: None,
@@ -371,6 +403,8 @@ struct File {
     shell: ShellSettings,
     /// `[[ssh]]`.
     ssh: Vec<SshProfile>,
+    /// `[[trigger]]`.
+    trigger: Vec<Trigger>,
     /// `[terminal]`.
     terminal: TerminalSettings,
     /// `[notifications]`.
@@ -402,6 +436,7 @@ impl Default for File {
             ui_theme: UiTheme::default(),
             shell: ShellSettings::default(),
             ssh: Vec::new(),
+            trigger: Vec::new(),
             terminal: TerminalSettings::default(),
             notifications: NotificationSettings::default(),
             session: SessionSettings::default(),
@@ -432,6 +467,8 @@ pub struct Config {
     pub shell: ShellSettings,
     /// `[[ssh]]`, in file order; each has a host.
     pub ssh: Vec<SshProfile>,
+    /// `[[trigger]]`, in file order; each pattern compiles and each does something.
+    pub triggers: Vec<Trigger>,
     /// `[terminal]`.
     pub terminal: TerminalSettings,
     /// `[notifications]`.
@@ -456,7 +493,12 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let file = File::default();
+        let mut file = File::default();
+        // Style defaults are glass's; the default interface is solid, so it gets solid's values
+        // just as a file that sets nothing does in `Config::parse`.
+        if file.ui_theme == UiTheme::Solid {
+            file.style.apply_solid_defaults(&toml::Table::new());
+        }
         Self {
             font: file.font,
             // Can't fail: `DEFAULT_THEME` is built in and a test parses every built-in theme.
@@ -465,6 +507,7 @@ impl Default for Config {
             ui_theme: file.ui_theme,
             shell: file.shell,
             ssh: file.ssh,
+            triggers: file.trigger,
             terminal: file.terminal,
             notifications: file.notifications,
             session: file.session,
@@ -539,6 +582,12 @@ impl Config {
                 file.font.line_height
             ));
         }
+        if file.notifications.long_command > 86_400 {
+            return Err(format!(
+                "notifications.long_command must be at most 86400 seconds, got {}",
+                file.notifications.long_command
+            ));
+        }
         if !(1..=20).contains(&file.terminal.scroll_lines) {
             return Err(format!(
                 "terminal.scroll_lines must be between 1 and 20, got {}",
@@ -547,6 +596,20 @@ impl Config {
         }
         if let Some(n) = file.ssh.iter().position(|p| p.host.trim().is_empty()) {
             return Err(format!("ssh entry {} has no host", n + 1));
+        }
+        for (n, trigger) in file.trigger.iter().enumerate() {
+            if trigger.pattern.is_empty() {
+                return Err(format!("trigger {} has no pattern", n + 1));
+            }
+            if let Err(e) = regex::Regex::new(&trigger.pattern) {
+                return Err(format!("trigger {}: {e}", n + 1));
+            }
+            if trigger.highlight.is_none() && !trigger.notify && trigger.badge.is_none() {
+                return Err(format!(
+                    "trigger {} has no highlight, notify or badge",
+                    n + 1
+                ));
+            }
         }
         file.style.check()?;
         file.colors.check()?;
@@ -566,6 +629,7 @@ impl Config {
             ui_theme: file.ui_theme,
             shell: file.shell,
             ssh: file.ssh,
+            triggers: file.trigger,
             terminal: file.terminal,
             notifications: file.notifications,
             session: file.session,
@@ -605,10 +669,15 @@ mod tests {
     #[test]
     fn solid_has_its_own_radii_unless_set() {
         let dir = Path::new(".");
-        let glass = Config::parse("", dir).expect("empty config parses");
+        let glass = Config::parse("ui_theme = \"glass\"", dir).expect("glass parses");
         assert_eq!(glass.style.tabs.radius, 8.0);
         let solid = Config::parse("ui_theme = \"solid\"", dir).expect("solid parses");
         assert_eq!(solid.style.tabs.radius, 0.0);
+        // Solid is the default, with or without a file.
+        let empty = Config::parse("", dir).expect("empty config parses");
+        assert_eq!(empty.ui_theme, UiTheme::Solid);
+        assert_eq!(empty.style.tabs.radius, 0.0);
+        assert_eq!(Config::default().style, empty.style);
         assert_eq!(solid.style.panes.radius, 0.0);
         assert!(!solid.workspace_items.search(solid.ui_theme));
         assert!(glass.workspace_items.search(glass.ui_theme));
@@ -635,12 +704,19 @@ mod tests {
                 .split(&format!("[style.{table}]\n"))
                 .nth(1)
                 .unwrap_or_else(|| panic!("no [style.{table}] in the template"));
-            // A value with a solid default of its own notes it after the glass one.
-            let default = format!("# {field} = {}", setting.default);
+            // The template shows the default interface's (solid's) value; where glass differs,
+            // glass's follows it.
+            let solid = crate::SOLID_DEFAULTS
+                .iter()
+                .find(|(key, _)| *key == setting.key)
+                .map(|(_, v)| *v);
+            let shown = match solid {
+                Some(solid) => format!("# {field} = {solid}  (glass: {})\n", setting.default),
+                None => format!("# {field} = {}\n", setting.default),
+            };
             assert!(
-                section.contains(&format!("{default}\n"))
-                    || section.contains(&format!("{default}  (solid: ")),
-                "{} isn't in the template",
+                section.contains(&shown),
+                "{} isn't in the template as {shown:?}",
                 setting.key
             );
             assert_eq!(Style::default().get(setting.key), Some(setting.default));
@@ -792,6 +868,29 @@ mod tests {
             parse("[font]\nline_height = 4")
                 .unwrap_err()
                 .contains("line_height")
+        );
+    }
+
+    #[test]
+    fn triggers_are_checked() {
+        let config =
+            parse("[[trigger]]\npattern = '\\berror\\b'\nnotify = true\nbadge = \"$0\"").unwrap();
+        assert_eq!(config.triggers.len(), 1);
+        assert_eq!(config.triggers[0].pattern, "\\berror\\b");
+        assert!(
+            parse("[[trigger]]\npattern = \"(\"\nnotify = true")
+                .unwrap_err()
+                .starts_with("trigger 1:")
+        );
+        assert!(
+            parse("[[trigger]]\npattern = \"x\"")
+                .unwrap_err()
+                .contains("no highlight")
+        );
+        assert!(
+            parse("[[trigger]]\nnotify = true")
+                .unwrap_err()
+                .contains("no pattern")
         );
     }
 

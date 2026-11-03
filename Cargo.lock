@@ -2866,26 +2866,29 @@ dependencies = [
 
 [[package]]
 name = "macaroni"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "embed-resource",
  "iced",
  "image",
+ "mac-notification-sys",
  "macaroni-browser",
  "macaroni-config",
  "macaroni-core",
  "macaroni-ipc",
  "macaroni-term",
  "notify-rust",
+ "regex",
  "rfd",
  "serde",
  "serde_json",
+ "tauri-winrt-notification",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "macaroni-browser"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "cef",
  "cef-dll-sys",
@@ -2897,7 +2900,7 @@ dependencies = [
 
 [[package]]
 name = "macaroni-cli"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "clap",
  "macaroni-ipc",
@@ -2906,9 +2909,10 @@ dependencies = [
 
 [[package]]
 name = "macaroni-config"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "notify",
+ "regex",
  "serde",
  "toml",
  "toml_edit",
@@ -2916,11 +2920,11 @@ dependencies = [
 
 [[package]]
 name = "macaroni-core"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "macaroni-ipc"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "interprocess",
  "serde",
@@ -2930,12 +2934,15 @@ dependencies = [
 
 [[package]]
 name = "macaroni-term"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "alacritty_terminal",
+ "base64 0.22.1",
  "criterion",
+ "image",
  "insta",
  "portable-pty",
+ "regex",
 ]
 
 [[package]]
@@ -6832,7 +6839,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "notify",
 ]

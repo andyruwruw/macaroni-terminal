@@ -1,4 +1,5 @@
-//! Finds desktop-notification and working-directory escape sequences in a session's output.
+//! Finds the escape sequences alacritty doesn't handle in a session's output: notifications,
+//! the working directory, prompt marks and inline images.
 //!
 //! `alacritty_terminal` ignores these, so the reader thread runs every chunk through this small
 //! parser before feeding the emulator. The parser keeps its state between chunks, so a sequence
@@ -10,6 +11,11 @@
 //! - OSC 99 (kitty, basic): `ESC ] 99 ; <metadata> ; <payload> ST`, with `p=title|body` and
 //!   `d=0` chunks accumulated until the final one. Other kitty options are ignored.
 //! - OSC 7: `ESC ] 7 ; file://<host>/<path> BEL`, the shell's working directory.
+//! - OSC 133 (FinalTerm prompt marks): `A` a prompt starts, `B` the command line starts, `C` the
+//!   command's output starts, `D[;<exit code>]` the command finished. [`OscSniffer::feed_at`]
+//!   says where in the chunk each one ended, so the reader can mark that spot in the grid.
+//! - OSC 1337 `File=...:<base64>` (iTerm2): an inline image ([`crate::images`]), placed where
+//!   it ended in the chunk the same way.
 //!
 //! The state machine is vte's own [`Parser`]; [`Collector`] only implements `osc_dispatch`, so
 //! everything else (text, CSI, DCS) passes through it and is ignored. The one piece of state of
@@ -34,12 +40,29 @@ pub struct Notification {
 }
 
 /// Something found in the output.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum OscEvent {
     /// A notification (OSC 9, 777 or 99).
     Notify(Notification),
     /// The shell reported its working directory (OSC 7), as a local path.
     Cwd(String),
+    /// A shell integration mark (OSC 133).
+    Mark(Mark),
+    /// An image to show inline (OSC 1337 `File=`).
+    Image(crate::images::ImageRequest),
+}
+
+/// An OSC 133 prompt mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// `A`: the prompt starts here.
+    Prompt,
+    /// `B`: the prompt ends and the command line starts.
+    Command,
+    /// `C`: the command runs; its output starts here.
+    Output,
+    /// `D`: the command finished, with its exit code when the shell gave one.
+    Finished(Option<i32>),
 }
 
 /// Watches a byte stream for notification and directory sequences. One per session; feed it
@@ -77,8 +100,28 @@ impl OscSniffer {
     /// Parses `bytes` and returns the events completed in them. A sequence that starts here and
     /// ends in a later chunk is returned by that later call.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<OscEvent> {
-        self.parser.advance(&mut self.collector, bytes);
-        std::mem::take(&mut self.collector.found)
+        self.feed_at(bytes).into_iter().map(|(_, e)| e).collect()
+    }
+
+    /// [`OscSniffer::feed`], with each event's position: the offset in `bytes` just past the
+    /// sequence's terminator.
+    ///
+    /// OSC sequences end in BEL or ST (`ESC \`), so the bytes are parsed in runs ending at each
+    /// BEL or backslash, and whatever completed in a run ended at its last byte. That's exact,
+    /// and costs one more `advance` per BEL or backslash in the output.
+    pub fn feed_at(&mut self, bytes: &[u8]) -> Vec<(usize, OscEvent)> {
+        let mut events = Vec::new();
+        let mut start = 0;
+        while start < bytes.len() {
+            let end = bytes[start..]
+                .iter()
+                .position(|&b| b == 0x07 || b == b'\\')
+                .map_or(bytes.len(), |i| start + i + 1);
+            self.parser.advance(&mut self.collector, &bytes[start..end]);
+            events.extend(self.collector.found.drain(..).map(|e| (end, e)));
+            start = end;
+        }
+        events
     }
 }
 
@@ -179,6 +222,24 @@ impl Perform for Collector {
             }
             [b"777", b"notify", title, body @ ..] => self.push(text(&[title]), text(body)),
             [b"99", metadata, payload @ ..] => self.kitty(metadata, payload),
+            [b"133", kind, rest @ ..] => {
+                let mark = match *kind {
+                    b"A" => Mark::Prompt,
+                    b"B" => Mark::Command,
+                    b"C" => Mark::Output,
+                    b"D" => Mark::Finished(
+                        rest.first()
+                            .and_then(|code| std::str::from_utf8(code).ok()?.trim().parse().ok()),
+                    ),
+                    _ => return,
+                };
+                self.found.push(OscEvent::Mark(mark));
+            }
+            [b"1337", rest @ ..] if !rest.is_empty() => {
+                if let Some(request) = crate::images::ImageRequest::parse(&rest.join(&b';')) {
+                    self.found.push(OscEvent::Image(request));
+                }
+            }
             [b"7", rest @ ..] if !rest.is_empty() => {
                 if let Some(path) = file_url_path(&String::from_utf8_lossy(&rest.join(&b';'))) {
                     self.found.push(OscEvent::Cwd(path));
@@ -247,6 +308,29 @@ mod tests {
             vec![OscEvent::Cwd("C:/Users/me".into())]
         );
         assert!(s.feed(b"\x1b]7;https://example.com/x\x07").is_empty());
+    }
+
+    #[test]
+    fn osc_133_marks_and_where_they_end() {
+        let mut s = OscSniffer::default();
+        let out = b"\x1b]133;A\x07$ ls\x1b]133;C\x1b\\file\n\x1b]133;D;2\x07";
+        let found = s.feed_at(out);
+        assert_eq!(
+            found,
+            vec![
+                (8, OscEvent::Mark(Mark::Prompt)),
+                (21, OscEvent::Mark(Mark::Output)),
+                (36, OscEvent::Mark(Mark::Finished(Some(2)))),
+            ]
+        );
+        assert_eq!(&out[found[1].0..found[1].0 + 4], b"file");
+        assert_eq!(
+            s.feed(b"\x1b]133;D\x07\x1b]133;B\x07"),
+            vec![
+                OscEvent::Mark(Mark::Finished(None)),
+                OscEvent::Mark(Mark::Command)
+            ]
+        );
     }
 
     #[test]

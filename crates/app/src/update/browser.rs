@@ -50,6 +50,11 @@ impl App {
                     || self.settings.is_some()
                     || self.icon_picker.is_some()
                     || self.folder_dialog.is_some()
+                    || self.command_palette.is_some()
+                    || self.worktree_dialog.is_some()
+                    || self.dashboard
+                    || self.pane_letters
+                    || self.env_dialog.is_some()
                     || menu.iter().any(|m| m.intersects(b))
             };
             let want = panel
@@ -202,6 +207,10 @@ impl App {
             BrowserMessage::Action(action) => self.perform(action),
             BrowserMessage::Text(request, text) => {
                 self.page_text(tab, request, text);
+                Task::none()
+            }
+            BrowserMessage::Found(query, found) => {
+                self.page_found(id, &query, found);
                 Task::none()
             }
         }

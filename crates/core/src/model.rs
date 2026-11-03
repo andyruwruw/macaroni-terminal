@@ -23,7 +23,7 @@ mod workspaces;
 use std::collections::BTreeMap;
 
 use crate::ids::{BrowserId, GroupId, PaneId, SessionId, TabId, WorkspaceId};
-use crate::layout::{Axis, Direction, MIN_RATIO, Side, SplitNode};
+use crate::layout::{Axis, Direction, Divider, MIN_RATIO, Rect, Side, SplitNode};
 use events::non_blank;
 
 /// One sidebar entry: a named split layout of panes with one of them focused.
@@ -52,6 +52,35 @@ pub struct Workspace {
     /// default (`[terminal] default_dir`, else the home directory).
     /// The model doesn't check it exists; the app does when it spawns.
     pub cwd: Option<String>,
+    /// Environment variables every terminal started in the workspace gets, in order.
+    pub env: Vec<(String, String)>,
+    /// Typed into each new shell in the workspace as it starts (not SSH tabs); the app decides
+    /// which terminals count.
+    pub startup: Option<String>,
+    /// The pane filling the whole workspace while the others are hidden
+    /// ([`Command::ToggleMaximize`]). Always the focused pane: focusing another pane, a split or
+    /// a close ends it. Not saved with the session.
+    pub maximized: Option<PaneId>,
+}
+
+impl Workspace {
+    /// The panes on screen in `area` and where: the maximized pane alone over all of it, else
+    /// every pane of the layout.
+    pub fn shown_panes(&self, area: Rect) -> Vec<(PaneId, Rect)> {
+        match self.maximized {
+            Some(pane) => vec![(pane, area)],
+            None => self.layout.panes(area),
+        }
+    }
+
+    /// The split dividers on screen in `area`: none while a pane is maximized.
+    pub fn shown_dividers(&self, area: Rect) -> Vec<Divider> {
+        if self.maximized.is_some() {
+            Vec::new()
+        } else {
+            self.layout.dividers(area)
+        }
+    }
 }
 
 /// Workspaces shown together under a collapsible header. A group's workspaces are always next
@@ -116,6 +145,9 @@ pub struct Tab {
     pub kind: TabKind,
     /// The latest notification a program in this tab raised, until the user interacts with it.
     pub attention: Option<Notice>,
+    /// Text a trigger set, shown in place of the tab's usual badge until the user interacts
+    /// with it (cleared along with `attention`).
+    pub badge: Option<String>,
     /// A coding agent (Claude Code) running in this tab, as reported by its hooks.
     pub agent: Option<Agent>,
     /// The shell's working directory, when it reports one (OSC 7).
@@ -309,6 +341,11 @@ pub enum Command {
     /// Sets or clears (back to the home directory) the workspace's folder; a blank path clears
     /// it.
     SetWorkspaceCwd(WorkspaceId, Option<String>),
+    /// Sets the environment variables the workspace's new terminals get (names the app has
+    /// checked); entries with a blank name are dropped.
+    SetWorkspaceEnv(WorkspaceId, Vec<(String, String)>),
+    /// Sets or clears the command typed into the workspace's new shells; blank clears it.
+    SetWorkspaceStartup(WorkspaceId, Option<String>),
     /// Moves every pane of `from` into `into`, beside its own panes (a 50/50 split, `from`'s on
     /// the right), and removes `from` from the sidebar; `into` becomes active with `from`'s
     /// focused pane focused. Sessions and browsers keep running. Ignored when they're the same
@@ -381,6 +418,23 @@ pub enum Command {
     /// Focuses the nearest pane past the focused pane's edge in the active workspace (see
     /// [`crate::neighbour`]); ignored when there's none.
     FocusDirection(Direction),
+    /// Makes the active workspace's focused pane fill the workspace, hiding the others, or
+    /// brings the layout back. Ignored with a single pane.
+    ToggleMaximize,
+    /// Gives the active workspace's panes equal shares: panes side by side along one axis get
+    /// the same width (or height).
+    EqualizePanes,
+    /// Swaps the focused pane with its neighbour in a direction (as [`Command::FocusDirection`]
+    /// finds it); the pane keeps focus in its new place. Ignored when there's none.
+    SwapPane(Direction),
+    /// Moves every pane of the active workspace one place along in leaf order (left to right,
+    /// top to bottom), the last to the first place; the focused pane keeps focus. Ignored with a
+    /// single pane.
+    RotatePanes,
+    /// Shows the next tab waiting for the user, in the order their notices arrived: the one
+    /// after the focused tab when that's waiting too, else the oldest, wrapping around. Like any
+    /// selection it leaves the notice in place. Ignored when nothing is waiting.
+    NextWaiting,
     /// Sets the ratio of the split at `path` in `workspace`, clamped to
     /// `MIN_RATIO..=1 - MIN_RATIO`. Ignored when `path` doesn't lead to a split or `ratio` isn't
     /// finite. Sent repeatedly while a divider is dragged.
@@ -462,7 +516,10 @@ pub enum Command {
         /// The notification's text.
         body: String,
     },
-    /// The user typed into or clicked the tab: drops its notice.
+    /// Sets the badge of the session's tab ([`Tab::badge`]); a blank one clears it. Ignored
+    /// when the tab or its workspace is muted.
+    SetTabBadge(SessionId, Option<String>),
+    /// The user typed into or clicked the tab: drops its notice and its trigger badge.
     ClearAttention(TabId),
     /// An agent in the tab reported its state. `session_id` and `cwd` are kept when `None`.
     /// Creates [`Tab::agent`] if the tab had none. `detail` is replaced every time (a blank one
@@ -685,6 +742,9 @@ impl Model {
                 color: None,
                 group: None,
                 cwd: None,
+                env: Vec::new(),
+                startup: None,
+                maximized: None,
             });
         }
         model.active = model.workspaces[active.min(model.workspaces.len() - 1)].id;
@@ -832,9 +892,12 @@ impl Model {
 
     /// Whether the tab is on screen: the active tab of a pane in the active workspace.
     pub fn tab_visible(&self, tab: TabId) -> bool {
-        self.active_workspace()
-            .layout
-            .leaves()
+        let ws = self.active_workspace();
+        let shown = match ws.maximized {
+            Some(pane) => vec![pane],
+            None => ws.layout.leaves(),
+        };
+        shown
             .iter()
             .filter_map(|p| self.panes.get(p))
             .any(|p| p.active == tab)
@@ -860,6 +923,17 @@ impl Model {
             .flat_map(|p| &p.tabs)
             .filter_map(|t| self.tabs.get(t)?.attention.as_ref())
             .max_by_key(|n| n.seq)
+    }
+
+    /// Every tab waiting for the user (with a notice), oldest notice first.
+    pub fn waiting_tabs(&self) -> Vec<TabId> {
+        let mut waiting: Vec<(u64, TabId)> = self
+            .tabs
+            .values()
+            .filter_map(|t| Some((t.attention.as_ref()?.seq, t.id)))
+            .collect();
+        waiting.sort_unstable();
+        waiting.into_iter().map(|(_, tab)| tab).collect()
     }
 
     /// Every session a live tab refers to.
@@ -895,6 +969,15 @@ impl Model {
             Command::SetWorkspaceCwd(id, cwd) => {
                 self.edit_workspace(id, |w| w.cwd = non_blank(cwd))
             }
+            Command::SetWorkspaceEnv(id, env) => self.edit_workspace(id, |w| {
+                w.env = env
+                    .into_iter()
+                    .filter(|(name, _)| !name.trim().is_empty())
+                    .collect();
+            }),
+            Command::SetWorkspaceStartup(id, startup) => {
+                self.edit_workspace(id, |w| w.startup = non_blank(startup))
+            }
             Command::SetWorkspaceMuted(id, muted) => self.set_workspace_muted(id, muted),
             Command::SetWorkspacePinned(id, pinned) => self.set_pinned_block(id, pinned),
 
@@ -918,6 +1001,23 @@ impl Model {
             Command::ClosePane => self.close_focused_pane(&mut effects),
             Command::FocusPane(pane) => self.focus_pane(pane),
             Command::FocusDirection(direction) => self.focus_direction(direction),
+            Command::ToggleMaximize => self.toggle_maximize(),
+            Command::EqualizePanes => {
+                self.workspace_mut(self.active).layout.equalize(None);
+            }
+            Command::SwapPane(direction) => self.swap_pane(direction),
+            Command::RotatePanes => self.rotate_panes(),
+            Command::NextWaiting => {
+                let waiting = self.waiting_tabs();
+                let focused = self.focused_tab().id;
+                let next = match waiting.iter().position(|t| *t == focused) {
+                    Some(at) => waiting.get(at + 1).or(waiting.first()),
+                    None => waiting.first(),
+                };
+                if let Some(&tab) = next {
+                    self.select_tab(tab);
+                }
+            }
             Command::SetSplitRatio {
                 workspace,
                 path,
@@ -951,7 +1051,17 @@ impl Model {
                 title,
                 body,
             } => self.notify(session, title, body),
-            Command::ClearAttention(tab) => self.edit_tab(tab, |t| t.attention = None),
+            Command::SetTabBadge(session, badge) => {
+                if let Some(tab) = self.tab_for_session(session)
+                    && !self.is_muted(tab)
+                {
+                    self.edit_tab(tab, |t| t.badge = non_blank(badge));
+                }
+            }
+            Command::ClearAttention(tab) => self.edit_tab(tab, |t| {
+                t.attention = None;
+                t.badge = None;
+            }),
             Command::SetAgent {
                 tab,
                 state,
@@ -984,6 +1094,13 @@ impl Model {
         // Closing or moving a group's last workspace can leave the group empty; dropping it here
         // keeps every command from having to.
         self.drop_empty_groups();
+        // Likewise a maximized pane ends whenever focus leaves it (a focus move, a split, a
+        // close, a tab dragged elsewhere), so no command has to undo it.
+        for ws in &mut self.workspaces {
+            if ws.maximized != Some(ws.focused) {
+                ws.maximized = None;
+            }
+        }
         debug_assert_eq!(self.check(), Ok(()));
         effects
     }

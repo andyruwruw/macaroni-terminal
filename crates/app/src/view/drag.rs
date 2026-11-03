@@ -66,9 +66,7 @@ impl App {
             height: self.window_size.height - origin.y - c.s.panes.margin,
         };
         let local = Point::new(at.x - origin.x, at.y - origin.y);
-        let panes = ws
-            .layout
-            .panes(pane_area(c, Size::new(area.width, area.height)));
+        let panes = ws.shown_panes(pane_area(c, Size::new(area.width, area.height)));
 
         // Near the workspace's outer edge: a pane as tall or wide as the whole workspace.
         if panes.len() > 1

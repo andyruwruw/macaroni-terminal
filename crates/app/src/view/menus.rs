@@ -231,6 +231,18 @@ impl App {
                 "Set Active Folder\u{2026}",
                 Some(Message::Folder(FolderMessage::Open(id))),
             ),
+            MenuEntry::item(
+                Icon::Terminal,
+                "Environment & Startup\u{2026}",
+                Some(Message::Env(crate::view::env_dialog::EnvMessage::Open(id))),
+            ),
+            MenuEntry::item(
+                Icon::Plus,
+                "New Worktree\u{2026}",
+                Some(Message::Worktree(
+                    crate::view::worktree_dialog::WorktreeMessage::Open(id),
+                )),
+            ),
             MenuEntry::Separator,
             mute_entry(ws.muted, "Workspace", |mute| {
                 action(WorkspaceAction::Mute(mute))
@@ -275,11 +287,23 @@ impl App {
             _ => (false, false, false),
         };
         let when = |on: bool, a| if on { action(a) } else { None };
+        let workspace = ws.and_then(|w| self.model.workspace(w));
+        let maximized = workspace.is_some_and(|w| w.maximized.is_some());
+        let split = workspace.is_some_and(|w| w.layout.leaves().len() > 1);
         vec![
             pin_entry(tab.pinned, "Tab", |pin| action(TabAction::Pin(pin))),
             MenuEntry::Separator,
             MenuEntry::item(Icon::Pencil, "Rename Tab", action(TabAction::Rename)),
             MenuEntry::submenu(Icon::Move, "Move Tab", MenuPage::Move),
+            if maximized {
+                MenuEntry::item(Icon::Restore, "Restore Panes", action(TabAction::Maximize))
+            } else {
+                MenuEntry::item(
+                    Icon::Maximize,
+                    "Maximize Pane",
+                    when(split, TabAction::Maximize),
+                )
+            },
             MenuEntry::Separator,
             MenuEntry::submenu(Icon::Star, "Icon", MenuPage::Icon),
             MenuEntry::submenu(Icon::Palette, "Color", MenuPage::Color),

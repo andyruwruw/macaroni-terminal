@@ -206,6 +206,44 @@ impl Browser {
         self.view.open_devtools();
     }
 
+    /// Scales the page by `factor` (1.0 is 100%).
+    pub fn zoom(&self, factor: f64) {
+        let _ = self.view.zoom(factor);
+    }
+
+    /// Finds `query` with the page's own `window.find`, which WebView2 and WebKit both have: it
+    /// searches on from the current selection, so a new query clears the selection first to
+    /// start from the top.
+    pub fn find(
+        &self,
+        query: &str,
+        forward: bool,
+        again: bool,
+        done: impl FnOnce(bool) + Send + 'static,
+    ) {
+        let query = serde_json::to_string(query).unwrap_or_default();
+        let script = format!(
+            "(() => {{ if (!{again}) {{ getSelection().removeAllRanges(); }} \
+             return window.find({query}, false, {back}, true, false, false, false); }})()",
+            back = !forward
+        );
+        let done = Mutex::new(Some(done));
+        let callback = move |json: String| {
+            let done = done.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(done) = done {
+                done(json.trim() == "true");
+            }
+        };
+        let _ = self.view.evaluate_script_with_callback(&script, callback);
+    }
+
+    /// Clears the match `find` left selected.
+    pub fn stop_find(&self) {
+        let _ = self
+            .view
+            .evaluate_script("getSelection().removeAllRanges()");
+    }
+
     /// The page's visible text, delivered to `done` once the page answers.
     pub fn read_text(&self, done: impl FnOnce(String) + Send + 'static) {
         // `wry` wants a callback it may call more than once; `done` runs at most once.

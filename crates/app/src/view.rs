@@ -15,7 +15,11 @@
 pub mod folder_dialog;
 
 pub use sidebar::SIDEBAR_SEARCH;
+pub mod dashboard;
+pub mod env_dialog;
 pub mod icon_picker;
+pub mod palette;
+pub mod worktree_dialog;
 
 pub use sidebar::compact_width as sidebar_compact_width;
 pub mod settings;
@@ -197,6 +201,10 @@ impl App {
         layers.extend(self.menu_layers());
         layers.extend(self.icon_picker_view());
         layers.extend(self.folder_dialog_view());
+        layers.extend(self.worktree_dialog_view());
+        layers.extend(self.env_dialog_view());
+        layers.extend(self.dashboard_view());
+        layers.extend(self.palette_view());
         layers.extend(self.settings_view());
         stack(layers).into()
     }

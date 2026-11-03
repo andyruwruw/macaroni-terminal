@@ -38,6 +38,16 @@ impl Model {
         if self.workspace(self.active).is_none() {
             return Err("active workspace missing".into());
         }
+        if let Some(ws) = self
+            .workspaces
+            .iter()
+            .find(|w| w.maximized.is_some_and(|p| p != w.focused))
+        {
+            return Err(format!(
+                "workspace {:?} maximizes a pane it hasn't focused",
+                ws.id
+            ));
+        }
         // `false < true`, so sorting by "not pinned" means every pinned workspace comes first.
         if !self.workspaces.is_sorted_by_key(|w| !w.pinned) {
             return Err("a pinned workspace after an unpinned one".into());

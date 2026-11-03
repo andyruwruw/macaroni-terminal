@@ -60,6 +60,7 @@ mod chromium;
 mod drag_area;
 mod fonts;
 mod gap_line;
+mod git;
 mod glass;
 mod hair_line;
 mod icons;
@@ -80,11 +81,12 @@ mod side_line;
 mod state;
 mod terminal;
 mod theme;
+mod triggers;
 mod update;
 mod view;
 mod vscode;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -93,7 +95,7 @@ use iced::futures::channel::mpsc::{UnboundedSender, unbounded};
 use iced::futures::{SinkExt, Stream, StreamExt};
 use iced::{Event, Size, Subscription, Task, event, mouse, window};
 use macaroni_config::Config;
-use macaroni_core::{BrowserId, Model, PaneId, SessionId, TabId, TabKind};
+use macaroni_core::{BrowserId, Model, PaneId, SessionId, TabId, TabKind, WorkspaceId};
 use macaroni_term::shell::{self, ShellOption};
 use macaroni_term::{GridSize, SessionEvent, Snapshot, is_openable};
 
@@ -127,8 +129,26 @@ const MAX_FONT_SIZE: f32 = 72.0;
 const EVENT_BUFFER: usize = 256;
 /// How many config change notices the subscription's output holds before forwarding waits.
 const CONFIG_EVENT_BUFFER: usize = 8;
+/// How many closed tabs `reopen_tab` can bring back.
+const CLOSED_TABS_KEPT: usize = 20;
+
+/// A closed tab, kept so `reopen_tab` can bring it back: what it was (as a session save would
+/// keep it), and where.
+#[derive(Debug, Clone)]
+struct ClosedTab {
+    /// Its directory, Claude Code session, address, name and look.
+    saved: session::SavedTab,
+    /// The pane it was in.
+    pane: PaneId,
+    /// The workspace that pane was in.
+    workspace: WorkspaceId,
+}
+
 /// How often unsaved session changes are checked for a save that's come due.
 const SAVE_TICK: Duration = Duration::from_secs(1);
+/// How often workspaces' git branches and dirty marks are looked up, while the sidebar shows
+/// them.
+const GIT_TICK: Duration = Duration::from_secs(3);
 
 /// Runs the app, or a Chromium helper process when CEF started this executable as one.
 fn main() -> iced::Result {
@@ -138,6 +158,7 @@ fn main() -> iced::Result {
     if let Some(code) = macaroni_browser::helper_process(&chromium::dir()) {
         std::process::exit(code);
     }
+    notifications::register();
     fonts::load();
     let result = iced::application(App::new, App::update, App::view)
         .title(App::title)
@@ -202,6 +223,8 @@ struct App {
     config_errors: Vec<String>,
     /// Shortcuts in effect, for terminal views and keys nothing else handled.
     keymap: Keymap,
+    /// `[[trigger]]`, compiled; set by `apply_config`.
+    triggers: triggers::Triggers,
     /// The terminal colors from the theme.
     palette: Palette,
     /// The interface's colors and sizes, derived from the palette and the config.
@@ -227,6 +250,28 @@ struct App {
     icon_picker: Option<view::icon_picker::IconPicker>,
     /// The open workspace folder dialog.
     folder_dialog: Option<view::folder_dialog::FolderDialog>,
+    /// The command palette, while it's open.
+    command_palette: Option<view::palette::Palette>,
+    /// The new worktree dialog, while it's open.
+    worktree_dialog: Option<view::worktree_dialog::WorktreeDialog>,
+    /// The workspace environment dialog, while it's open.
+    env_dialog: Option<view::env_dialog::EnvDialog>,
+    /// Each terminal's text file in the scrollback folder, written on quit for the final save
+    /// (`[session] keep_scrollback`); empty otherwise.
+    scrollback_files: BTreeMap<TabId, String>,
+    /// Recently closed tabs, newest last (`reopen_tab`).
+    closed_tabs: Vec<ClosedTab>,
+    /// The agent dashboard is open.
+    dashboard: bool,
+    /// Letters show over the panes, waiting for the key that picks one (`jump_to_pane`).
+    pane_letters: bool,
+    /// Tabs whose agent's permission prompt was answered from a notification or the dashboard,
+    /// until the agent reports again; see `App::asks_permission`.
+    answered: BTreeSet<TabId>,
+    /// When each agent entered the state it's in, for the dashboard: the state, and when.
+    agent_since: HashMap<TabId, (macaroni_core::AgentState, Instant)>,
+    /// Text to type into a tab's terminal once it starts (`claude` for a new worktree).
+    startup_input: BTreeMap<TabId, String>,
     /// The sidebar's dragged width and whether it's folded away (see `update/sidebar.rs`).
     sidebar: session::SidebarLayout,
     /// Whether the sidebar's edge is being dragged.
@@ -272,6 +317,10 @@ struct App {
     session_saved: Option<Instant>,
     /// The model changed since the session was last written.
     session_dirty: bool,
+    /// Each workspace folder's git branch and dirty mark, by folder ([`git::look`]).
+    git: HashMap<String, git::Repo>,
+    /// A [`git::look`] is running; ticks meanwhile are skipped.
+    git_busy: bool,
     /// Shells for the new-tab menu, the default first.
     shells: Vec<ShellOption>,
     /// VS Code's `code` command, for the new-tab menu, if installed.
@@ -378,6 +427,7 @@ impl App {
             config: defaults,
             config_errors: Vec::new(),
             keymap: Keymap::new(&[]).0,
+            triggers: triggers::Triggers::default(),
             palette,
             chrome,
             metrics: Metrics::measure(
@@ -394,6 +444,16 @@ impl App {
             settings: None,
             icon_picker: None,
             folder_dialog: None,
+            command_palette: None,
+            worktree_dialog: None,
+            startup_input: BTreeMap::new(),
+            env_dialog: None,
+            scrollback_files: BTreeMap::new(),
+            closed_tabs: Vec::new(),
+            dashboard: false,
+            pane_letters: false,
+            answered: BTreeSet::new(),
+            agent_since: HashMap::new(),
             sidebar: session::SidebarLayout::default(),
             sidebar_drag: false,
             sidebar_query: String::new(),
@@ -413,6 +473,8 @@ impl App {
             restored,
             session_saved: None,
             session_dirty: false,
+            git: HashMap::new(),
+            git_busy: false,
             shells: shell::available(),
             vscode: shell::vscode(),
             tab_shells: BTreeMap::new(),
@@ -513,6 +575,11 @@ impl App {
             }
             Message::Settings(message) => self.settings_update(message),
             Message::IconPicker(message) => self.icon_picker_update(message),
+            Message::Palette(message) => self.palette_update(message),
+            Message::Worktree(message) => self.worktree_update(message),
+            Message::Dashboard(message) => self.dashboard_update(message),
+            Message::Env(message) => self.env_update(message),
+            Message::PaneLetter(letter) => self.pane_letter(letter),
             Message::Folder(message) => self.folder_update(message),
             Message::SettingsClose => {
                 self.settings = None;
@@ -577,6 +644,14 @@ impl App {
             Message::TabScroll(pane, delta) => self.tab_scroll(pane, delta),
             Message::TabViewport(pane, viewport) => self.tab_viewport(pane, viewport),
             Message::Frame => Task::none(),
+            Message::GitTick => self.git_tick(),
+            Message::NotificationClicked(tab) => self.notification_clicked(tab),
+            Message::PermissionAnswer(tab, allow) => self.answer_permission(tab, allow),
+            Message::GitInfo(repos) => {
+                self.git = repos;
+                self.git_busy = false;
+                Task::none()
+            }
             Message::SaveTick => {
                 self.save_session(false);
                 Task::none()
@@ -673,12 +748,27 @@ impl App {
         } else {
             Subscription::none()
         };
+        // While the dashboard shows, a redraw a second keeps its times counting.
+        let dashboard = if self.dashboard {
+            Subscription::run(dashboard_ticks)
+        } else {
+            Subscription::none()
+        };
+        let git = if self.sidebar_shows_git() {
+            Subscription::run(git_ticks)
+        } else {
+            Subscription::none()
+        };
         let frames = if self.fades.animating() {
             window::frames().map(|_| Message::Frame)
         } else {
             Subscription::none()
         };
-        let search = if self.search.is_some() {
+        let search = if self.pane_letters {
+            event::listen_with(pane_letter_keys)
+        } else if self.command_palette.is_some() {
+            event::listen_with(palette_keys)
+        } else if self.search.is_some() {
             event::listen_with(search_keys)
         } else if self.settings.is_some() {
             event::listen_with(settings_keys)
@@ -692,6 +782,11 @@ impl App {
             || self.settings.is_some()
             || self.icon_picker.is_some()
             || self.folder_dialog.is_some()
+            || self.command_palette.is_some()
+            || self.worktree_dialog.is_some()
+            || self.dashboard
+            || self.pane_letters
+            || self.env_dialog.is_some()
             || self.sidebar_search_focused
         {
             event::listen_with(escape_keys)
@@ -721,6 +816,9 @@ impl App {
             _ => Subscription::none(),
         };
         Subscription::batch([
+            dashboard,
+            notifications::clicks(),
+            git,
             vscode,
             search,
             dismiss,
@@ -774,6 +872,39 @@ fn search_keys(event: Event, _: event::Status, _: window::Id) -> Option<Message>
             key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
             ..
         }) => Some(Message::SearchClose),
+        _ => None,
+    }
+}
+
+/// The next key while pane letters show: a letter picks its pane; any other key but a modifier
+/// alone (and Escape, which `dismiss` handles) cancels, as `PaneLetter(' ')`.
+fn pane_letter_keys(event: Event, _: event::Status, _: window::Id) -> Option<Message> {
+    use iced::keyboard::{Event::KeyPressed, Key, key::Named};
+    match event {
+        Event::Keyboard(KeyPressed { key, .. }) => match key {
+            Key::Character(c) => Some(Message::PaneLetter(c.chars().next().unwrap_or(' '))),
+            Key::Named(
+                Named::Escape | Named::Shift | Named::Control | Named::Alt | Named::Super,
+            ) => None,
+            _ => Some(Message::PaneLetter(' ')),
+        },
+        _ => None,
+    }
+}
+
+/// Up and Down, while the command palette is open: move its highlight.
+fn palette_keys(event: Event, _: event::Status, _: window::Id) -> Option<Message> {
+    use iced::keyboard::{Event::KeyPressed, Key::Named, key::Named as N};
+    use view::palette::PaletteMessage::Move;
+    match event {
+        Event::Keyboard(KeyPressed {
+            key: Named(N::ArrowUp),
+            ..
+        }) => Some(Message::Palette(Move(-1))),
+        Event::Keyboard(KeyPressed {
+            key: Named(N::ArrowDown),
+            ..
+        }) => Some(Message::Palette(Move(1))),
         _ => None,
     }
 }
@@ -851,6 +982,38 @@ fn session_events() -> impl Stream<Item = Message> {
         let _ = output.send(Message::EventsReady(sender)).await;
         while let Some((id, event)) = receiver.next().await {
             let _ = output.send(Message::Session(id, event)).await;
+        }
+    })
+}
+
+/// [`Message::Frame`] every second, for the agent dashboard's times, from a thread that stops
+/// once the subscription is dropped.
+fn dashboard_ticks() -> impl Stream<Item = Message> {
+    iced::stream::channel(1, async |mut output| {
+        let (sender, mut receiver) = unbounded();
+        std::thread::spawn(move || {
+            while sender.unbounded_send(()).is_ok() {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        });
+        while receiver.next().await.is_some() {
+            let _ = output.send(Message::Frame).await;
+        }
+    })
+}
+
+/// [`Message::GitTick`] at once and then every [`GIT_TICK`], from a thread that stops once the
+/// subscription is dropped.
+fn git_ticks() -> impl Stream<Item = Message> {
+    iced::stream::channel(1, async |mut output| {
+        let (sender, mut receiver) = unbounded();
+        std::thread::spawn(move || {
+            while sender.unbounded_send(()).is_ok() {
+                std::thread::sleep(GIT_TICK);
+            }
+        });
+        while receiver.next().await.is_some() {
+            let _ = output.send(Message::GitTick).await;
         }
     })
 }
@@ -938,6 +1101,43 @@ fn open_in_editor(path: &std::path::Path) {
 /// The user's home directory, from `USERPROFILE` on Windows and `HOME` elsewhere.
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+}
+
+/// Opens a text file from a terminal's output at `line` and `column` (from 1): in VS Code
+/// (`code -g`) when it's installed, else the system's plain text editor (Notepad, or `open -t`
+/// on macOS), which ignore the position. Never the file's default handler: the path came from
+/// untrusted output and could name a program or script. Spawns and doesn't wait.
+fn open_text_file(path: &std::path::Path, line: Option<u32>, column: Option<u32>) {
+    if let Some(code) = macaroni_term::shell::vscode() {
+        let mut target = path.to_string_lossy().into_owned();
+        if let Some(line) = line {
+            target = format!("{target}:{line}");
+            if let Some(column) = column {
+                target = format!("{target}:{column}");
+            }
+        }
+        let mut command = std::process::Command::new(code);
+        command.arg("-g").arg(target);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // `code` is a batch file: without this a console window flashes up.
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let _ = command.spawn();
+        return;
+    }
+    let mut command = if cfg!(windows) {
+        std::process::Command::new("notepad.exe")
+    } else if cfg!(target_os = "macos") {
+        let mut open = std::process::Command::new("open");
+        open.arg("-t");
+        open
+    } else {
+        return;
+    };
+    let _ = command.arg(path).spawn();
 }
 
 /// Runs VS Code's `code` command on `dir` (or with no folder). Spawns a process and doesn't

@@ -33,6 +33,10 @@ To handle a new event, add it to the event list at the top of `claude.rs` and a 
 
 Trap: `macaroni-cli hook` must never fail or print (some hooks' stdout goes into Claude's context) and is a no-op without `MACARONI_TAB_ID` or a reachable app, so the hooks are safe to leave installed.
 
+## Where agents show
+
+The sidebar row and tab (`agent_line`), and the agent dashboard (`agent_dashboard`; see [`app-layout.md`](app-layout.md)), which also shows `Agent.summary` from `macaroni-cli statusline` and how long the agent has been in its state (`App.agent_since`, kept by `ipc.rs` as hooks arrive). To try it without Claude, pipe a hook's JSON into `macaroni-cli hook` with `MACARONI_TAB_ID` set, from bash: PowerShell 5's pipe into a native program doesn't deliver it intact.
+
 ## Notification gating
 
 `App::notify` reads the agent state the hook set just before `notify`: idle means finished (`[agents] notify_finished`), needs input means `notify_input`. Keep the hook's order: state first, then `notify`. Everything after goes through the attention path in [`notifications.md`](notifications.md).

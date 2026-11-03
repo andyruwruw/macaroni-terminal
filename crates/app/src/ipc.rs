@@ -588,6 +588,24 @@ impl App {
             },
         };
         self.run(command);
+        // A new report means any answered prompt is gone; the next one can be answered.
+        self.answered.remove(&tab);
+        // The dashboard's "for 3m": when the agent entered the state it's in now.
+        match self
+            .model
+            .tab(tab)
+            .and_then(|t| t.agent.as_ref())
+            .map(|a| a.state)
+        {
+            Some(now) if self.agent_since.get(&tab).map(|(state, _)| *state) != Some(now) => {
+                self.agent_since
+                    .insert(tab, (now, std::time::Instant::now()));
+            }
+            Some(_) => {}
+            None => {
+                self.agent_since.remove(&tab);
+            }
+        }
         self.broadcast(Event::AgentChanged {
             tab: tab.0,
             state,

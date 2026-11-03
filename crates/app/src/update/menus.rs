@@ -166,6 +166,11 @@ impl App {
             && self.menu.take().is_none()
             && self.icon_picker.take().is_none()
             && self.folder_dialog.take().is_none()
+            && self.command_palette.take().is_none()
+            && self.worktree_dialog.take().is_none()
+            && !std::mem::take(&mut self.dashboard)
+            && !std::mem::take(&mut self.pane_letters)
+            && self.env_dialog.take().is_none()
             && self.settings.take().is_none()
         {
             self.renaming = None;

@@ -22,11 +22,11 @@ TerminalView ──► ViewEvent ──► Message::View(id, ev) ──► App::
 
 ## How `App::view` is built (`view.rs`)
 
-One `stack`, in covering order: `window()`, `resize_edges` (custom frame, not maximized), `drop_marker`, `drag_ghost`, `menu_layers`, icon picker, folder dialog, settings dialog. Overlays are `pin`ned layers; modals put a full-window click catcher under themselves.
+One `stack`, in covering order: `window()`, `resize_edges` (custom frame, not maximized), `drop_marker`, `drag_ghost`, `menu_layers`, icon picker, folder dialog, worktree dialog, environment dialog, agent dashboard, command palette, settings dialog. Pane letters are drawn by `App::pane` itself, over each pane's card. Overlays are `pin`ned layers; modals put a full-window click catcher under themselves.
 
 `App::window`: under glass `backdrop::window` is the bottom layer and the window container stays clear. Then a column of the title bar (`view/title_bar.rs`, only with `CUSTOM_FRAME`, i.e. Windows) and a row of the sidebar (`view/sidebar.rs`, omitted at width 0) and the main area, with `sidebar_edge` stacked over the row. The main area is the Git Bash offer plus `workspace_area`: `responsive(|size| self.workspace(size))` padded by `style.panes.margin` right and bottom, with the config error banner floating over it. The title bar gap is padding inside the main area, so a colored sidebar runs up to the title bar.
 
-`App::workspace` (`view/panes.rs`): `ws.layout.panes(pane_area(c, size))` gives each pane's rect; each pane is a `pin` in one `stack`, plus divider handles from `ws.layout.dividers(area)`. `App::pane` is the tab strip (`view/tabs.rs`) over a card holding a `TerminalView` or `browser_body`.
+`App::workspace` (`view/panes.rs`): `ws.shown_panes(pane_area(c, size))` gives each pane's rect (just the maximized pane while one is); each pane is a `pin` in one `stack`, plus divider handles from `ws.shown_dividers(area)`. `App::pane` is the tab strip (`view/tabs.rs`) over a card holding a `TerminalView` or `browser_body`.
 
 ## Layout math other code depends on
 
@@ -63,7 +63,7 @@ One `stack`, in covering order: `window()`, `resize_edges` (custom frame, not ma
 
 - Width is dragged by `HANDLE_WIDTH` at the right edge, between `compact_width` and the window minus `MIN_PANE_ROOM`, folding below `COLLAPSE_BELOW`. `App::sync_sidebar` writes the width in effect into `Chrome.s.window.sidebar_width`, which everything above reads. `App.sidebar` is saved in `session.json`.
 - `SidebarSize` (`App::sidebar_size`): Full, Narrow, Tiny. All rows share `workspace_interactions`.
-- Rows come from `sidebar_list` (also used by settings previews); item lines are templates filled by `label::fill` from `WorkspaceValues::get`. Groups: `group_block` with a `SideLine` at `group_line_x`.
+- Rows come from `sidebar_list` (also used by settings previews); item lines are templates filled by `label::fill` from `WorkspaceValues::get`. `{branch}` / `{dirty}` / `{sync}` come from `App.git` (`git.rs`): while a template uses them, `git_ticks` fires every `GIT_TICK` and `App::git_tick` runs `git::look` off the UI thread over each workspace's `workspace_dir` (focused tab's cwd, else its folder, else `default_dir`). The branch is read from `HEAD` (worktree `.git` files followed); dirty and the ahead/behind counts (`Repo::sync`, `↑2↓1`) come from one `git status --porcelain=v2 --branch --untracked-files=no` (`parse_status`). Groups: `group_block` with a `SideLine` at `group_line_x`.
 - The list scrolls (`SIDEBAR_SCROLL`) with padding inside the scrollable, so lifted items and the top insertion line aren't clipped.
 - Search focus trap: `text_input` reports no focus change, so `presses` sends `SidebarSearchCheck` on every press and `operation::is_focused` answers `SidebarSearchFocused`. Ending a search uses `focusable::unfocus`.
 
@@ -71,12 +71,14 @@ One `stack`, in covering order: `window()`, `resize_edges` (custom frame, not ma
 
 - `fit_tabs` estimates natural widths; when they don't fit, tabs share the width equally down to `style.tabs.min_width`, then scroll in a `scrollable` with id `tab_strip_id(pane)`. `+` stays outside it. A wrapping `mouse_area` turns unused wheel events into `Message::TabScroll` (`operation::scroll_by`).
 - New tab buttons (`App::new_tab_buttons`, `[tab_items] new_buttons`) sit at the strip's right end: terminal, browser, and VS Code (a web VS Code tab once downloaded, else the desktop app when `code` is found at launch). A `Fill` spacer pushes them (and the find bar) right; `fit_tabs` subtracts `new_buttons_width` from the tabs' room.
+- The find bar (`App.search`, a `SearchTarget` of a terminal or a page; `update/search.rs`) shows in the strip of the pane whose active tab is the terminal it searches (`search_shown`) and takes the new tab buttons' place there; a page's search is a card in the browser pane instead (see [`browser.md`](browser.md)). `fit_tabs` subtracts its width instead, and its field narrows from `SEARCH_WIDTH` to `MIN_SEARCH_WIDTH` in a narrow pane (`search_field_width`) so the buttons never fall off the strip. Enter steps up the scrollback; in the page card it steps down.
 - Hovering a tab shows `App::tab_tip` after `TIP_DELAY`: its icon and whole title, then its agent's `agent_line` and status-line summary (`style.tabs.status_size`). Left off while anything is dragged.
+- A tab's badge is `Tab.badge` (set by a trigger, in `Chrome.attention`) when there is one, else `[tab_items] badge` (`tab_badge`).
 - Revealing the open tab: `on_scroll` reports `Message::TabViewport` into `App.tab_views` (only while overflowing). `App::reveal_tab` scrolls via `tab_span` and retries on the next report (`App.tab_reveals`), because a new tab widens the strip only on the next layout.
 
 ## Focus routing
 
-- A `TerminalView` takes keys and IME only when its pane is focused and nothing else wants typing: the condition in `App::pane` (`renaming`, `search`, `menu`, `settings`, `icon_picker`, `folder_dialog`, `sidebar_search_focused`). A new text-entry surface must be added there and to `dismiss` in `App::subscription` (Escape is only listened for while something is dismissable).
+- A `TerminalView` takes keys and IME only when its pane is focused and nothing else wants typing: the condition in `App::pane` (`renaming`, `search`, `menu`, `settings`, `icon_picker`, `folder_dialog`, `worktree_dialog`, `env_dialog`, `dashboard`, `command_palette`, `pane_letters`, `sidebar_search_focused`). A new text-entry surface must be added there and to `dismiss` in `App::subscription` (Escape is only listened for while something is dismissable).
 - Clicking an unfocused view emits `Clicked` (becomes `SelectTab`).
 - Shortcuts: `TerminalView` asks `Keymap::lookup` before encoding a key and emits `ViewEvent::Action`. With a browser tab focused, `unhandled_keys` (only `Ignored` events) and the page (`App.shared_keymap`) look up instead. All paths end in `App::perform` (`update/shortcuts.rs`).
 - A focused page is another native window, so `clicks` runs while `page_focus` is set and `App::reclaim_focus` takes the keyboard back.
@@ -126,6 +128,29 @@ One `stack`, in covering order: `window()`, `resize_edges` (custom frame, not ma
 - **Don't clip a taller child to hide its border**: iced lays it out within the clip's limits, so it shrinks and draws the border anyway.
 - **`stack` hides the cursor from lower layers only where an upper layer reports an interaction**; modals need a click catcher and `opaque` content.
 - **Windows**: `move_dpi.rs` holds back `WM_DPICHANGED` during a window drag and replays one on release; the custom frame has no system resize, so `resize_edges` provides it.
+
+## Worktree dialog (`view/worktree_dialog.rs`)
+
+Opened from a workspace's menu or `new_worktree` (the active workspace). The repository is the workspace's `workspace_dir`. Create runs `git::add_worktree` off the UI thread (a sibling `<repo>-<branch>` folder; `worktree add <path> <branch>` for an existing branch, `-b` otherwise) and answers with `WorktreeMessage::Created`. Success applies `NewWorkspace`, `RenameWorkspace` and `SetWorkspaceCwd` in one update, which works because sessions spawn lazily (after the folder is set). "Start Claude Code" puts `claude
+` in `App.startup_input` for the new tab; `spawn` writes a tab's startup input right after the session starts (after `resume_agent`).
+
+## Agent dashboard (`view/dashboard.rs`)
+
+`App.dashboard` (a bool; `agent_dashboard` toggles it, `dismiss` closes it). `dashboard_agents` lists every tab with `Tab.agent`, needs-input first, then working, then idle, sidebar order within. Each card shows the tab, its workspace, `agent_line` (the sidebar's state text and color), `Agent.summary` (the status line) and how long it's been in its state: `App.agent_since` (tab to state and `Instant`) is set in `ipc.rs`'s `agent` handler when a hook reports a different state, and dropped when the agent ends. Restored agents have no time until their next hook. `dashboard_ticks` sends `Message::Frame` every second while it's open so the times count. The cards sit in a wrapping `row` in a `scrollable`.
+
+## Command palette (`view/palette.rs`)
+
+`App.command_palette` (not `App.palette`, the color palette). `Action::CommandPalette` opens it; `App::palette_items` lists keymap actions (`keymap::NAMES`, labeled by `keymap::label` with their chord from `named_bindings`), workspaces, every tab, `[[ssh]]` profiles and `Section::shown()` settings pages. `fuzzy` scores in-order letter matches (runs and word starts count more); the best `MAX_SHOWN` show. Up/Down come from `palette_keys` (it takes the `search` subscription's slot while open), Enter is the field's `on_submit`, Escape and the backdrop go through `dismiss`. `palette_run` closes it before running, so a target can open its own dialog. A new action needs a line in `keymap::NAMES` to be listed (`every_palette_action_exists` checks the names resolve). `Palette.waiting` makes it the attention inbox (`show_waiting`): `waiting_items` lists `Model::waiting_tabs` (oldest notice first) and nothing else. `next_waiting` is the model's `Command::NextWaiting`, cycling the same order without opening anything.
+
+`Palette.mode` is `Commands`, `Waiting` or `Search(Vec<Scrollback>)`. Scrollback search (`search_workspace`, `search_all`, `PaletteMessage::OpenSearch`) copies every running terminal's `all_text` once when it opens (`App::scrollbacks`), then `search_items` lists matching lines, smart case like the find bar, newest first per terminal, without fuzzy reordering. Each result's `Target::Found { tab, query, back }` selects the tab and calls `App::find_in_tab`, which opens the find bar with the query and steps `back` matches up from the newest (`back` counts the matches below the line, plus earlier matches on it).
+
+## Pane letters, reopening tabs, workspace environment, scrollback
+
+- `[workspace_items] pane_badge` is filled from the same `WorkspaceValues` as the sidebar (made `pub(super)` for it) and drawn by the workspace layout over each shown pane's top right, below the tab strip, faded (`PANE_BADGE_*` in `view/panes.rs`). It's drawn over the terminal, not behind it: a solid terminal background would hide it.
+- `jump_to_pane` sets `App.pane_letters` (only with more than one pane shown); `App::pane` draws `pane_letter(i)` (A, B, ...) over each of `shown_panes(Rect::UNIT)` in that order, and `pane_letter_keys` takes the next key: a letter focuses that pane (`App::pane_letter`), anything else just closes the letters.
+- Closed tabs: `App::apply` records the tabs a close command (`CloseTab`, `CloseActiveTab`, `ClosePane`, `CloseWorkspace`, `CloseActiveWorkspace`) removes, as `ClosedTab { saved: session::saved_tab(..), pane, workspace }` in `App.closed_tabs` (newest last, `CLOSED_TABS_KEPT`), unless the command quits. `reopen_tab` (`update/effects.rs`) focuses the old pane (or workspace), opens a `NewTab` whose new session gets the saved tab through `App.restored` (folder, `claude --resume`), or `OpenBrowser` at the page, then reapplies name, icon, color and mute.
+- Workspace env and startup: the workspace menu's Environment & Startup… opens `view/env_dialog.rs` (`EnvDialog`, a `NAME=value` per line editor parsed by `parse_env`, and the command). `session_env` puts the workspace's variables before macaroni's own, and the spawn path types the startup command into each new shell after showing saved scrollback and before `claude --resume` (skipped for SSH tabs).
+- Scrollback across restarts: on close, `write_scrollback` (`update/window.rs`) saves each running terminal's `all_text` (last `SCROLLBACK_KEPT_BYTES`) to `scrollback/<millis>-<tab>.txt` next to the config, records the file in `App.scrollback_files` for `session::capture`, and deletes files nothing refers to; `[session] keep_scrollback = false` removes the folder. On restore `show_saved_scrollback` prints the text dimmed (control characters stripped) before the shell's first prompt, then deletes the file. `save_scrollback` writes a terminal's text through an rfd save dialog.
 
 ## Driving the UI from a script (Windows)
 

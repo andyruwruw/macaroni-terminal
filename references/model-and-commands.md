@@ -7,10 +7,10 @@
 ```
 Command ──► Model::apply ──► Vec<Effect>   (the app runs effects in update/effects.rs::run_effects)
 Model { workspaces (sidebar order), active, groups, panes, tabs, next_id }
-Workspace { id, name, layout: SplitNode, focused: PaneId, cwd, group }
+Workspace { id, name, layout: SplitNode, focused: PaneId, cwd, group, maximized, env, startup }
 SplitNode = Leaf(PaneId) | Split { axis: Row|Column, ratio, first, second }
 Pane { id, tabs: Vec<TabId>, active }
-Tab { id, title, name, kind: TabKind, attention, agent, cwd, url, muted, pinned }
+Tab { id, title, name, kind: TabKind, attention, badge, agent, cwd, url, muted, pinned }
 ```
 
 - **`Model::apply` is the only way to change state.** Keybindings, menus, the sidebar and the socket API all produce `Command`s. Side effects are returned, never performed: `SpawnSession`, `KillSession`, `OpenBrowser`, `CloseBrowser`, `Quit`.
@@ -35,13 +35,17 @@ Tab { id, title, name, kind: TabKind, attention, agent, cwd, url, muted, pinned 
 ## Behaviour that code relies on
 
 - Closing cascades: last tab closes the pane, last pane closes the workspace. Closing the last workspace leaves the model unchanged and emits `KillSession`/`CloseBrowser` for everything, then `Quit`.
+- `Workspace.maximized` (`ToggleMaximize`) is only ever the focused pane: `Model::apply` clears it after any command that moves focus off it (focus moves, splits, closes, tab moves), and `check` enforces it. It isn't saved. Draw panes with `Workspace::shown_panes` / `shown_dividers` and ask `tab_visible`, which all honor it; `layout.panes` alone would draw the hidden panes (and browser pages over the maximized one).
 - When a pane closes, focus goes to the nearest leaf of its sibling subtree (`SplitNode::neighbour_of`). `FocusDirection` uses geometry: `layout.panes(Rect::UNIT)` plus `layout::neighbour`.
 - `SessionExited` closes the tab and emits `KillSession` so the app drops the dead `Session`. `BrowserClosed` does the same for a page that closed itself.
 - `MoveTab { tab, to: MoveTo::... }` re-parents without effects. A pane left empty is detached (`detach_empty_pane`), not killed. Pointless moves are ignored.
 - Sidebar order is a list of blocks (a group's workspaces, or one ungrouped workspace; `take_blocks`). `PlaceWorkspace` is what sidebar drags apply; `insert_block` keeps pinned-first; `SetWorkspacePinned` on a grouped workspace pins the whole group (`set_pinned_block`); joining a group (`set_workspace_group`) takes its pinned state.
 - `SetTabPinned` is a no-op when the flag is unchanged; session restore relies on this.
-- `Tab::label()` is name-else-title; use it wherever a tab is shown. `Model::is_muted(tab)` checks tab and workspace mute; `Notify` on a muted tab does nothing.
+- `Tab::label()` is name-else-title; use it wherever a tab is shown. `Model::is_muted(tab)` checks tab and workspace mute; `Notify` and `SetTabBadge` on a muted tab do nothing.
+- `Tab.badge` is what a trigger set (`SetTabBadge`, by session); the tab strip shows it instead of `[tab_items] badge`. `ClearAttention` and muting clear it with the notice.
+- `Workspace.env` (`SetWorkspaceEnv`, blank names dropped) and `Workspace.startup` (`SetWorkspaceStartup`, blank clears) are stored uninterpreted; the app passes the env to new terminals and types the command into each new shell (not SSH), and saves both with the session.
 - Icon/color names and `Workspace.cwd` are stored uninterpreted; the app maps and validates them.
+- `EqualizePanes` sets ratios with `SplitNode::equalize`: a run of same-axis splits shares out evenly by leaf count, so three side-by-side panes get a third each. `SwapPane(direction)` and `RotatePanes` only relabel leaves (`map_leaves`): the shape and ratios stay, panes (and their tabs) move, and focus stays on the same `PaneId`.
 - `layout.dividers(area)` gives each split's `path` (`Vec<Side>` from the root) for `SetSplitRatio`.
 - `Model::spec()` / `Model::restore(spec, active)` convert to and from plain data (`WorkspaceSpec`, `LayoutSpec`, `TabSpec`). Restore uses fresh ids, clamps bad values, and returns tabs in the same fixed order as `spec()`, which the app's `session.rs` uses to pair saved per-tab details.
 

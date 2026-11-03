@@ -65,10 +65,12 @@ impl Model {
                 .flat_map(|p| self.panes[p].tabs.clone())
                 .collect();
             for tab in tabs {
-                self.tabs
+                let tab = self
+                    .tabs
                     .get_mut(&tab)
-                    .expect("every tab in a pane is in the model")
-                    .attention = None;
+                    .expect("every tab in a pane is in the model");
+                tab.attention = None;
+                tab.badge = None;
             }
         }
     }
@@ -94,6 +96,9 @@ impl Model {
             color: None,
             group: None,
             cwd: None,
+            env: Vec::new(),
+            startup: None,
+            maximized: None,
         });
         self.active = id;
         id

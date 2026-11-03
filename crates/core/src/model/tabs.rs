@@ -163,6 +163,7 @@ impl Model {
             tab.muted = muted;
             if muted {
                 tab.attention = None;
+                tab.badge = None;
             }
         });
     }
@@ -349,6 +350,7 @@ fn blank_tab(id: TabId, kind: TabKind, url: Option<String>) -> Tab {
         name: None,
         kind,
         attention: None,
+        badge: None,
         agent: None,
         cwd: None,
         url,

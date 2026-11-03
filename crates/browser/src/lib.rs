@@ -194,6 +194,30 @@ impl Browser {
         each!(self, b => b.devtools())
     }
 
+    /// Scales the page by `factor` (1.0 is 100%).
+    pub fn zoom(&self, factor: f64) {
+        each!(self, b => b.zoom(factor))
+    }
+
+    /// Finds `query` in the page, ignoring case, and selects and scrolls to the match: from the
+    /// top for a new query (`again` false), else the next match `forward` or back, wrapping
+    /// around. `done` gets whether anything matched, possibly on another thread; Chromium
+    /// doesn't say, so it always gets `true` there.
+    pub fn find(
+        &self,
+        query: &str,
+        forward: bool,
+        again: bool,
+        done: impl FnOnce(bool) + Send + 'static,
+    ) {
+        each!(self, b => b.find(query, forward, again, done))
+    }
+
+    /// Ends finding in the page, clearing the match it selected.
+    pub fn stop_find(&self) {
+        each!(self, b => b.stop_find())
+    }
+
     /// The page's visible text, delivered to `done`, possibly on another thread. `done` gets an
     /// empty string when the page can't be read.
     pub fn read_text(&self, done: impl FnOnce(String) + Send + 'static) {

@@ -49,6 +49,8 @@ fn restore_workspaces(
         model.apply(Command::SetWorkspaceIcon(id, saved.icon.clone()));
         model.apply(Command::SetWorkspaceColor(id, saved.color.clone()));
         model.apply(Command::SetWorkspaceCwd(id, saved.cwd.clone()));
+        model.apply(Command::SetWorkspaceEnv(id, saved.env.clone()));
+        model.apply(Command::SetWorkspaceStartup(id, saved.startup.clone()));
         if let Some(index) = saved.group {
             join_saved_group(model, id, index, saved_groups, &mut groups);
         }

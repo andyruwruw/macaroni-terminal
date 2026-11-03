@@ -17,7 +17,7 @@ mod items;
 mod menus;
 mod rename;
 mod search;
-mod shortcuts;
+pub(crate) mod shortcuts;
 mod sidebar;
 mod terminals;
 mod window;

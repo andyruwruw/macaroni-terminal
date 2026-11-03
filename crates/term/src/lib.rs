@@ -4,7 +4,9 @@
 //! [`Session`] owns the PTY, the child process and the reader, waiter and sync threads, and
 //! reports [`SessionEvent`]s through a callback. Output goes through [`OscSniffer`] (agent
 //! notifications and OSC 7 directories) and then the [`Emulator`] ([`AlacrittyEmulator`], the
-//! only implementation).
+//! only implementation). When the app gives it triggers, [`Lines`] also turns it back into plain
+//! lines for them to match. Inline images (OSC 1337) are kept by the emulator and listed in the
+//! snapshot where they show.
 //! The app reads the screen with [`Session::snapshot`], which copies it into a [`Snapshot`] made of
 //! this crate's own types in `grid`, so no `alacritty_terminal` type leaks out.
 //!
@@ -15,7 +17,9 @@
 
 mod emulator;
 mod grid;
+mod images;
 mod keys;
+mod lines;
 mod links;
 mod mouse;
 mod osc;
@@ -27,8 +31,10 @@ pub use grid::{
     Cell, CellFlags, CellSide, Color, Cursor, CursorShape, DefaultColors, GridPoint, GridSize,
     Modes, Rgb, Scroll, SearchDirection, SelectionKind, Snapshot,
 };
+pub use images::{IMAGE_PREFIX, ImagePlacement, InlineImage};
 pub use keys::{Key, Mods, encode_key, encode_paste};
-pub use links::{Link, is_openable, url_at};
+pub use lines::Lines;
+pub use links::{FileRef, Link, file_at, is_openable, url_at};
 pub use mouse::{MouseButton, MouseEvent, encode_mouse};
 pub use osc::{Notification, OscEvent, OscSniffer};
 pub use session::{Session, SessionConfig, SessionEvent};
