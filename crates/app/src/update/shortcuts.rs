@@ -43,14 +43,21 @@ impl App {
     /// Carries out a keymap action. Opening the config spawns the system's editor.
     pub(crate) fn perform(&mut self, action: Action) -> Task<Message> {
         match action {
-            Action::Command(command) => self.apply(command),
+            Action::Command(command) => match self.tmux_command(&command) {
+                Some(task) => task,
+                None => self.apply(command),
+            },
             Action::OpenSettings => self.open_settings(),
             Action::Zoom(zoom) => match self.model.focused_tab().kind {
                 macaroni_core::TabKind::Browser(id) => {
                     self.zoom_page(id, zoom);
                     Task::none()
                 }
-                macaroni_core::TabKind::Terminal(_) => self.zoom_font(zoom),
+                macaroni_core::TabKind::Terminal(_)
+                | macaroni_core::TabKind::Git
+                | macaroni_core::TabKind::Tmux
+                | macaroni_core::TabKind::AgentSetup
+                | macaroni_core::TabKind::File => self.zoom_font(zoom),
             },
             Action::OpenConfig => {
                 open_in_editor(&Config::path(&self.config_dir));
@@ -129,6 +136,10 @@ impl App {
             Action::AgentDashboard => {
                 self.dashboard_update(crate::view::dashboard::DashboardMessage::Toggle)
             }
+            Action::GitTab => self.open_git_tab(self.model.active_workspace().focused),
+            Action::AgentSetup => self.open_agent_setup_tab(self.model.active_workspace().focused),
+            Action::OpenFile => self.pick_file(self.model.active_workspace().focused),
+            Action::CycleRegion(forward) => self.cycle_region(forward),
             Action::CopyOutput => {
                 let output = self
                     .focused_session()
@@ -145,6 +156,9 @@ impl App {
             }
             Action::ShowWaiting => {
                 self.palette_update(crate::view::palette::PaletteMessage::OpenWaiting)
+            }
+            Action::CommandHistory => {
+                self.palette_update(crate::view::palette::PaletteMessage::OpenHistory(None))
             }
         }
     }
@@ -180,6 +194,27 @@ impl App {
         }
         // Any other key lets go of the focused item, as typing in a terminal does.
         self.item_focus = None;
+        let (tab, kind) = {
+            let tab = self.model.focused_tab();
+            (tab.id, tab.kind.clone())
+        };
+        if kind == macaroni_core::TabKind::Git
+            && let Some(task) = self.git_key(tab, &key, mods)
+        {
+            return task;
+        }
+        if kind == macaroni_core::TabKind::AgentSetup
+            && mods.is_empty()
+            && let Some(task) = self.agent_key(tab, &key)
+        {
+            return task;
+        }
+        if kind == macaroni_core::TabKind::File
+            && mods.is_empty()
+            && let Some(task) = self.file_key(tab, &key)
+        {
+            return task;
+        }
         match self.keymap.lookup(&key, physical, mods) {
             Some(action) => self.perform(action),
             None => Task::none(),
@@ -189,7 +224,14 @@ impl App {
     /// Copies the focused terminal's selection to the clipboard, then clears it.
     fn copy_selection(&mut self) -> Task<Message> {
         let Some(id) = self.focused_session() else {
-            return Task::none();
+            let tab = self.model.focused_tab().id;
+            return match self
+                .file_selection(tab)
+                .or_else(|| self.agent_selection(tab))
+            {
+                Some(text) => iced::clipboard::write(text),
+                None => Task::none(),
+            };
         };
         let Some(r) = self.running.get_mut(&id) else {
             return Task::none();

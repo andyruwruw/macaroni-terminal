@@ -133,6 +133,20 @@ pub enum TabKind {
     Terminal(SessionId),
     /// A browser page with this id; its address is [`Tab::url`].
     Browser(BrowserId),
+    /// A repository's changes and history, for the folder in [`Tab::cwd`]. The app keeps its
+    /// state by tab id; nothing is opened or closed for it.
+    Git,
+    /// A tmux window in control mode, its panes drawn by the app, which keeps which window by
+    /// tab id. Not saved: attaching again brings the windows back.
+    Tmux,
+    /// Coding agents' setup (Claude Code's and Codex's instructions, settings, skills and so
+    /// on), the user's own and the project's in [`Tab::cwd`] (none when unset). The app keeps
+    /// what it read by tab id; nothing is opened or closed for it.
+    AgentSetup,
+    /// A file shown as text, rendered Markdown or an image: the one in [`Tab::file`], with its
+    /// folder in [`Tab::cwd`]. The app keeps what it read by tab id; nothing is opened or
+    /// closed for it.
+    File,
 }
 
 /// A terminal or browser in a pane, with what its program and the user have set on it.
@@ -153,10 +167,12 @@ pub struct Tab {
     pub badge: Option<String>,
     /// A coding agent (Claude Code) running in this tab, as reported by its hooks.
     pub agent: Option<Agent>,
-    /// The shell's working directory, when it reports one (OSC 7).
+    /// The shell's working directory, when it reports one (OSC 7); a Git tab's folder.
     pub cwd: Option<String>,
     /// A browser tab's current address.
     pub url: Option<String>,
+    /// A file tab's file.
+    pub file: Option<String>,
     /// Notifications from a muted tab are dropped.
     pub muted: bool,
     /// Pinned tabs come first in their pane.
@@ -165,6 +181,9 @@ pub struct Tab {
     pub icon: Option<String>,
     /// The user's color for the tab, by name or `#rrggbb` (as for workspaces).
     pub color: Option<String>,
+    /// Plugins the user turned on or off for this tab, by id, over whether each applies to it
+    /// by default.
+    pub plugins: BTreeMap<String, bool>,
 }
 
 impl Tab {
@@ -221,6 +240,12 @@ pub enum TabSpec {
     Terminal,
     /// A browser at this address (empty if it had none).
     Browser(String),
+    /// A Git tab for this folder.
+    Git(String),
+    /// An agent setup tab for this project folder (empty: none).
+    AgentSetup(String),
+    /// A file tab for this file.
+    File(String),
 }
 
 /// A saved layout: what [`Model::spec`] produces and [`Model::restore`] rebuilds.
@@ -310,10 +335,33 @@ pub enum AgentState {
     Idle,
 }
 
-/// A coding agent (Claude Code) running in a tab. Set by [`Command::SetAgent`], cleared by
+/// Which coding agent runs in a tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentKind {
+    /// Claude Code, reporting through its hooks.
+    #[default]
+    Claude,
+    /// OpenAI's Codex CLI, reporting through its `notify` program.
+    Codex,
+}
+
+impl AgentKind {
+    /// Its name in the control API, the session file and plugin input: `"claude"` or
+    /// `"codex"`.
+    pub fn name(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "claude",
+            AgentKind::Codex => "codex",
+        }
+    }
+}
+
+/// A coding agent running in a tab. Set by [`Command::SetAgent`], cleared by
 /// [`Command::ClearAgent`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Agent {
+    /// Which agent it is.
+    pub kind: AgentKind,
     /// Its latest reported state.
     pub state: AgentState,
     /// What it's doing right now, e.g. "Running cargo test".
@@ -324,6 +372,8 @@ pub struct Agent {
     pub cwd: Option<String>,
     /// A one-line summary from the agent's status line, e.g. "Opus · 45% context".
     pub summary: Option<String>,
+    /// The file the agent writes its conversation to.
+    pub transcript: Option<String>,
 }
 
 /// A program's request for attention (an OSC 9/777/99 notification or an agent hook), held on
@@ -523,6 +573,48 @@ pub enum Command {
         /// holding only the browser.
         split: Option<Direction>,
     },
+    /// Opens a Git tab for `folder` in the focused pane, or in a new pane on the given side of
+    /// it. Emits nothing.
+    OpenGit {
+        /// The folder whose repository it shows; stored as the tab's [`Tab::cwd`].
+        folder: String,
+        /// `None` adds the tab to the focused pane; a direction makes a new, focused pane
+        /// holding only it.
+        split: Option<Direction>,
+    },
+    /// Points a Git tab at another folder. Ignored for other tabs and blank folders.
+    SetGitFolder(TabId, String),
+    /// Opens an agent setup tab for project `folder` (blank: no project) in the focused pane,
+    /// or in a new pane on the given side of it. Emits nothing.
+    OpenAgentSetup {
+        /// The project folder whose setup it shows beside the user's own; stored as the tab's
+        /// [`Tab::cwd`].
+        folder: String,
+        /// `None` adds the tab to the focused pane; a direction makes a new, focused pane
+        /// holding only it.
+        split: Option<Direction>,
+    },
+    /// Opens a file tab for `path` in the focused pane, or in a new pane on the given side of
+    /// it. Emits nothing.
+    OpenFile {
+        /// The file it shows; stored as the tab's [`Tab::file`], and its folder as
+        /// [`Tab::cwd`].
+        path: String,
+        /// `None` adds the tab to the focused pane; a direction makes a new, focused pane
+        /// holding only it.
+        split: Option<Direction>,
+    },
+    /// Points a file tab at another file (`path`), its folder becoming the tab's [`Tab::cwd`].
+    /// Ignored for other tabs and blank paths. Emits nothing.
+    SetFile(TabId, String),
+    /// Opens a tmux window's tab right after `beside` in its pane, without selecting it.
+    /// Ignored (nothing made) when `beside` doesn't exist. Emits nothing.
+    OpenTmux {
+        /// The tab the new one goes after: the terminal carrying tmux, or another tmux tab.
+        beside: TabId,
+    },
+    /// Sets a tmux tab's title (its window's name). Ignored for other tabs.
+    SetTmuxTitle(TabId, Option<String>),
     /// Opens a browser tab right after `beside` in its pane, e.g. for a page's popup window.
     /// Ignored (no effect emitted) when `beside` doesn't exist.
     OpenBrowserBeside {
@@ -551,6 +643,8 @@ pub enum Command {
     SetTabIcon(TabId, Option<String>),
     /// Sets or clears the tab's color (a name or `#rrggbb`).
     SetTabColor(TabId, Option<String>),
+    /// Turns a plugin on or off for the tab, by id; `None` goes back to its default.
+    SetTabPlugin(TabId, String, Option<bool>),
     /// Moves a tab, still running, to another pane; it becomes focused there. Emits nothing: the
     /// session or browser keeps running. A pane left empty is removed, and so is its workspace
     /// if that was its only pane. Pointless moves are ignored (see [`MoveTo`]).
@@ -591,6 +685,8 @@ pub enum Command {
     SetAgent {
         /// The tab the agent runs in.
         tab: TabId,
+        /// Which agent it is.
+        kind: AgentKind,
         /// Its new state.
         state: AgentState,
         /// What it's doing now; replaces the previous detail.
@@ -599,6 +695,8 @@ pub enum Command {
         session_id: Option<String>,
         /// The agent's working directory, kept from earlier reports when `None`.
         cwd: Option<String>,
+        /// The agent's transcript file, kept from earlier reports when `None`.
+        transcript: Option<String>,
     },
     /// Sets the status-line summary of the agent in the tab; a blank one clears it. Ignored when
     /// no agent is running there (it doesn't create one).
@@ -751,23 +849,35 @@ impl Model {
         match node {
             SplitNode::Leaf(pane) => {
                 let pane = &self.panes[pane];
-                tabs.extend(&pane.tabs);
+                // tmux windows aren't saved; a pane of only them comes back as a terminal.
+                let saved: Vec<TabId> = pane
+                    .tabs
+                    .iter()
+                    .copied()
+                    .filter(|t| self.tabs[t].kind != TabKind::Tmux)
+                    .collect();
+                tabs.extend(&saved);
                 LayoutSpec::Pane {
-                    tabs: pane
-                        .tabs
+                    tabs: saved
                         .iter()
                         .map(|t| match self.tabs[t].kind {
                             TabKind::Terminal(_) => TabSpec::Terminal,
                             TabKind::Browser(_) => {
                                 TabSpec::Browser(self.tabs[t].url.clone().unwrap_or_default())
                             }
+                            TabKind::Git => {
+                                TabSpec::Git(self.tabs[t].cwd.clone().unwrap_or_default())
+                            }
+                            TabKind::AgentSetup => {
+                                TabSpec::AgentSetup(self.tabs[t].cwd.clone().unwrap_or_default())
+                            }
+                            TabKind::File => {
+                                TabSpec::File(self.tabs[t].file.clone().unwrap_or_default())
+                            }
+                            TabKind::Tmux => unreachable!("tmux tabs are filtered out above"),
                         })
                         .collect(),
-                    active: pane
-                        .tabs
-                        .iter()
-                        .position(|t| *t == pane.active)
-                        .unwrap_or(0),
+                    active: saved.iter().position(|t| *t == pane.active).unwrap_or(0),
                 }
             }
             SplitNode::Split {
@@ -874,6 +984,9 @@ impl Model {
                     .map(|spec| match spec {
                         TabSpec::Terminal => self.new_terminal_tab(effects),
                         TabSpec::Browser(url) => self.new_browser_tab(url, effects),
+                        TabSpec::Git(folder) => self.new_git_tab(folder),
+                        TabSpec::AgentSetup(folder) => self.new_agent_setup_tab(folder),
+                        TabSpec::File(path) => self.new_file_tab(path),
                     })
                     .collect();
                 if new.is_empty() {
@@ -986,7 +1099,11 @@ impl Model {
     pub fn browsers(&self) -> impl Iterator<Item = BrowserId> + '_ {
         self.tabs.values().filter_map(|t| match t.kind {
             TabKind::Browser(browser) => Some(browser),
-            TabKind::Terminal(_) => None,
+            TabKind::Terminal(_)
+            | TabKind::Git
+            | TabKind::Tmux
+            | TabKind::AgentSetup
+            | TabKind::File => None,
         })
     }
 
@@ -1063,7 +1180,11 @@ impl Model {
     pub fn sessions(&self) -> impl Iterator<Item = SessionId> + '_ {
         self.tabs.values().filter_map(|t| match t.kind {
             TabKind::Terminal(session) => Some(session),
-            TabKind::Browser(_) => None,
+            TabKind::Browser(_)
+            | TabKind::Git
+            | TabKind::Tmux
+            | TabKind::AgentSetup
+            | TabKind::File => None,
         })
     }
 
@@ -1183,6 +1304,19 @@ impl Model {
 
             Command::NewTab => self.new_tab(effects),
             Command::OpenBrowser { url, split } => self.open_browser(&url, split, effects),
+            Command::OpenGit { folder, split } => self.open_git(folder, split),
+            Command::SetGitFolder(tab, folder) => self.set_git_folder(tab, folder),
+            Command::OpenAgentSetup { folder, split } => self.open_agent_setup(folder, split),
+            Command::OpenFile { path, split } => self.open_file(path, split),
+            Command::SetFile(tab, path) => self.set_file(tab, &path),
+            Command::OpenTmux { beside } => self.open_tmux(beside),
+            Command::SetTmuxTitle(tab, title) => {
+                if let Some(tab) = self.tabs.get_mut(&tab)
+                    && tab.kind == TabKind::Tmux
+                {
+                    tab.title = title;
+                }
+            }
             Command::OpenBrowserBeside { beside, url } => {
                 self.open_browser_beside(beside, &url, effects)
             }
@@ -1196,6 +1330,14 @@ impl Model {
             Command::SetTabPinned(tab, pinned) => self.set_pinned(tab, pinned),
             Command::SetTabIcon(tab, icon) => self.edit_tab(tab, |t| t.icon = icon),
             Command::SetTabColor(tab, color) => self.edit_tab(tab, |t| t.color = color),
+            Command::SetTabPlugin(tab, plugin, on) => self.edit_tab(tab, |t| match on {
+                Some(on) => {
+                    t.plugins.insert(plugin, on);
+                }
+                None => {
+                    t.plugins.remove(&plugin);
+                }
+            }),
             Command::MoveTab { tab, to } => {
                 if !self.move_tab_between_windows(tab, to, effects) {
                     self.move_tab(tab, to);
@@ -1225,11 +1367,13 @@ impl Model {
             }),
             Command::SetAgent {
                 tab,
+                kind,
                 state,
                 detail,
                 session_id,
                 cwd,
-            } => self.set_agent(tab, state, detail, session_id, cwd),
+                transcript,
+            } => self.set_agent(tab, kind, state, detail, [session_id, cwd, transcript]),
             Command::SetAgentSummary { tab, summary } => self.set_agent_summary(tab, summary),
             Command::ClearAgent(tab) => self.edit_tab(tab, |t| t.agent = None),
             Command::SetTabCwd(session, cwd) => {

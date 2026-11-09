@@ -9,6 +9,7 @@ publish.workspace = true
 macaroni-ipc.workspace = true
 clap.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
+toml_edit.workspace = true
 
 [lints]
 workspace = true

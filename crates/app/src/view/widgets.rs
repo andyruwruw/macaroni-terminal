@@ -4,7 +4,7 @@
 //! Everything takes the [`Chrome`] (`c`) for its colors and `[style.*]` sizes, so the sidebar,
 //! tab strip, menus and banners look alike in both interfaces.
 
-use iced::widget::{button, container, text, text_input};
+use iced::widget::{Space, button, container, scrollable, stack, text, text_input};
 use iced::{Background, Border, Color, Element, Fill, Length, Padding, Shadow, Vector};
 
 use crate::anim::mix;
@@ -35,6 +35,53 @@ const ADD_OUTLINE_IDLE: f32 = 0.25;
 
 /// How strongly selected text in a field is tinted with the attention color.
 const SELECTION_ALPHA: f32 = 0.35;
+
+/// How thick the keyboard's focus ring is.
+const FOCUS_RING: f32 = 2.0;
+
+/// How wide a panel's scrollbar and its scroller are ([`thin_scroll`]): iced's own are 10.
+const THIN_SCROLLBAR: f32 = 5.0;
+
+/// The room around a panel's scrollbar, so the scroller doesn't touch the edge.
+const THIN_SCROLLBAR_MARGIN: f32 = 2.0;
+
+/// `content` in a container with `focus`'s widget id (so it can be found on screen), with the
+/// keyboard's focus ring over it while `focused`. The ring is always a layer, clear when
+/// unfocused, so focus moving doesn't rebuild the item.
+pub(super) fn focus_ring<'a>(
+    c: Chrome,
+    focus: crate::state::KeyFocus,
+    focused: bool,
+    radius: f32,
+    content: Element<'a, Message>,
+) -> Element<'a, Message> {
+    container(ring(c, focused, radius, content))
+        .id(focus.widget_id())
+        .into()
+}
+
+/// `content` with the keyboard's focus ring over it while `focused`: always a layer, clear
+/// when unfocused, so focus moving doesn't rebuild what's under it.
+pub(super) fn ring<'a>(
+    c: Chrome,
+    focused: bool,
+    radius: f32,
+    content: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let ring = container(Space::new().width(Fill).height(Fill)).style(move |_| container::Style {
+        border: Border {
+            color: if focused {
+                c.tab_accent
+            } else {
+                Color::TRANSPARENT
+            },
+            width: FOCUS_RING,
+            radius: radius.into(),
+        },
+        ..container::Style::default()
+    });
+    stack![content, ring].into()
+}
 
 /// A drop shadow `blur` wide, falling `y` below what casts it.
 pub(super) fn shadow(color: Color, y: f32, blur: f32) -> Shadow {
@@ -308,5 +355,83 @@ pub(super) fn truncate(title: &str, max: usize) -> String {
         let mut short: String = title.chars().take(max - 1).collect();
         short.push('…');
         short
+    }
+}
+
+/// `path` cut to at most `max` characters by dropping its start, so the end (the folder that
+/// names it) stays, the first an ellipsis when it's cut. A cap like [`truncate`]'s.
+pub(super) fn truncate_start(path: &str, max: usize) -> String {
+    let count = path.chars().count();
+    if count <= max {
+        path.to_owned()
+    } else {
+        let mut short = String::from('…');
+        short.extend(path.chars().skip(count + 1 - max.max(1)));
+        short
+    }
+}
+
+/// A panel's scrollbar: [`THIN_SCROLLBAR`] wide, with room around it.
+pub(super) fn thin_scrollbar() -> scrollable::Scrollbar {
+    scrollable::Scrollbar::new()
+        .width(THIN_SCROLLBAR)
+        .scroller_width(THIN_SCROLLBAR)
+        .margin(THIN_SCROLLBAR_MARGIN)
+}
+
+/// `content` scrolling down with a thin scrollbar in the UI's colors, as the Git, agent setup
+/// and file tabs' lists and texts do.
+pub(super) fn thin_scroll<'a>(
+    c: Chrome,
+    content: impl Into<Element<'a, Message>>,
+) -> scrollable::Scrollable<'a, Message> {
+    scrollable(content)
+        .direction(scrollable::Direction::Vertical(thin_scrollbar()))
+        .style(move |theme, status| thin_scroll_style(c, theme, status))
+}
+
+/// A panel's scrollbar colors: no rail, a faint scroller that brightens while hovered or
+/// dragged.
+pub(super) fn thin_scroll_style(
+    c: Chrome,
+    theme: &iced::Theme,
+    status: scrollable::Status,
+) -> scrollable::Style {
+    let (vertical, horizontal) = match status {
+        scrollable::Status::Active { .. } => (false, false),
+        scrollable::Status::Hovered {
+            is_vertical_scrollbar_hovered,
+            is_horizontal_scrollbar_hovered,
+            ..
+        } => (
+            is_vertical_scrollbar_hovered,
+            is_horizontal_scrollbar_hovered,
+        ),
+        scrollable::Status::Dragged {
+            is_vertical_scrollbar_dragged,
+            is_horizontal_scrollbar_dragged,
+            ..
+        } => (
+            is_vertical_scrollbar_dragged,
+            is_horizontal_scrollbar_dragged,
+        ),
+    };
+    let rail = |lit: bool| scrollable::Rail {
+        background: None,
+        border: Border::default(),
+        scroller: scrollable::Scroller {
+            background: if lit {
+                c.muted
+            } else {
+                c.faint.scale_alpha(0.6)
+            }
+            .into(),
+            border: Border::default().rounded(THIN_SCROLLBAR / 2.0),
+        },
+    };
+    scrollable::Style {
+        vertical_rail: rail(vertical),
+        horizontal_rail: rail(horizontal),
+        ..scrollable::default(theme, status)
     }
 }

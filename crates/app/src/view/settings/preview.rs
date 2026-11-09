@@ -100,12 +100,13 @@ fn preview_for(section: Section) -> Option<Preview> {
         Section::Panes => Pane,
         Section::Menus => Menus,
         Section::Effects => Items,
-        Section::Terminal => Terminal,
+        Section::Terminal | Section::Accessibility => Terminal,
         Section::General
         | Section::Notifications
         | Section::Shortcuts
         | Section::Browser
-        | Section::VsCode => return None,
+        | Section::VsCode
+        | Section::Viewers => return None,
     })
 }
 
@@ -133,7 +134,7 @@ impl App {
                 let tab = self.model.focused_tab().id;
                 (
                     row![
-                        self.menu_list(MenuTarget::Tab(tab), MenuPage::Main, None),
+                        self.menu_list(MenuTarget::Tab(tab), MenuPage::Main, None, None),
                         controls_preview(c),
                     ]
                     .spacing(32)

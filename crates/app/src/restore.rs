@@ -80,7 +80,7 @@ fn join_saved_group(
     }
 }
 
-/// Gives each restored tab its saved name, flags, icon and color.
+/// Gives each restored tab its saved name, flags, icon, color and plugin choices.
 fn restore_tabs(model: &mut Model, tabs: &[TabId], details: &[SavedTab]) {
     for (&tab, saved) in tabs.iter().zip(details) {
         model.apply(Command::RenameTab(tab, saved.name.clone()));
@@ -88,5 +88,8 @@ fn restore_tabs(model: &mut Model, tabs: &[TabId], details: &[SavedTab]) {
         model.apply(Command::SetTabPinned(tab, saved.pinned));
         model.apply(Command::SetTabIcon(tab, saved.icon.clone()));
         model.apply(Command::SetTabColor(tab, saved.color.clone()));
+        for (plugin, on) in &saved.plugins {
+            model.apply(Command::SetTabPlugin(tab, plugin.clone(), Some(*on)));
+        }
     }
 }

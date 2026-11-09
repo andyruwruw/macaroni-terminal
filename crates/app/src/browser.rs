@@ -82,6 +82,8 @@ pub enum BrowserMessage {
     Text(u64, String),
     /// Whether a find in the page matched, for the query it was for.
     Found(String, bool),
+    /// A link clicked in a file tab's page, as written in the document (see `preview`).
+    Link(String),
 }
 
 /// The app's state for one browser tab, in `App.browsers`. Created when the tab is opened; the
@@ -107,6 +109,9 @@ pub struct Panel {
     /// The native window the page was opened in or moved to; a tab moved to another window
     /// moves its page when this differs.
     pub parent: Option<isize>,
+    /// The file tab whose rendered Markdown or diagram this page shows, or the agent setup tab
+    /// whose Markdown it shows (`crate::preview`); `None` for a browser tab's page.
+    pub file: Option<macaroni_core::TabId>,
 }
 
 /// The zoom steps `zoom_in` and `zoom_out` move a page through, as browsers have them.
@@ -146,6 +151,15 @@ impl Panel {
             error: None,
             zoom: 1.0,
             parent: None,
+            file: None,
+        }
+    }
+
+    /// File or agent setup tab `tab`'s page, not started yet. Its address is the preview server's.
+    pub fn for_file(tab: macaroni_core::TabId) -> Self {
+        Self {
+            file: Some(tab),
+            ..Self::new("")
         }
     }
 }
@@ -298,20 +312,21 @@ fn iced_key(vk: u32) -> Option<(Key, Physical)> {
     }
 }
 
-/// The empty pane body a browser window is laid over. Reports its bounds whenever they change.
+/// The empty pane body a browser window is laid over (or a tmux tab's panes, which need its
+/// size). Reports its bounds whenever they change.
 ///
 /// It draws nothing; the page is a native window that covers it. Bounds are reported on
 /// redraws, since `layout` can't publish messages.
-pub struct BrowserHost<M> {
-    /// The browser placed over this host.
-    id: BrowserId,
+pub struct BrowserHost<M, K = BrowserId> {
+    /// What's placed over this host: the browser, or the tmux tab.
+    id: K,
     /// Builds the message (`Message::BrowserBounds`) from the host's logical bounds.
     on_bounds: Box<dyn Fn(Rectangle) -> M>,
 }
 
-impl<M> BrowserHost<M> {
-    /// A placeholder for browser `id`, reporting its bounds with `on_bounds`.
-    pub fn new(id: BrowserId, on_bounds: impl Fn(Rectangle) -> M + 'static) -> Self {
+impl<M, K> BrowserHost<M, K> {
+    /// A placeholder for `id`, reporting its bounds with `on_bounds`.
+    pub fn new(id: K, on_bounds: impl Fn(Rectangle) -> M + 'static) -> Self {
         Self {
             id,
             on_bounds: Box::new(on_bounds),
@@ -320,20 +335,19 @@ impl<M> BrowserHost<M> {
 }
 
 /// The host's state in the widget tree.
-#[derive(Default)]
-struct State {
-    /// The last bounds reported, and for which browser: iced reuses state by tree position, so a
+struct State<K> {
+    /// The last bounds reported, and for what: iced reuses state by tree position, so a
     /// different browser's host in this spot still reports.
-    reported: Option<(BrowserId, Rectangle)>,
+    reported: Option<(K, Rectangle)>,
 }
 
-impl<M> Widget<M, Theme, iced::Renderer> for BrowserHost<M> {
+impl<M, K: Copy + PartialEq + 'static> Widget<M, Theme, iced::Renderer> for BrowserHost<M, K> {
     fn tag(&self) -> widget::tree::Tag {
-        widget::tree::Tag::of::<State>()
+        widget::tree::Tag::of::<State<K>>()
     }
 
     fn state(&self) -> widget::tree::State {
-        widget::tree::State::new(State::default())
+        widget::tree::State::new(State::<K> { reported: None })
     }
 
     fn size(&self) -> Size<Length> {
@@ -361,7 +375,7 @@ impl<M> Widget<M, Theme, iced::Renderer> for BrowserHost<M> {
         _viewport: &Rectangle,
     ) {
         if let Event::Window(window::Event::RedrawRequested(_)) = event {
-            let state = tree.state.downcast_mut::<State>();
+            let state = tree.state.downcast_mut::<State<K>>();
             let now = Some((self.id, layout.bounds()));
             if state.reported != now {
                 state.reported = now;
@@ -383,8 +397,8 @@ impl<M> Widget<M, Theme, iced::Renderer> for BrowserHost<M> {
     }
 }
 
-impl<'a, M: 'a> From<BrowserHost<M>> for Element<'a, M> {
-    fn from(host: BrowserHost<M>) -> Self {
+impl<'a, M: 'a, K: Copy + PartialEq + 'static> From<BrowserHost<M, K>> for Element<'a, M> {
+    fn from(host: BrowserHost<M, K>) -> Self {
         Element::new(host)
     }
 }

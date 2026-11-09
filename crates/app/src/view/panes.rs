@@ -6,13 +6,16 @@
 //! `App::drop_target` and divider dragging use. Each pane is a `pin` in one `stack`, inset by
 //! half of `style.panes.gap` so the window background shows between panes. A terminal tab's
 //! body is a [`TerminalView`]; a browser tab's is an address bar over a [`BrowserHost`], the
-//! placeholder the native CEF window is laid over.
+//! placeholder the native CEF window is laid over. Plugins' rows go above and below a tab's
+//! body ([`App::with_plugin_rows`]).
 
 use iced::widget::{
-    Space, button, column, container, mouse_area, pin, row, stack, text, text_input,
+    Space, button, column, container, mouse_area, pin, rich_text, row, span, stack, text,
+    text_input,
 };
 use iced::{Border, Color, Element, Fill, Size, alignment, mouse};
-use macaroni_core::{Axis, BrowserId, PaneId, TabKind};
+use macaroni_config::Position;
+use macaroni_core::{Axis, BrowserId, PaneId, Tab, TabKind};
 
 use super::tabs::strip_scrollbar_room;
 use super::tabs::tabs_flush;
@@ -20,8 +23,14 @@ use super::widgets::{card_style, flat_button, icon_button, input_style};
 use super::{pane_area, pane_overlap};
 use crate::browser::BrowserHost;
 use crate::icons::{Icon, icon};
+use crate::plugins::{Row, SpanColor};
 use crate::terminal::TerminalView;
+use crate::theme::to_iced;
 use crate::{App, Message, Nav, glass};
+
+/// The narrowest a divider's handle gets. Solid panes have no gap between them, so a handle
+/// only as wide as the gap couldn't be grabbed; this one reaches over both panes' edges.
+const MIN_HANDLE: f32 = 8.0;
 
 /// A browser tab's back, forward, reload and dev tools buttons: their icon size.
 const NAV_ICON_SIZE: f32 = 16.0;
@@ -55,6 +64,9 @@ const PANE_BADGE_ALPHA: f32 = 0.14;
 
 /// Between the pane badge and the pane's top and right edges.
 const PANE_BADGE_MARGIN: f32 = 16.0;
+
+/// How strongly dimmed plugin text shows.
+const DIM_ALPHA: f32 = 0.55;
 
 /// The text size of the message shown when a page can't open.
 const ERROR_TEXT_SIZE: f32 = 13.0;
@@ -98,22 +110,24 @@ impl App {
             .collect();
 
         // Each handle fills the gap at its boundary (centered on `ratio`, a gap wide), so it's
-        // grabbable exactly where the window background shows between the panes.
+        // grabbable where the window background shows between the panes; at least
+        // `MIN_HANDLE` wide, over the panes' edges, where the gap is narrower or none.
+        let thickness = c.s.panes.gap.max(MIN_HANDLE);
         for divider in ws.shown_dividers(area) {
             let a = divider.area;
             let (x, y, width, height, interaction) = match divider.axis {
                 Axis::Row => (
-                    a.x + a.width * divider.ratio - c.s.panes.gap / 2.0,
+                    a.x + a.width * divider.ratio - thickness / 2.0,
                     a.y,
-                    c.s.panes.gap,
+                    thickness,
                     a.height,
                     mouse::Interaction::ResizingHorizontally,
                 ),
                 Axis::Column => (
                     a.x,
-                    a.y + a.height * divider.ratio - c.s.panes.gap / 2.0,
+                    a.y + a.height * divider.ratio - thickness / 2.0,
                     a.width,
-                    c.s.panes.gap,
+                    thickness,
                     mouse::Interaction::ResizingVertically,
                 ),
             };
@@ -221,38 +235,15 @@ impl App {
                     .running
                     .get(&session)
                     .map_or(&self.empty, |r| &r.snapshot);
-                TerminalView::new(
-                    session,
-                    snapshot,
-                    &self.palette,
-                    self.metrics,
-                    &self.keymap,
-                    // Keyboard focus only while nothing else wants typing.
-                    focused
-                        && self.renaming.is_none()
-                        && self.search.is_none()
-                        && self.menu.is_none()
-                        && self.settings.is_none()
-                        && self.icon_picker.is_none()
-                        && self.folder_dialog.is_none()
-                        && self.command_palette.is_none()
-                        && self.worktree_dialog.is_none()
-                        && !self.dashboard
-                        && !self.pane_letters
-                        && self.env_dialog.is_none()
-                        && !self.sidebar_search_focused,
-                    move |event| Message::View(session, event),
-                )
-                .transparent(c.glass.is_some())
-                .padding(c.s.panes.terminal_padding)
-                .enter_renames(self.item_focus.is_some())
-                .wheel_lines(self.config.terminal.scroll_lines as f32)
-                .copy_on_select(self.config.terminal.copy_on_select)
-                .highlights(self.triggers.highlights())
-                .into()
+                self.terminal_view(session, snapshot, focused, c.s.panes.terminal_padding)
             }
             TabKind::Browser(id) => self.browser_body(id),
+            TabKind::Git => self.git_body(tab.id, width),
+            TabKind::AgentSetup => self.agent_body(tab.id, width),
+            TabKind::File => self.file_body(tab.id),
+            TabKind::Tmux => self.tmux_body(tab.id, focused),
         };
+        let body = self.with_plugin_rows(tab, body);
 
         let card = container(body)
             .width(Fill)
@@ -290,6 +281,120 @@ impl App {
         // bounds expect it.
         column![container(strip).width(Fill).style(slot), card]
             .spacing(c.s.tabs.gap - strip_scrollbar_room(c))
+            .into()
+    }
+
+    /// `body` with the rows of the plugins on in `tab` above and below it, each plugin's in
+    /// config order. The body keeps whatever room is left, so a terminal loses rows to them.
+    fn with_plugin_rows<'a>(
+        &'a self,
+        tab: &Tab,
+        body: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        let plugins = self.tab_plugins(tab);
+        if plugins
+            .iter()
+            .all(|(_, rows)| rows.is_none_or(|r| r.rows.is_empty()))
+        {
+            return body;
+        }
+        let rows = |position| {
+            let rows: Vec<Element<'a, Message>> = plugins
+                .iter()
+                .filter(|(plugin, _)| plugin.position == position)
+                .flat_map(|(_, rows)| rows.map(|r| r.rows.as_slice()).unwrap_or_default())
+                .map(|row| self.plugin_row(row))
+                .collect();
+            (!rows.is_empty()).then(|| {
+                container(column(rows))
+                    .padding([0.0, self.chrome.s.panes.terminal_padding])
+                    .width(Fill)
+            })
+        };
+        let top = rows(Position::Top);
+        let bottom = rows(Position::Bottom);
+        column![]
+            .push(top)
+            .push(container(body).width(Fill).height(Fill))
+            .push(bottom)
+            .into()
+    }
+
+    /// One plugin row in the terminal's font, its colors from the terminal's palette; text
+    /// without a color is in the label color.
+    fn plugin_row<'a>(&self, row: &'a Row) -> Element<'a, Message> {
+        let c = self.chrome;
+        let m = self.metrics;
+        let spans = row.0.iter().map(|s| {
+            let color = match s.color {
+                Some(SpanColor::Indexed(i)) => to_iced(self.palette.indexed(i), 1.0),
+                Some(SpanColor::Rgb(rgb)) => to_iced(rgb, 1.0),
+                None => c.label,
+            };
+            let mut font = m.font;
+            if s.bold {
+                font.weight = iced::font::Weight::Bold;
+            }
+            if s.italic {
+                font.style = iced::font::Style::Italic;
+            }
+            span(s.text.as_str())
+                .color(Color {
+                    a: if s.dim { color.a * DIM_ALPHA } else { color.a },
+                    ..color
+                })
+                .font(font)
+                .underline(s.underline)
+        });
+        rich_text::<(), Message, _, _>(spans.collect::<Vec<_>>())
+            .size(m.font_size)
+            .line_height(iced::widget::text::LineHeight::Relative(m.line_height))
+            .wrapping(iced::widget::text::Wrapping::None)
+            .width(Fill)
+            .into()
+    }
+
+    /// A terminal's view of `session`, with `padding` around its grid. It takes the keyboard
+    /// when `focused` and nothing else wants typing.
+    pub(crate) fn terminal_view<'a>(
+        &'a self,
+        session: macaroni_core::SessionId,
+        snapshot: &'a macaroni_term::Snapshot,
+        focused: bool,
+        padding: f32,
+    ) -> Element<'a, Message> {
+        let c = self.chrome;
+        let view = TerminalView::new(
+            session,
+            snapshot,
+            &self.palette,
+            self.metrics,
+            &self.keymap,
+            focused
+                && self.renaming.is_none()
+                && self.search.is_none()
+                && self.menu.is_none()
+                && self.settings.is_none()
+                && self.icon_picker.is_none()
+                && self.folder_dialog.is_none()
+                && self.command_palette.is_none()
+                && self.worktree_dialog.is_none()
+                && !self.dashboard
+                && !self.pane_letters
+                && self.env_dialog.is_none()
+                && !self.sidebar_search_focused
+                && self.key_focus.is_none(),
+            move |event| Message::View(session, event),
+        )
+        .transparent(c.glass.is_some())
+        .padding(padding)
+        .enter_renames(self.item_focus.is_some())
+        .wheel_lines(self.config.terminal.scroll_lines as f32)
+        .copy_on_select(self.config.terminal.copy_on_select)
+        .highlights(self.triggers.highlights());
+        // An id, so screen readers can be told where its lines are.
+        iced::widget::container(view)
+            .id(crate::accessibility::tree::terminal_id(session))
             .into()
     }
 

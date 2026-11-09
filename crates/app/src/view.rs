@@ -15,10 +15,15 @@
 pub mod folder_dialog;
 
 pub use sidebar::SIDEBAR_SEARCH;
+pub mod agent_tab;
 pub mod dashboard;
 pub mod env_dialog;
+pub mod file_tab;
+pub mod file_tree;
+pub mod git_tab;
 pub mod icon_picker;
 pub mod palette;
+mod tmux_tab;
 pub mod worktree_dialog;
 
 pub use sidebar::compact_width as sidebar_compact_width;
@@ -38,6 +43,7 @@ use iced::{Border, Element, Fill, Point, Size, Vector, alignment};
 use crate::icons::{self, workspace_icon};
 use crate::theme::Chrome;
 use crate::{App, Dragged, MenuPage, Message, backdrop};
+pub use menus::MenuEntryKind;
 pub use tabs::tab_title;
 pub use tabs::{tab_span, tab_strip_id};
 use title_bar::{BANNER_MARGIN, resize_edges};
@@ -382,6 +388,22 @@ impl App {
         Some(pin(ghost).x(at.x).y(at.y).into())
     }
 
+    /// `content` with `focus`'s widget id and the keyboard's focus ring while it's on it.
+    fn ringed<'a>(
+        &self,
+        focus: crate::state::KeyFocus,
+        radius: f32,
+        content: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        widgets::focus_ring(
+            self.chrome,
+            focus,
+            self.key_focus == Some(focus),
+            radius,
+            content,
+        )
+    }
+
     /// The open right-click menu's lists, over a layer that closes it on a click elsewhere.
     fn menu_layers(&self) -> Vec<Element<'_, Message>> {
         let Some(menu) = self.menu else {
@@ -396,8 +418,12 @@ impl App {
         let open = menu.sub.map(|s| s.page);
         let pages = std::iter::once(MenuPage::Main).chain(open);
         for (page, bounds) in pages.zip(self.menu_bounds()) {
+            let cursor = menu
+                .cursor
+                .filter(|c| c.sub == (page != MenuPage::Main))
+                .map(|c| c.index);
             layers.push(
-                pin(self.menu_list(menu.target, page, open))
+                pin(self.menu_list(menu.target, page, open, cursor))
                     .x(bounds.x)
                     .y(bounds.y)
                     .into(),

@@ -15,9 +15,12 @@ use macaroni_core::{
 };
 
 use super::tabs::tab_kind_icon;
-use super::widgets::{FIELD_PADDING, card_style, flat_button, input_style, one_line, shadow};
+use super::widgets::{
+    FIELD_PADDING, card_style, flat_button, input_style, one_line, shadow, truncate_start,
+};
 use crate::hair_line::HairLine;
 use crate::icons::{Icon, WORKSPACE_ICONS, icon};
+use crate::message::{Clicked, OpenIn};
 use crate::theme::{Chrome, PALETTE, WORKSPACE_COLORS, custom_color, hex, workspace_color};
 use crate::update::same_dir;
 use crate::view::folder_dialog::FolderMessage;
@@ -130,6 +133,79 @@ impl App {
             MenuTarget::Tab(tab) => self.tab_menu_entries(tab, page),
             MenuTarget::Workspace(ws) => self.workspace_menu_entries(ws, page),
             MenuTarget::Group(group) => self.group_menu_entries(group, page),
+            MenuTarget::Link => self.link_menu_entries(),
+        }
+    }
+
+    /// The link menu: the places to open what was Ctrl+right-clicked in a terminal, its
+    /// default marked, then copying it (and for a file, showing it in its folder).
+    fn link_menu_entries(&self) -> Vec<MenuEntry> {
+        let Some(clicked) = &self.clicked else {
+            return Vec::new();
+        };
+        let default = self.default_open(clicked);
+        let item = |icon, label: &str, how: OpenIn| {
+            let label = if how == default {
+                format!("{label} (default)")
+            } else {
+                label.to_owned()
+            };
+            MenuEntry::item(
+                icon,
+                label,
+                Some(Message::OpenClicked(clicked.clone(), how)),
+            )
+        };
+        match clicked {
+            Clicked::Url(url) => {
+                let mut entries = vec![MenuEntry::Header(short_url(url))];
+                if cfg!(any(windows, target_os = "macos")) {
+                    entries.push(item(
+                        Icon::Globe,
+                        "Open in browser panel",
+                        OpenIn::BrowserPanel,
+                    ));
+                }
+                entries.extend([
+                    item(
+                        Icon::ExternalLink,
+                        "Open in system browser",
+                        OpenIn::SystemBrowser,
+                    ),
+                    MenuEntry::Separator,
+                    item(Icon::Copy, "Copy link", OpenIn::Copy),
+                ]);
+                entries
+            }
+            Clicked::File(file) => {
+                let name = file
+                    .path
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                let name = match file.line {
+                    Some(line) => format!("{name}:{line}"),
+                    None => name,
+                };
+                let mut entries = vec![
+                    MenuEntry::Header(name),
+                    item(Icon::FileText, "Open in viewer", OpenIn::Viewer),
+                ];
+                if self.vscode_web.installed {
+                    entries.push(item(Icon::Code, "Open in VS Code tab", OpenIn::VsCode));
+                }
+                entries.extend([
+                    item(
+                        Icon::AppWindow,
+                        &format!("Open in {}", self.app_name()),
+                        OpenIn::App,
+                    ),
+                    item(Icon::ExternalLink, "Open with\u{2026}", OpenIn::PickApp),
+                    MenuEntry::Separator,
+                    item(Icon::Folder, "Show in folder", OpenIn::Folder),
+                    item(Icon::Copy, "Copy path", OpenIn::Copy),
+                ]);
+                entries
+            }
         }
     }
 
@@ -205,7 +281,7 @@ impl App {
             MenuPage::Group => self.workspace_group_entries(ws),
             MenuPage::Combine => self.combine_entries(ws),
             // Group pages.
-            MenuPage::Merge | MenuPage::Delete => Vec::new(),
+            MenuPage::Merge | MenuPage::Delete | MenuPage::Plugins => Vec::new(),
         }
     }
 
@@ -309,7 +385,7 @@ impl App {
         let workspace = ws.and_then(|w| self.model.workspace(w));
         let maximized = workspace.is_some_and(|w| w.maximized.is_some());
         let split = workspace.is_some_and(|w| w.layout.leaves().len() > 1);
-        vec![
+        let mut entries = vec![
             pin_entry(tab.pinned, "Tab", |pin| action(TabAction::Pin(pin))),
             MenuEntry::Separator,
             MenuEntry::item(Icon::Pencil, "Rename Tab", action(TabAction::Rename)),
@@ -326,8 +402,10 @@ impl App {
             MenuEntry::Separator,
             MenuEntry::submenu(Icon::Star, "Icon", MenuPage::Icon),
             MenuEntry::submenu(Icon::Palette, "Color", MenuPage::Color),
+            MenuEntry::submenu(Icon::PanelTop, "Plugins", MenuPage::Plugins),
             MenuEntry::Separator,
-            MenuEntry::Header(format!("Workspace folder: {}", short_path(&folder))),
+            MenuEntry::Header("Workspace folder".to_owned()),
+            MenuEntry::Header(truncate_start(&short_path(&folder), self.header_chars())),
             MenuEntry::item(
                 Icon::FolderPlus,
                 "Use as Workspace Folder",
@@ -364,7 +442,40 @@ impl App {
             ),
             MenuEntry::Separator,
             MenuEntry::item(Icon::Close, "Close Tab", action(TabAction::Close)),
-        ]
+        ];
+        // A terminal's commands, after Rename: the title it showed while one ran is gone once
+        // it ends.
+        if let (macaroni_core::TabKind::Terminal(_), Some(pane)) =
+            (&tab.kind, self.model.pane_of_tab(id))
+        {
+            entries.insert(
+                3,
+                MenuEntry::item(
+                    Icon::History,
+                    "Command History\u{2026}",
+                    Some(Message::Palette(
+                        crate::view::palette::PaletteMessage::OpenHistory(Some(pane)),
+                    )),
+                ),
+            );
+        }
+        // A Git tab can show another repository: after Pin, before the rest.
+        if tab.kind == macaroni_core::TabKind::Git {
+            let folder = tab.cwd.clone().unwrap_or_default();
+            entries.splice(
+                2..2,
+                [
+                    MenuEntry::Header(format!("Repository: {}", short_path(&folder))),
+                    MenuEntry::item(
+                        Icon::FolderPen,
+                        "Change Folder\u{2026}",
+                        Some(Message::Folder(FolderMessage::OpenGit(id))),
+                    ),
+                    MenuEntry::Separator,
+                ],
+            );
+        }
+        entries
     }
 
     /// A workspace's Combine submenu: every other workspace, whose panes would move into it.
@@ -568,6 +679,22 @@ impl App {
             "Browser",
             Some(Message::NewBrowserIn(pane)),
         ));
+        entries.push(MenuEntry::item(
+            Icon::GitCompare,
+            "Git",
+            self.pane_in_repository(pane)
+                .then_some(Message::GitTab(pane)),
+        ));
+        entries.push(MenuEntry::item(
+            Icon::Bot,
+            "Agent setup",
+            Some(Message::AgentSetupTab(pane)),
+        ));
+        entries.push(MenuEntry::item(
+            Icon::FileText,
+            "File\u{2026}",
+            Some(Message::PickFile(pane)),
+        ));
         if self.vscode_web.installed {
             entries.push(MenuEntry::item(
                 Icon::Code,
@@ -613,8 +740,24 @@ impl App {
                 action(TabAction::Color(color))
             }),
             MenuPage::Move => self.tab_move_entries(id),
+            MenuPage::Plugins => self.tab_plugin_entries(tab),
             _ => self.tab_main_entries(tab),
         }
+    }
+
+    /// A tab's Plugins submenu: every plugin, checked when it's on in the tab; picking one
+    /// turns it the other way for this tab.
+    fn tab_plugin_entries(&self, tab: &Tab) -> Vec<MenuEntry> {
+        let mut entries = vec![MenuEntry::Header("Rows in this panel".to_owned())];
+        for plugin in &self.config.plugins {
+            let on = crate::plugins::is_on(tab, plugin);
+            entries.push(MenuEntry::item(
+                if on { Icon::Checked } else { Icon::Unchecked },
+                plugin.name.clone(),
+                Some(Message::TabPlugin(tab.id, plugin.id.clone(), !on)),
+            ));
+        }
+        entries
     }
 
     /// A tab's Move submenu: to a new workspace, a split of its pane, or another workspace.
@@ -691,6 +834,14 @@ impl App {
             .collect()
     }
 
+    /// About how many characters of a header fit across a menu, at
+    /// [`AVERAGE_CHAR_WIDTH`] of the header's text size each; the header clips the rest.
+    fn header_chars(&self) -> usize {
+        let m = &self.chrome.s.menus;
+        let room = m.width - 2.0 * (m.padding + m.item_padding);
+        (room / (m.header_size * AVERAGE_CHAR_WIDTH)).max(4.0) as usize
+    }
+
     /// How menus name a window: "Window N" (counting in the order they opened) and its
     /// active workspace.
     fn window_label(&self, window: macaroni_core::WindowId) -> String {
@@ -710,25 +861,79 @@ impl App {
         }
     }
 
-    /// One of a menu's lists; `open` is the submenu showing, whose item stays highlighted.
+    /// Every item of `target`'s menu on `page`, for screen readers: its index in
+    /// [`App::menu_entries`], label, whether it does anything, and whether it opens a submenu.
+    pub(crate) fn menu_labels(
+        &self,
+        target: MenuTarget,
+        page: MenuPage,
+    ) -> Vec<(usize, String, bool, bool)> {
+        self.menu_entries(target, page)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, entry)| match entry {
+                MenuEntry::Item {
+                    label,
+                    message,
+                    submenu,
+                    ..
+                } => Some((
+                    i,
+                    label,
+                    message.is_some() || submenu.is_some(),
+                    submenu.is_some(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The items of `target`'s menu on `page` the keyboard can highlight, by their index in
+    /// [`App::menu_entries`]: those that do something or open a submenu.
+    pub(crate) fn menu_items(
+        &self,
+        target: MenuTarget,
+        page: MenuPage,
+    ) -> Vec<(usize, MenuEntryKind)> {
+        self.menu_entries(target, page)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, entry)| match entry {
+                MenuEntry::Item {
+                    submenu: Some(page),
+                    ..
+                } => Some((i, MenuEntryKind::Submenu(page))),
+                MenuEntry::Item {
+                    message: Some(message),
+                    ..
+                } => Some((i, MenuEntryKind::Action(message))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One of a menu's lists; `open` is the submenu showing, whose item stays highlighted, and
+    /// `cursor` the entry the keyboard highlights, if it's in this list.
     pub(super) fn menu_list(
         &self,
         target: MenuTarget,
         page: MenuPage,
         open: Option<MenuPage>,
+        cursor: Option<usize>,
     ) -> Element<'_, Message> {
         let c = self.chrome;
         let entries = self
             .menu_entries(target, page)
             .into_iter()
-            .map(|entry| match entry {
+            .enumerate()
+            .map(|(i, entry)| match entry {
                 MenuEntry::Item {
                     icon,
                     label,
                     message,
                     submenu,
                 } => {
-                    let item = menu_item(c, icon, label, message, submenu, open);
+                    let item = menu_item(c, icon, label, message, submenu, open, cursor == Some(i));
                     // Only the main list's items open and close submenus.
                     if page == MenuPage::Main {
                         mouse_area(item)
@@ -775,6 +980,10 @@ impl App {
         .into()
     }
 }
+
+/// The width of an average character of the UI font, as a share of its size: enough to cap a
+/// header's text near the menu's width.
+const AVERAGE_CHAR_WIDTH: f32 = 0.58;
 
 /// A group's main menu: pin first; rename, move, merge, then collapse or expand; icon, color;
 /// ungroup and delete. `pinned` is whether its workspaces are, `others` whether there's
@@ -909,8 +1118,17 @@ fn color_entries(
     ]
 }
 
+/// What a keyboard-highlighted menu item does when picked ([`App::menu_items`]).
+#[derive(Debug, Clone)]
+pub enum MenuEntryKind {
+    /// Sends this message.
+    Action(Message),
+    /// Opens this submenu.
+    Submenu(MenuPage),
+}
+
 /// An item: its icon and label, dimmed without a `message`, with a chevron if it opens a
-/// `submenu`, highlighted while that submenu is `open`.
+/// `submenu`, highlighted while that submenu is `open` or the keyboard is on it (`keyed`).
 fn menu_item<'a>(
     c: Chrome,
     glyph: Icon,
@@ -918,6 +1136,7 @@ fn menu_item<'a>(
     message: Option<Message>,
     submenu: Option<MenuPage>,
     open: Option<MenuPage>,
+    keyed: bool,
 ) -> Element<'a, Message> {
     let color = if message.is_some() { c.text } else { c.faint };
     let mut content = row![
@@ -939,7 +1158,7 @@ fn menu_item<'a>(
             c.muted,
         ));
     }
-    let open = submenu.is_some() && submenu == open;
+    let open = submenu.is_some() && submenu == open || keyed;
     button(content)
         .on_press_maybe(message)
         .style(move |_, status| {
@@ -967,7 +1186,9 @@ fn menu_separator<'a>(c: Chrome, scale: f32) -> Element<'a, Message> {
 /// A small faint label over the items after it, `style.menus.header_height` tall.
 fn menu_header<'a>(c: Chrome, label: String) -> Element<'a, Message> {
     container(one_line(label, c.s.menus.header_size, c.faint))
+        .width(Fill)
         .height(c.s.menus.header_height)
+        .clip(true)
         .padding([0.0, c.s.menus.item_padding])
         .align_y(alignment::Vertical::Center)
         .into()
@@ -1163,6 +1384,15 @@ fn grid_cell<'a>(c: Chrome, cell: GridCell, height: f32, size: f32) -> Element<'
             }
         })
         .into()
+}
+
+/// A URL's host, for the link menu's heading: what's between the scheme and the path.
+fn short_url(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#'])
+        .next()
+        .unwrap_or(rest)
+        .to_owned()
 }
 
 /// `path` with the home directory shown as `~`, for menu headings.

@@ -29,6 +29,17 @@ pub enum Direction {
     Up,
 }
 
+/// Which coding agent reports: `"claude"` (the default) or `"codex"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKind {
+    /// `"claude"`: Claude Code.
+    #[default]
+    Claude,
+    /// `"codex"`: OpenAI's Codex CLI.
+    Codex,
+}
+
 /// What a coding agent in a tab is doing: `"working"`, `"needs_input"`, `"idle"` or `"ended"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -152,6 +163,10 @@ pub enum Call {
         /// The agent's tab.
         #[serde(default)]
         tab: Option<u64>,
+        /// Which agent; omitted, Claude Code. A report from another agent than the tab's
+        /// replaces it, details and all.
+        #[serde(default)]
+        kind: AgentKind,
         /// The new state.
         state: AgentState,
         /// A short line of what it's doing, e.g. "Running cargo test"; omitted, none.
@@ -164,6 +179,9 @@ pub enum Call {
         /// The agent's working directory; omitted, the previous one is kept.
         #[serde(default)]
         cwd: Option<String>,
+        /// The file the agent writes its conversation to; omitted, the previous one is kept.
+        #[serde(default)]
+        transcript_path: Option<String>,
     },
     /// `agent_summary`: a one-line summary from the agent's status line (sent by
     /// `macaroni-cli statusline`), shown in the pane's tab strip. Ignored if the tab has no
@@ -189,6 +207,18 @@ pub enum Call {
         /// An address or search words, as typed in the address bar; omitted, `[browser] home`.
         #[serde(default)]
         url: Option<String>,
+        /// Open in a new pane on this side instead.
+        #[serde(default)]
+        split: Option<Direction>,
+    },
+    /// `open_file`: opens a file tab beside `tab`, or in a new pane on that side of its pane.
+    /// Errs when there's no file at `path`. Result: focused ids (the file tab).
+    OpenFile {
+        /// The tab to open from (it's focused first).
+        #[serde(default)]
+        tab: Option<u64>,
+        /// The file, as an absolute path.
+        path: String,
         /// Open in a new pane on this side instead.
         #[serde(default)]
         split: Option<Direction>,
@@ -237,7 +267,8 @@ pub enum BrowseAction {
     Devtools,
 }
 
-/// What a tab holds: `"terminal"` or `"browser"`.
+/// What a tab holds: `"terminal"`, `"browser"`, `"git"`, `"tmux"`, `"agent_setup"` or
+/// `"file"`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TabKind {
@@ -246,6 +277,14 @@ pub enum TabKind {
     Terminal,
     /// `"browser"`: a Chromium page.
     Browser,
+    /// `"git"`: a repository's changes and history.
+    Git,
+    /// `"tmux"`: a tmux window in control mode.
+    Tmux,
+    /// `"agent_setup"`: coding agents' setup for a project.
+    AgentSetup,
+    /// `"file"`: a file shown as text, rendered Markdown or an image.
+    File,
 }
 
 /// The result of [`Call::ReadPage`]: `{"url": ..., "title": ..., "text": "..."}`.
@@ -372,8 +411,23 @@ pub struct WorkspaceInfo {
     /// Whether its window is the focused one.
     #[serde(default = "focused_by_default")]
     pub focused_window: bool,
+    /// The sidebar group it's shown under; `null` while it's ungrouped (or from an older
+    /// server).
+    #[serde(default)]
+    pub group: Option<GroupInfo>,
     /// Its panes, in layout order.
     pub panes: Vec<PaneInfo>,
+}
+
+/// The sidebar group a [`WorkspaceInfo`] is shown under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupInfo {
+    /// Its id, stable for the group's life.
+    pub id: u64,
+    /// Its header's text.
+    pub name: String,
+    /// Whether the sidebar has it folded shut.
+    pub collapsed: bool,
 }
 
 /// [`WorkspaceInfo::window`] from an app that had one window.
@@ -424,6 +478,9 @@ pub struct TabInfo {
 /// [`Call::AgentSummary`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentInfo {
+    /// Which agent it is (absent from older servers: Claude Code).
+    #[serde(default)]
+    pub kind: AgentKind,
     /// Its state; never [`AgentState::Ended`], since an ended agent is removed.
     pub state: AgentState,
     /// What it's doing, e.g. "Editing main.rs".
@@ -434,6 +491,9 @@ pub struct AgentInfo {
     pub session_id: Option<String>,
     /// Its working directory.
     pub cwd: Option<String>,
+    /// Its transcript file (absent from older servers).
+    #[serde(default)]
+    pub transcript_path: Option<String>,
 }
 
 /// The result of [`Call::ReadScreen`].
@@ -513,6 +573,27 @@ mod tests {
         let read: Request =
             serde_json::from_str(r#"{"id":5,"method":"read_page","params":{"tab":9}}"#).unwrap();
         assert_eq!(read.call, Call::ReadPage { tab: Some(9) });
+    }
+
+    #[test]
+    fn open_file_reads_naturally() {
+        let open: Request = serde_json::from_str(
+            r#"{"id":6,"method":"open_file","params":{"path":"/repo/README.md","split":"right"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            open.call,
+            Call::OpenFile {
+                tab: None,
+                path: "/repo/README.md".into(),
+                split: Some(Direction::Right),
+            }
+        );
+        assert!(
+            serde_json::from_str::<Request>(r#"{"id":7,"method":"open_file","params":{}}"#)
+                .is_err(),
+            "a path is required"
+        );
     }
 
     #[test]

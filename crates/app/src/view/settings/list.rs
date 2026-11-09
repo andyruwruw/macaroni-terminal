@@ -9,8 +9,8 @@
 
 use iced::Color;
 use macaroni_config::{
-    BrowserEngine, COLORS, ColorSetting, ColorValue, Config, CursorStyle, NumberSetting, OpenLinks,
-    Rgba, Style, THEME_COLORS, Theme, ThemeColor, UiTheme, Unit, Value,
+    BrowserEngine, COLORS, ColorSetting, ColorValue, Config, CursorStyle, Follow, NumberSetting,
+    OpenFiles, OpenLinks, Rgba, Style, THEME_COLORS, Theme, ThemeColor, UiTheme, Unit, Value,
 };
 
 use super::{Control, Section, Setting, SettingsMessage};
@@ -70,9 +70,55 @@ static LONG_COMMAND: NumberSetting = NumberSetting {
     unit: Unit::Seconds,
 };
 
+/// `[accessibility] ui_scale`.
+static UI_SCALE: NumberSetting = NumberSetting {
+    key: "accessibility.ui_scale",
+    group: "Size",
+    label: "Interface size",
+    description: "Scales the whole window, interface and terminal text, on top of the                   display's own scaling.",
+    default: 1.0,
+    min: 0.5,
+    max: 3.0,
+    step: 0.1,
+    unit: Unit::Percent,
+};
+
+/// `[accessibility] minimum_contrast`.
+static MINIMUM_CONTRAST: NumberSetting = NumberSetting {
+    key: "accessibility.minimum_contrast",
+    group: "Contrast",
+    label: "Minimum text contrast",
+    description: "Terminal text with less contrast against its background is lightened or                   darkened until it has this much. 1 leaves colors alone; 4.5 is WCAG AA, 7                   is AAA.",
+    default: 1.0,
+    min: 1.0,
+    max: 21.0,
+    step: 0.5,
+    unit: Unit::Ratio,
+};
+
+/// `[accessibility] cursor_thickness`.
+static CURSOR_THICKNESS: NumberSetting = NumberSetting {
+    key: "accessibility.cursor_thickness",
+    group: "Size",
+    label: "Cursor thickness",
+    description: "How thick the bar and underline cursors are.",
+    default: 2.0,
+    min: 1.0,
+    max: 8.0,
+    step: 1.0,
+    unit: Unit::Px,
+};
+
 /// The number rows that aren't `[style.*]`.
-static OTHER_NUMBERS: [&NumberSetting; 4] =
-    [&FONT_SIZE, &LINE_HEIGHT, &SCROLL_LINES, &LONG_COMMAND];
+static OTHER_NUMBERS: [&NumberSetting; 7] = [
+    &FONT_SIZE,
+    &LINE_HEIGHT,
+    &SCROLL_LINES,
+    &LONG_COMMAND,
+    &UI_SCALE,
+    &MINIMUM_CONTRAST,
+    &CURSOR_THICKNESS,
+];
 
 /// The number setting with dotted `key`, from `[style.*]` or the others.
 pub(super) fn number_setting(key: &str) -> Option<&'static NumberSetting> {
@@ -495,9 +541,12 @@ impl App {
                 )
             },
         ));
+        list.extend(self.accessibility_settings());
         list.extend(self.agent_settings());
         list.extend(self.browser_settings());
         list.extend(self.vscode_settings());
+        list.extend(self.file_settings());
+        list.extend(self.viewer_settings());
         list.extend(self.look_settings());
         // Dev-only (`Section::shown_in_build`), left out so search can't reach it.
         if cfg!(debug_assertions) {
@@ -616,6 +665,104 @@ impl App {
             &description,
             Control::Button(button.to_owned(), Message::Settings(message)),
         )
+    }
+
+    /// Files: where a file Ctrl+clicked in a terminal opens, and the app it can open in.
+    fn file_settings(&self) -> Vec<Setting> {
+        let files = &self.config.files;
+        let mut places = vec![("Viewer".into(), str_value("viewer"))];
+        if crate::vscode::available() {
+            places.push(("VS Code tab".into(), str_value("vscode")));
+        }
+        places.push(("App".into(), str_value("app")));
+        let open = match files.open {
+            OpenFiles::Viewer => "viewer",
+            OpenFiles::Vscode => "vscode",
+            OpenFiles::App => "app",
+        };
+        vec![
+            Setting::new(
+                Section::Viewers,
+                "Opening files",
+                "Open files in",
+                "Where a file you Ctrl+click (Cmd+click on macOS) in a terminal opens: a file tab \
+                 next to the terminal, a VS Code tab (once VS Code is downloaded), or the app \
+                 below. Ctrl+right-click a file to pick another place.",
+                choice("files.open", places, &str_value(open)),
+            ),
+            Setting::new(
+                Section::Viewers,
+                "Opening files",
+                "App",
+                &format!(
+                    "The program files open in: a path, or a command on PATH. Empty means VS \
+                     Code when its code command is installed, else the text editor. Now: {}. \
+                     Press Enter to apply.",
+                    self.app_name()
+                ),
+                Control::Text {
+                    key: "files.app",
+                    value: files.app.clone(),
+                    placeholder: "VS Code, else the text editor",
+                },
+            ),
+            Setting::new(
+                Section::Viewers,
+                "Opening files",
+                "Choose app",
+                "Pick the program with the system's file dialog.",
+                Control::Button(
+                    "Choose\u{2026}".to_owned(),
+                    Message::Settings(SettingsMessage::PickApp),
+                ),
+            ),
+        ]
+    }
+
+    /// Files: each viewer extension, with a button to download or remove it. Nothing where
+    /// file tabs don't render pages.
+    fn viewer_settings(&self) -> Vec<Setting> {
+        if !crate::preview::AVAILABLE {
+            return Vec::new();
+        }
+        let state = &self.viewers;
+        crate::viewers::Extension::ALL
+            .into_iter()
+            .map(|extension| {
+                let (mut description, button, install) = if state.busy.contains(&extension) {
+                    ("Working\u{2026}".to_owned(), "Please wait", true)
+                } else if state.installed.contains(&extension) {
+                    (
+                        format!("{}. Downloaded.", extension.about()),
+                        "Remove",
+                        false,
+                    )
+                } else {
+                    (
+                        format!(
+                            "{}. Downloads its npm package (about {} MB).",
+                            extension.about(),
+                            extension.megabytes()
+                        ),
+                        "Download",
+                        true,
+                    )
+                };
+                if let Some(error) = state.errors.get(&extension) {
+                    description = format!("{description}\n{error}");
+                }
+                Setting::new(
+                    Section::Viewers,
+                    "Viewers",
+                    extension.name(),
+                    &description,
+                    Control::Button(
+                        button.to_owned(),
+                        Message::Settings(SettingsMessage::Viewer(extension, install)),
+                    ),
+                )
+            })
+            .collect()
     }
 
     /// VS Code: download or remove it, and its server while it runs. Nothing where browser
@@ -925,7 +1072,7 @@ impl App {
                     Section::Terminal,
                     GROUP,
                     profile.label(),
-                    &format!("ssh {}", profile.ssh_args().join(" ")),
+                    &profile.destination(),
                     Control::Button(
                         "Remove".to_owned(),
                         Message::Settings(SettingsMessage::RemoveSsh(i)),
@@ -956,6 +1103,20 @@ impl App {
                 "Show an OS notification when a tab that isn't in view asks for attention.",
                 Control::Toggle("notifications.os", n.os),
             ),
+            Setting::new(
+                Notifications,
+                "Attention",
+                "Sound",
+                "Plays when a tab that isn't in view asks for attention, such as an agent \
+                 finishing or waiting for you. In its menu, a sound's play button tries it \
+                 without picking it. System is the notification's own sound. A file is a .wav \
+                 on Windows; anything afplay plays on macOS.",
+                Control::Sound {
+                    key: "notifications.sound",
+                    value: n.sound.clone(),
+                    presets: sound_presets("System notification sound"),
+                },
+            ),
             number_row(Notifications, &LONG_COMMAND, n.long_command as f32),
             Setting::new(
                 Notifications,
@@ -968,22 +1129,76 @@ impl App {
                 Notifications,
                 "Bell",
                 "Bell sound",
-                "What the bell sounds like. A file is a .wav on Windows; anything afplay plays on \
-                 macOS. Muted tabs stay quiet.",
-                Control::Template {
+                "What the bell sounds like. In its menu, a sound's play button tries it without \
+                 picking it. A file is a .wav on Windows; anything afplay plays on macOS. Muted \
+                 tabs stay quiet.",
+                Control::Sound {
                     key: "notifications.bell_sound",
                     value: n.bell_sound.clone(),
-                    presets: vec![
-                        ("Off".into(), "off".into()),
-                        ("System sound".into(), "system".into()),
-                    ],
-                    placeholder: "Path to a sound file",
+                    presets: sound_presets("System sound"),
                 },
             ),
         ]
     }
 
-    /// Agents: Claude Code's hooks, then how agents show up.
+    /// Accessibility: size, contrast, motion and screen readers.
+    fn accessibility_settings(&self) -> Vec<Setting> {
+        use Section::Accessibility;
+        let a = &self.config.accessibility;
+        let system = self.system_prefs;
+        let follow = |key: &'static str, value: Follow, now: bool| {
+            let shown = |on: bool| if on { "on" } else { "off" };
+            choice(
+                key,
+                vec![
+                    (format!("System (now {})", shown(now)), str_value("system")),
+                    ("On".into(), str_value("on")),
+                    ("Off".into(), str_value("off")),
+                ],
+                &str_value(match value {
+                    Follow::System => "system",
+                    Follow::On => "on",
+                    Follow::Off => "off",
+                }),
+            )
+        };
+        vec![
+            number_row(Accessibility, &UI_SCALE, a.ui_scale),
+            number_row(Accessibility, &CURSOR_THICKNESS, a.cursor_thickness),
+            Setting::new(
+                Accessibility,
+                "Contrast",
+                "High contrast",
+                "Stronger borders and text in the interface, and the high contrast terminal                  theme in place of yours.",
+                follow(
+                    "accessibility.high_contrast",
+                    a.high_contrast,
+                    system.high_contrast,
+                ),
+            ),
+            number_row(Accessibility, &MINIMUM_CONTRAST, a.minimum_contrast),
+            Setting::new(
+                Accessibility,
+                "Motion",
+                "Reduce motion",
+                "Selection and hover changes happen at once instead of fading.",
+                follow(
+                    "accessibility.reduce_motion",
+                    a.reduce_motion,
+                    system.reduce_motion,
+                ),
+            ),
+            Setting::new(
+                Accessibility,
+                "Screen readers",
+                "Read new output",
+                "Screen readers read out what appears in the focused terminal as it arrives.",
+                Control::Toggle("accessibility.announce_output", a.announce_output),
+            ),
+        ]
+    }
+
+    /// Agents: Claude Code's hooks and Codex's notify program, then how agents show up.
     fn agent_settings(&self) -> Vec<Setting> {
         use Section::Agents;
         let config = &self.config;
@@ -1013,13 +1228,42 @@ impl App {
             ),
         );
         hooks_row.description = status;
+        let (codex, result) = self
+            .settings
+            .as_ref()
+            .map(|s| (s.codex, s.codex_result.clone()))
+            .unwrap_or_default();
+        let mut status = match codex {
+            Some(true) => {
+                "Installed: Codex reports when it finishes a turn, with its session for plugins."
+            }
+            _ => "Not installed: Codex's turns and sessions won't show in macaroni.",
+        }
+        .to_owned();
+        if let Some(result) = result {
+            status = format!("{status} {result}");
+        }
+        let installed = codex == Some(true);
+        let mut codex_row = Setting::new(
+            Agents,
+            "Codex",
+            "Notify program",
+            "",
+            Control::Button(
+                if installed { "Remove" } else { "Install" }.to_owned(),
+                Message::Settings(SettingsMessage::CodexNotify(!installed)),
+            ),
+        );
+        codex_row.description = status;
         vec![
             hooks_row,
+            codex_row,
             Setting::new(
                 Agents,
-                "Claude Code",
-                "Resume after restart",
-                "In restored tabs that were running Claude Code, run claude --resume.",
+                "After a restart",
+                "Resume agents",
+                "In restored tabs that were running Claude Code or Codex, run claude --resume \
+                 or codex resume.",
                 Control::Toggle("session.resume_agents", config.session.resume_agents),
             ),
             Setting::new(
@@ -1101,6 +1345,20 @@ fn number_row(section: Section, setting: &'static NumberSetting, value: f32) -> 
         setting.description,
         Control::Number { setting, value },
     )
+}
+
+/// A sound setting's choices: off, the system's (named `system`), then macaroni's own.
+fn sound_presets(system: &str) -> Vec<(String, String)> {
+    let mut presets = vec![
+        ("Off".to_owned(), "off".to_owned()),
+        (system.to_owned(), "system".to_owned()),
+    ];
+    presets.extend(
+        crate::sounds::BUILT_IN
+            .iter()
+            .map(|(value, name)| ((*name).to_owned(), (*value).to_owned())),
+    );
+    presets
 }
 
 /// A `[workspace_items]` or `[tab_items]` template's control: its presets, or a custom one.
@@ -1367,6 +1625,10 @@ mod tests {
             LONG_COMMAND.default,
             config.notifications.long_command as f32
         );
+        let a = &config.accessibility;
+        assert_eq!(UI_SCALE.default, a.ui_scale);
+        assert_eq!(MINIMUM_CONTRAST.default, a.minimum_contrast);
+        assert_eq!(CURSOR_THICKNESS.default, a.cursor_thickness);
     }
 
     #[test]

@@ -40,8 +40,10 @@ pub struct ShellOption {
 /// as a Windows path, since the app, `git -C` and restored tabs need one. `/c/Users/me` becomes
 /// `C:/Users/me` without a fork; any other MSYS mount (`/tmp`, `/usr`) is asked of `pwd -W`,
 /// whose subshell is the one fork, and only there. Last, it marks where the prompt starts
-/// (OSC 133 `A`); [`BASH_PS0`] marks where each command's output starts.
-const BASH_PROMPT_COMMAND: &str = r#"__mcr_x=$?; if [[ -z $__mcr_nl ]]; then __mcr_nl=1; __mcr_r=$PS1; while [[ $__mcr_r == '\['*'\]'* ]]; do __mcr_r=${__mcr_r#*'\]'}; done; if [[ $__mcr_r == '\n'* ]]; then __mcr_ps1=$PS1; PS1=${PS1%"$__mcr_r"}${__mcr_r#'\n'}; __mcr_short=$PS1; fi; elif [[ $__mcr_nl == 1 ]]; then __mcr_nl=2; [[ -n $__mcr_ps1 && $PS1 == "$__mcr_short" ]] && PS1=$__mcr_ps1; fi
+/// (OSC 133 `A`). Before all that, `PS1` gets OSC 133 `B` at its end, where the command line
+/// starts, unless it has it (a prompt rebuilt each time loses it and gets it back). [`BASH_PS0`]
+/// marks where each command's output starts.
+const BASH_PROMPT_COMMAND: &str = r#"__mcr_x=$?; [[ $PS1 == *'133;B'* ]] || PS1=$PS1'\[\e]133;B\a\]'; if [[ -z $__mcr_nl ]]; then __mcr_nl=1; __mcr_r=$PS1; while [[ $__mcr_r == '\['*'\]'* ]]; do __mcr_r=${__mcr_r#*'\]'}; done; if [[ $__mcr_r == '\n'* ]]; then __mcr_ps1=$PS1; PS1=${PS1%"$__mcr_r"}${__mcr_r#'\n'}; __mcr_short=$PS1; fi; elif [[ $__mcr_nl == 1 ]]; then __mcr_nl=2; [[ -n $__mcr_ps1 && $PS1 == "$__mcr_short" ]] && PS1=$__mcr_ps1; fi
 __mcr_d=$PWD; if [[ $__mcr_d =~ ^/([a-zA-Z])(/.*)?$ ]]; then __mcr_d="${BASH_REMATCH[1]^^}:${BASH_REMATCH[2]:-/}"; else __mcr_d=$(pwd -W 2>/dev/null || printf '%s' "$PWD"); fi; printf '\033]133;D;%s\007\033]7;file://%s/%s\007\033]133;A\007' "$__mcr_x" "${HOSTNAME:-localhost}" "${__mcr_d#/}""#;
 
 /// Printed by bash after reading a command and before running it: OSC 133 `C`, where the
@@ -205,7 +207,7 @@ pub fn is_bash(program: &str) -> bool {
 /// Bash's prompt command outside Windows: the last command's exit code (OSC 133 `D`), the
 /// working directory (OSC 7) and the prompt's start (OSC 133 `A`). Builtins only, like
 /// [`BASH_PROMPT_COMMAND`], which also handles Git Bash's MSYS paths and first-prompt newline.
-const BASH_PROMPT_COMMAND_UNIX: &str = r#"__mcr_x=$?; printf '\033]133;D;%s\007\033]7;file://%s%s\007\033]133;A\007' "$__mcr_x" "${HOSTNAME:-localhost}" "$PWD""#;
+const BASH_PROMPT_COMMAND_UNIX: &str = r#"__mcr_x=$?; [[ $PS1 == *'133;B'* ]] || PS1=$PS1'\[\e]133;B\a\]'; printf '\033]133;D;%s\007\033]7;file://%s%s\007\033]133;A\007' "$__mcr_x" "${HOSTNAME:-localhost}" "$PWD""#;
 
 /// The zsh integration, written to [`zsh_dir`] as `.zshenv` (see the file for how it hands
 /// control back to the user's own startup files).
@@ -415,7 +417,8 @@ mod tests {
     }
 
     /// The first prompt loses Git Bash's leading newline and the second gets it back; a
-    /// newline in the middle of a prompt is left alone.
+    /// newline in the middle of a prompt is left alone. Every prompt ends in the command line
+    /// mark, added once.
     #[test]
     #[cfg(windows)]
     fn first_prompt_skips_the_leading_newline() {
@@ -433,10 +436,14 @@ mod tests {
                 .expect("run bash");
             String::from_utf8_lossy(&out.stdout).into_owned()
         };
+        let mark = r"\[\e]133;B\a\]";
         let git = r"\[\033]0;$PWD\007\]\n\[\033[32m\]\u@\h \w\n$ ";
         let first = git.replacen(r"\n", "", 1);
-        assert_eq!(run(git), format!("{first}|{git}"));
+        assert_eq!(run(git), format!("{first}{mark}|{git}{mark}"));
         let two_lines = r"\u@\h\n$ ";
-        assert_eq!(run(two_lines), format!("{two_lines}|{two_lines}"));
+        assert_eq!(
+            run(two_lines),
+            format!("{two_lines}{mark}|{two_lines}{mark}")
+        );
     }
 }

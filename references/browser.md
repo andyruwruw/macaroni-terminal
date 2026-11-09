@@ -21,6 +21,7 @@ Effect::CloseBrowser(id) ──► drop Panel ──► Browser::drop closes it
 
 - **Windows.** `place_browsers` finds each page's window (`model.window_of_tab`), its native handle and scale in `App.wins`, and waits while the handle isn't known yet. Menus and dialogs only cover pages in the focused window. `Panel.parent` remembers the window a page lives in; when its tab moves to another window, `Browser::reparent` moves it (WebView2's controller takes a new parent; CEF's window gets `SetParent`, and its popups' owner changes). Where that isn't supported (macOS: `wry` wants an `NSWindow`), the page is dropped and opens again there at its tab's address. The page's bounds are kept across the move: the new window has usually reported them already and only reports changes.
 
+- **File tabs' pages** are panels too: `Panel.file` names the file tab, `App::browser_tab` finds the tab for either kind, and their events go to `file_page_message`. See `references/file-tab.md`.
 - **Lazy.** A browser starts the first time its tab is shown, at its real size. `Browser::open` returns an error (shown in the tab) if the engine can't start.
 - **Threads.** System pages are created, moved and called on the main thread, and their handlers run there (`Rc`, no locks). CEF runs its own UI thread (`multi_threaded_message_loop`); its placement uses `SetWindowPos` with `SWP_ASYNCWINDOWPOS` so the iced thread never waits on it, and state is shared through `Shared` behind a mutex. Both skip redundant placements and hide in place (keeping the size).
 - **One executable.** Chromium subprocesses are `macaroni.exe --type=...`; `macaroni_browser::helper_process(&chromium::dir())` must run first in `main` and exits for them (it loads the runtime first; without `--type=` it returns at once, loading nothing). Scripts looking for "the macaroni window" must pick the titled process. System pages run in the OS's own processes (`msedgewebview2.exe`).
@@ -40,8 +41,8 @@ Effect::CloseBrowser(id) ──► drop Panel ──► Browser::drop closes it
 ## VS Code tabs (`crates/app/src/vscode.rs`)
 
 - Opt-in: nothing ships with the app. Settings > Integrations > VS Code > Download runs `vscode::install` on a thread (`off_thread`): Windows' own `System32\curl.exe` fetches Microsoft's standalone VS Code CLI zip and `System32\tar.exe` (bsdtar, which reads zips; Git's GNU tar doesn't) unpacks it into `vscode::dir()` (`%LOCALAPPDATA%\macaroni\vscode`, or `<MACARONI_CONFIG_DIR>/vscode`). Remove stops the server and deletes the folder.
-- A VS Code tab is an ordinary browser tab (either engine) at `Server::url(folder)`: `code serve-web` on 127.0.0.1 with a connection token (`?tkn=`) and `folder=` as a URI path (`/C:/...`). The CLI downloads the server itself on the first load. `App.vscode_web` (`WebVsCode`) holds the server; it starts on the first tab, and tabs asked for before it listens wait in `waiting` until `Message::VsCodeReady` (the `vscode_listening` subscription polls the port).
-- Port and token are saved in `vscode/server`, so restored tabs' addresses still work. `start_browser` holds back a tab whose address is the server's (`WebVsCode::owns`) until it listens, starting it if needed.
+- A VS Code tab is an ordinary browser tab (either engine) at `Server::url(folder, file)`: `code serve-web` on 127.0.0.1 with a connection token (`?tkn=`) and `folder=` as a URI path (`/C:/...`). A file to open goes in `payload=`, the JSON VS Code for the web reads at startup: `openFile` as `vscode-remote://127.0.0.1:<port>/<path>:line:col` (the authority must be the page's host) and `gotoLineMode`. The CLI downloads the server itself on the first load, a build per VS Code release (about 600 MB) into `cli-data/serve-web/<commit>`, and keeps five; `prune_servers` deletes all but the newest (the head of its `lru.json`) before each start. `App.vscode_web` (`WebVsCode`) holds the server; it starts on the first tab, and tabs asked for before it listens wait in `waiting` (`Waiting::Tab` from a pane's menu, `Waiting::File` from a terminal link) until `Message::VsCodeReady` (the `vscode_listening` subscription polls the port).
+- Port and token are saved in `vscode/connection`, so restored tabs' addresses still work. The server keeps its data (settings, themes, extensions) in `vscode/server-data` (`--server-data-dir`); that path must stay a folder, or the server can't save anything. `start_browser` holds back a tab whose address is the server's (`WebVsCode::owns`) until it listens, starting it if needed.
 - Dropping `Server` runs `taskkill /T /F` on the CLI: killing the CLI alone leaves the server running on the port. `App::exit` stops it. Logs go to `vscode/server.log`.
 
 ## Files
@@ -55,7 +56,7 @@ Effect::CloseBrowser(id) ──► drop Panel ──► Browser::drop closes it
 
 ## Building
 
-- `cef-dll-sys` builds CEF's C++ wrapper with CMake and Ninja. The cmake crate finds Visual Studio's CMake, but Ninja must be on `PATH`. `cargo xtask dev` / `bundle` add VS's Ninja (via `vswhere`); plain `cargo build` doesn't.
+- `cef-dll-sys` builds CEF's C++ wrapper with CMake and Ninja. Both must be on `PATH`. `cargo xtask` falls back to Visual Studio's copies, then downloads them into `target/tools` (see `references/architecture.md`); plain `cargo build` doesn't.
 - `.cargo/config.toml` sets `CEF_PATH = target/cef` so the CEF download is reused across clean builds.
 - Keep the repo at a short path: CMake/Ninja fail past MAX_PATH ("cannot find CMakeFiles\rules.ninja").
 

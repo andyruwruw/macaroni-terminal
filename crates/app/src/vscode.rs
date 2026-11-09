@@ -23,6 +23,8 @@ use std::time::{Duration, Instant};
 use iced::futures::channel::oneshot;
 use macaroni_core::PaneId;
 
+use crate::message::FileLink;
+
 /// Where the CLI for this platform downloads from; `None` where browser tabs don't exist.
 fn download_url() -> Option<&'static str> {
     match (cfg!(windows), std::env::consts::ARCH) {
@@ -123,6 +125,36 @@ pub fn uninstall() -> Result<(), String> {
     }
 }
 
+/// Deletes every VS Code server build in `serve_web` (the CLI's `cli-data/serve-web`) but the
+/// newest. The CLI downloads a build per VS Code release (about 600 MB each) and keeps the last
+/// five, which grew past 3 GB; only the newest is ever started. `lru.json` lists them newest
+/// first and is rewritten to the one kept. A build still in use by a leftover server can't be
+/// deleted on Windows and is left for the next start.
+fn prune_servers(serve_web: &Path) {
+    let lru = serve_web.join("lru.json");
+    let Some(newest) = std::fs::read(&lru)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
+        .and_then(|builds| builds.into_iter().next())
+    else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(serve_web) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        // Builds are named by their commit hash; `.locks` and the like stay.
+        let build = name
+            .to_str()
+            .is_some_and(|n| n.len() == 40 && n.bytes().all(|b| b.is_ascii_hexdigit()));
+        if build && name != newest.as_str() && entry.path().is_dir() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+    let _ = std::fs::write(&lru, serde_json::to_vec(&[&newest]).unwrap_or_default());
+}
+
 /// Runs `work` on its own thread, as a future for [`iced::Task::future`]; the executor has no
 /// blocking pool.
 pub async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
@@ -154,8 +186,9 @@ impl Server {
         } else {
             free_port()?
         };
-        std::fs::write(dir.join("server"), format!("{port} {token}"))?;
+        std::fs::write(dir.join("connection"), format!("{port} {token}"))?;
         let log = File::create(dir.join("server.log"))?;
+        prune_servers(&dir.join("cli-data").join("serve-web"));
         let mut command = Command::new(cli());
         command
             .arg("serve-web")
@@ -166,7 +199,7 @@ impl Server {
                 "--accept-server-license-terms",
             ])
             .arg("--server-data-dir")
-            .arg(dir.join("server"))
+            .arg(dir.join("server-data"))
             // Keeps the CLI's own state (and the server builds it downloads) in `dir` too.
             .env("VSCODE_CLI_DATA_DIR", dir.join("cli-data"))
             .stdin(Stdio::null())
@@ -180,15 +213,38 @@ impl Server {
         })
     }
 
-    /// The address that opens `folder` (else an empty window).
-    pub fn url(&self, folder: Option<&Path>) -> String {
-        let mut url = format!("http://127.0.0.1:{}/?tkn={}", self.port, self.token);
-        if let Some(folder) = folder {
-            url.push_str("&folder=");
-            url.push_str(&folder_query(folder));
-        }
-        url
+    /// The address that opens `folder` (else an empty window), and `file` in it at its line
+    /// and column. The file goes in the `payload` VS Code for the web reads at startup:
+    /// `openFile` with the file as a `vscode-remote` URI on this server (`:line:column` after
+    /// its path), and `gotoLineMode` so the suffix is read as a place, not part of the name.
+    pub fn url(&self, folder: Option<&Path>, file: Option<&FileLink>) -> String {
+        address(self.port, &self.token, folder, file)
     }
+}
+
+/// [`Server::url`] for a server on `port` with `token`.
+fn address(port: u16, token: &str, folder: Option<&Path>, file: Option<&FileLink>) -> String {
+    let mut url = format!("http://127.0.0.1:{port}/?tkn={token}");
+    if let Some(folder) = folder {
+        url.push_str("&folder=");
+        url.push_str(&folder_query(folder));
+    }
+    if let Some(file) = file {
+        // `folder_query` escapes quotes and backslashes, so the URI is safe in JSON as is.
+        let mut uri = format!(
+            "vscode-remote://127.0.0.1:{port}{}",
+            folder_query(&file.path)
+        );
+        let mut payload = String::new();
+        if let Some(line) = file.line {
+            uri = format!("{uri}:{line}:{}", file.column.unwrap_or(1));
+            payload.push_str(r#",["gotoLineMode","true"]"#);
+        }
+        let payload = format!(r#"[["openFile","{uri}"]{payload}]"#);
+        url.push_str("&payload=");
+        url.push_str(&query_escape(&payload));
+    }
+    url
 }
 
 impl Drop for Server {
@@ -207,7 +263,7 @@ impl Drop for Server {
 
 /// The saved port and token, if both are there.
 fn saved() -> Option<(u16, String)> {
-    let text = std::fs::read_to_string(dir().join("server")).ok()?;
+    let text = std::fs::read_to_string(dir().join("connection")).ok()?;
     let (port, token) = text.trim().split_once(' ')?;
     Some((port.parse().ok()?, token.to_owned()))
 }
@@ -271,6 +327,20 @@ fn folder_query(folder: &Path) -> String {
     out
 }
 
+/// `text` with everything but unreserved characters percent-escaped, for a query value.
+fn query_escape(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// Keeps a child process from opening a console window on Windows.
 pub(crate) fn hide_window(command: &mut Command) {
     #[cfg(windows)]
@@ -297,8 +367,17 @@ pub struct WebVsCode {
     pub server: Option<Server>,
     /// Whether the server listens yet.
     pub ready: bool,
-    /// Tabs asked for before it listened: the pane, and the folder to open.
-    pub waiting: Vec<(PaneId, Option<PathBuf>)>,
+    /// Tabs asked for before it listened, opened once it does.
+    pub waiting: Vec<Waiting>,
+}
+
+/// A VS Code tab asked for before the server listened.
+#[derive(Debug)]
+pub enum Waiting {
+    /// From a pane's menu: the pane it opens in, and the folder to open.
+    Tab(PaneId, Option<PathBuf>),
+    /// A file from a terminal's link menu or click: the folder to open, and the file.
+    File(Option<PathBuf>, FileLink),
 }
 
 impl std::fmt::Debug for WebVsCode {
@@ -370,6 +449,40 @@ mod tests {
             "/C:/Users/me/my%20project"
         );
         assert_eq!(folder_query(Path::new("/home/me/a&b")), "/home/me/a%26b");
+    }
+
+    #[test]
+    fn files_go_in_the_payload() {
+        let file = FileLink {
+            path: PathBuf::from("/srv/a b.md"),
+            line: Some(4),
+            column: None,
+        };
+        let url = address(4000, "t", Some(Path::new("/srv")), Some(&file));
+        assert_eq!(
+            url,
+            "http://127.0.0.1:4000/?tkn=t&folder=/srv&payload=%5B%5B%22openFile%22%2C%22vscode-remote%3A%2F%2F127.0.0.1%3A4000%2Fsrv%2Fa%2520b.md%3A4%3A1%22%5D%2C%5B%22gotoLineMode%22%2C%22true%22%5D%5D"
+        );
+        assert_eq!(address(1, "t", None, None), "http://127.0.0.1:1/?tkn=t");
+    }
+
+    /// Only the newest server build in `lru.json` is kept, and other files stay.
+    #[test]
+    fn old_server_builds_are_deleted() {
+        let dir = std::env::temp_dir().join(format!("macaroni-prune-{}", new_token()));
+        let (new, old) = ("a".repeat(40), "b".repeat(40));
+        for build in [&new, &old] {
+            std::fs::create_dir_all(dir.join(build).join("bin")).unwrap();
+        }
+        std::fs::create_dir_all(dir.join(".locks")).unwrap();
+        std::fs::write(dir.join("lru.json"), format!(r#"["{new}","{old}"]"#)).unwrap();
+        prune_servers(&dir);
+        assert!(dir.join(&new).is_dir());
+        assert!(!dir.join(&old).exists());
+        assert!(dir.join(".locks").is_dir());
+        let lru = std::fs::read_to_string(dir.join("lru.json")).unwrap();
+        assert_eq!(lru, format!(r#"["{new}"]"#));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -64,11 +64,11 @@ fn closed(effects: &[Effect]) -> Vec<BrowserId> {
         .collect()
 }
 
-/// The session a terminal tab runs; panics if the tab is missing or a browser.
+/// The session a terminal tab runs; panics if the tab is missing or not a terminal.
 fn session_of(model: &Model, tab: TabId) -> SessionId {
     match model.tab(tab).unwrap().kind {
         TabKind::Terminal(s) => s,
-        TabKind::Browser(_) => panic!("{tab:?} is a browser"),
+        _ => panic!("{tab:?} isn't a terminal"),
     }
 }
 
@@ -408,17 +408,21 @@ fn agent_state_keeps_session_details_across_updates() {
     let tab = model.focused_tab().id;
     model.apply(Command::SetAgent {
         tab,
+        kind: AgentKind::Claude,
         state: AgentState::Idle,
         detail: None,
         session_id: Some("abc".into()),
         cwd: Some("C:/work".into()),
+        transcript: Some("C:/work/abc.jsonl".into()),
     });
     model.apply(Command::SetAgent {
         tab,
+        kind: AgentKind::Claude,
         state: AgentState::Working,
         detail: Some("Running cargo test".into()),
         session_id: None,
         cwd: None,
+        transcript: None,
     });
     model.apply(Command::SetAgentSummary {
         tab,
@@ -430,8 +434,39 @@ fn agent_state_keeps_session_details_across_updates() {
     assert_eq!(agent.session_id.as_deref(), Some("abc"));
     assert_eq!(agent.cwd.as_deref(), Some("C:/work"));
     assert_eq!(agent.summary.as_deref(), Some("Opus"));
+    assert_eq!(agent.transcript.as_deref(), Some("C:/work/abc.jsonl"));
+    // Another agent in the tab doesn't inherit the first one's session.
+    model.apply(Command::SetAgent {
+        tab,
+        kind: AgentKind::Codex,
+        state: AgentState::Idle,
+        detail: None,
+        session_id: Some("019a".into()),
+        cwd: None,
+        transcript: None,
+    });
+    let agent = model.tab(tab).unwrap().agent.clone().unwrap();
+    assert_eq!(agent.kind, AgentKind::Codex);
+    assert_eq!(agent.session_id.as_deref(), Some("019a"));
+    assert_eq!(
+        (agent.cwd, agent.transcript, agent.summary),
+        (None, None, None)
+    );
     model.apply(Command::ClearAgent(tab));
     assert_eq!(model.tab(tab).unwrap().agent, None);
+}
+
+#[test]
+fn tab_plugins_can_be_turned_on_off_and_back_to_default() {
+    let (mut model, _) = Model::new();
+    let tab = model.focused_tab().id;
+    model.apply(Command::SetTabPlugin(tab, "cache".into(), Some(false)));
+    model.apply(Command::SetTabPlugin(tab, "clock".into(), Some(true)));
+    let plugins = &model.tab(tab).unwrap().plugins;
+    assert_eq!(plugins.get("cache"), Some(&false));
+    assert_eq!(plugins.get("clock"), Some(&true));
+    model.apply(Command::SetTabPlugin(tab, "cache".into(), None));
+    assert!(!model.tab(tab).unwrap().plugins.contains_key("cache"));
 }
 
 #[test]
@@ -642,6 +677,142 @@ fn windows_survive_spec_and_restore() {
     assert_eq!(restored.spec().0, spec);
     assert_eq!(new_tabs.len(), tabs.len());
     assert_eq!(restored.windows().len(), 2);
+}
+
+#[test]
+fn tmux_tabs_open_beside_and_are_not_saved() {
+    let (mut model, _) = Model::new();
+    let gateway = model.focused_tab().id;
+    assert!(
+        model
+            .apply(Command::OpenTmux { beside: gateway })
+            .is_empty()
+    );
+    model.apply(Command::OpenTmux { beside: gateway });
+    let pane = model.pane(model.active_workspace().focused).unwrap();
+    assert_eq!(pane.tabs.len(), 3);
+    assert_eq!(pane.active, gateway, "opening one doesn't select it");
+    let newest = pane.tabs[1];
+    model.apply(Command::SetTmuxTitle(newest, Some("vim".into())));
+    model.apply(Command::SetTmuxTitle(gateway, Some("nope".into())));
+    assert_eq!(model.tab(newest).unwrap().title.as_deref(), Some("vim"));
+    assert_eq!(model.tab(gateway).unwrap().title, None);
+
+    model.apply(Command::SelectTab(newest));
+    let (spec, tabs) = model.spec();
+    assert_eq!(tabs, [gateway]);
+    let (restored, _, _) = Model::restore(spec);
+    let pane = restored.pane(restored.active_workspace().focused).unwrap();
+    assert_eq!(pane.tabs.len(), 1);
+}
+
+#[test]
+fn file_tabs_open_in_the_files_folder_and_save() {
+    let (mut model, _) = Model::new();
+    assert!(
+        model
+            .apply(Command::OpenFile {
+                path: "/repo/docs/README.md".into(),
+                split: Some(Direction::Right),
+            })
+            .is_empty()
+    );
+    let tab = model.focused_tab();
+    assert_eq!(tab.kind, TabKind::File);
+    assert_eq!(tab.file.as_deref(), Some("/repo/docs/README.md"));
+    assert_eq!(tab.cwd.as_deref(), Some("/repo/docs"));
+    assert_eq!(model.active_workspace().layout.leaves().len(), 2);
+
+    let spec = model.spec().0;
+    let (restored, _, _) = Model::restore(spec.clone());
+    assert_eq!(restored.spec().0, spec);
+    assert_eq!(
+        restored.focused_tab().file.as_deref(),
+        Some("/repo/docs/README.md")
+    );
+
+    let tab = model.focused_tab().id;
+    assert!(
+        model
+            .apply(Command::SetFile(tab, "/repo/src/main.rs".into()))
+            .is_empty()
+    );
+    assert_eq!(
+        model.focused_tab().file.as_deref(),
+        Some("/repo/src/main.rs")
+    );
+    assert_eq!(model.focused_tab().cwd.as_deref(), Some("/repo/src"));
+    model.apply(Command::SetFile(tab, "  ".into()));
+    assert_eq!(
+        model.focused_tab().file.as_deref(),
+        Some("/repo/src/main.rs")
+    );
+    assert!(model.apply(Command::CloseTab(tab)).is_empty());
+}
+
+#[test]
+fn agent_setup_tabs_open_save_and_close_without_effects() {
+    let (mut model, _) = Model::new();
+    assert!(
+        model
+            .apply(Command::OpenAgentSetup {
+                folder: "/repo".into(),
+                split: None,
+            })
+            .is_empty()
+    );
+    let tab = model.focused_tab().id;
+    assert_eq!(model.tab(tab).unwrap().kind, TabKind::AgentSetup);
+    assert_eq!(model.tab(tab).unwrap().cwd.as_deref(), Some("/repo"));
+    model.apply(Command::OpenAgentSetup {
+        folder: " ".into(),
+        split: Some(Direction::Down),
+    });
+    assert_eq!(
+        model.focused_tab().cwd,
+        None,
+        "a blank folder is no project"
+    );
+
+    let spec = model.spec().0;
+    let (restored, _, _) = Model::restore(spec.clone());
+    assert_eq!(restored.spec().0, spec);
+
+    assert!(model.apply(Command::CloseTab(tab)).is_empty());
+    assert!(model.tab(tab).is_none());
+}
+
+#[test]
+fn git_tabs_open_save_and_close_without_effects() {
+    let (mut model, _) = Model::new();
+    let effects = model.apply(Command::OpenGit {
+        folder: "/repo".into(),
+        split: Some(Direction::Right),
+    });
+    assert!(effects.is_empty());
+    let tab = model.focused_tab().id;
+    assert_eq!(model.tab(tab).unwrap().kind, TabKind::Git);
+    assert_eq!(model.tab(tab).unwrap().cwd.as_deref(), Some("/repo"));
+    assert_eq!(model.active_workspace().layout.leaves().len(), 2);
+
+    model.apply(Command::SetGitFolder(tab, "/other".into()));
+    model.apply(Command::SetGitFolder(tab, " ".into()));
+    assert_eq!(model.tab(tab).unwrap().cwd.as_deref(), Some("/other"));
+
+    let spec = model.spec().0;
+    let (restored, _, _) = Model::restore(spec.clone());
+    assert_eq!(restored.spec().0, spec);
+    assert!(
+        restored
+            .all_workspaces()
+            .iter()
+            .flat_map(|w| w.layout.leaves())
+            .flat_map(|p| restored.pane(p).unwrap().tabs.clone())
+            .any(|t| restored.tab(t).unwrap().kind == TabKind::Git)
+    );
+
+    assert!(model.apply(Command::CloseTab(tab)).is_empty());
+    assert!(model.tab(tab).is_none());
 }
 
 #[test]
@@ -1106,7 +1277,23 @@ fn random_command(rng: &mut Rng, model: &Model) -> Command {
         .flat_map(|p| model.pane(*p).unwrap().tabs.clone())
         .collect();
     let sessions: Vec<_> = model.sessions().collect();
-    match rng.below(29) {
+    match rng.below(34) {
+        33 => Command::SetFile(rng.pick(&tabs), "/repo/docs/guide.md".into()),
+        32 => Command::OpenFile {
+            path: "/repo/README.md".into(),
+            split: [None, Some(rng.pick(&DIRECTIONS))][rng.below(2)],
+        },
+        31 => Command::OpenAgentSetup {
+            folder: ["/repo", ""][rng.below(2)].into(),
+            split: [None, Some(rng.pick(&DIRECTIONS))][rng.below(2)],
+        },
+        30 => Command::OpenTmux {
+            beside: rng.pick(&tabs),
+        },
+        29 => Command::OpenGit {
+            folder: "/repo".into(),
+            split: [None, Some(rng.pick(&DIRECTIONS))][rng.below(2)],
+        },
         25 => match rng.below(3) {
             0 => Command::ToggleMaximize,
             1 => Command::EqualizePanes,
@@ -1220,6 +1407,9 @@ fn random_command(rng: &mut Rng, model: &Model) -> Command {
             match model.tab(tab).unwrap().kind {
                 TabKind::Terminal(session) => Command::SessionExited(session),
                 TabKind::Browser(browser) => Command::BrowserClosed(browser),
+                TabKind::Git | TabKind::Tmux | TabKind::AgentSetup | TabKind::File => {
+                    Command::CloseTab(tab)
+                }
             }
         }
     }

@@ -1,7 +1,7 @@
 //! Wraps a widget to report right clicks on it with the cursor's window position, which
 //! `mouse_area` doesn't give: context menus open where the click was.
 //!
-//! The view wraps strip tabs, sidebar workspaces and group headers in [`RightClick`]; the
+//! The view wraps strip tabs, sidebar workspaces, group headers and Git tabs in [`RightClick`]; the
 //! message opens `App.menu` at that point. Everything else (layout, drawing, operations,
 //! overlays) goes straight to the content.
 

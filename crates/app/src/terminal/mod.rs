@@ -113,6 +113,12 @@ pub enum ViewEvent {
     /// The open-link modifier (Ctrl, Cmd on macOS) was held while clicking this cell; the app
     /// looks for a link there and opens it.
     Link(GridPoint),
+    /// This cell was clicked once, without dragging or modifiers: the app moves the shell's
+    /// cursor there when it's in the command being typed at the prompt.
+    MoveCursor(GridPoint),
+    /// The open-link modifier was held while right-clicking a link at this cell; the app opens
+    /// the menu of places to open it at the point (window coordinates).
+    LinkMenu(GridPoint, Point),
     /// Enter while the app has an item to rename (`enter_renames`).
     RenameItem,
 }
@@ -429,7 +435,15 @@ impl<M> TerminalView<'_, M> {
                 self.on_reported_release(state, *button, bounds, cursor, shell);
             }
             mouse::Event::ButtonReleased(mouse::Button::Left) => match state.dragging.take() {
-                Some(false) => self.emit(shell, ViewEvent::Select(SelectOp::Clear)),
+                Some(false) => {
+                    self.emit(shell, ViewEvent::Select(SelectOp::Clear));
+                    if let Some((_, at, 1)) = state.last_click
+                        && !state.mods.alt()
+                        && !state.mods.shift()
+                    {
+                        self.emit(shell, ViewEvent::MoveCursor(at));
+                    }
+                }
                 // A drag, or a word or line: there's something selected now.
                 Some(true) if self.copy_on_select => {
                     self.emit(shell, ViewEvent::Action(Action::Copy));
@@ -480,6 +494,9 @@ impl<M> TerminalView<'_, M> {
                 self.emit(shell, ViewEvent::Link(at));
             }
             mouse::Button::Left => self.start_selection(state, at, side, shell),
+            mouse::Button::Right if state.hover.is_some() => {
+                self.emit(shell, ViewEvent::LinkMenu(at, position));
+            }
             // Windows Terminal convention: right-click copies a selection, else pastes.
             mouse::Button::Right => {
                 let action = if self.snapshot.has_selection {

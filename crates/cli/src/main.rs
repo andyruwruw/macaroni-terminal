@@ -5,11 +5,14 @@
 //!
 //! Each subcommand ([`Cmd`]) maps to one control-API [`Call`] ([`call`]), sent over a
 //! [`Client`] connection; the result is printed as a short summary or, with `--json`, raw.
-//! `setup`, `hook` and `statusline` are the Claude Code integration in [`claude`] and are handled
+//! `setup`, `hook` and `statusline` are the Claude Code integration in [`claude`], `codex-notify`
+//! Codex's in [`codex`], and `plugin` runs the built-in plugins in [`plugins`]; they're handled
 //! before connecting. Errors print to stderr with exit code 1.
 
 mod claude;
 mod client;
+mod codex;
+mod plugins;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -141,6 +144,18 @@ enum Cmd {
     /// Stream events (tabs and workspaces opening and closing, titles, notifications) as JSON
     /// lines until interrupted.
     Events,
+    /// Show a file in a tab: text and code highlighted, Markdown rendered, pictures and SVGs
+    /// drawn. Without --split, it opens beside the tab.
+    Open {
+        /// The file (relative to this folder, or absolute).
+        path: PathBuf,
+        /// Open in a new pane on this side.
+        #[arg(long, value_enum)]
+        split: Option<Side>,
+        /// The tab to open from.
+        #[arg(long)]
+        tab: Option<u64>,
+    },
     /// Drive browser tabs. From a terminal, these act on the browser in that terminal's
     /// workspace (`--tab` picks another tab).
     Browser {
@@ -148,7 +163,8 @@ enum Cmd {
         #[command(subcommand)]
         command: BrowserCmd,
     },
-    /// Connect a coding agent to macaroni (adds hooks and a status line to its settings).
+    /// Connect a coding agent to macaroni (Claude Code: hooks and a status line in its
+    /// settings; Codex: a notify program in its config).
     Setup {
         /// The agent to set up.
         #[arg(value_enum)]
@@ -159,9 +175,25 @@ enum Cmd {
         /// Don't ask before writing.
         #[arg(long)]
         yes: bool,
-        /// Settings file to change (default: ~/.claude/settings.json).
+        /// Settings file to change (default: ~/.claude/settings.json, or for Codex
+        /// ~/.codex/config.toml).
         #[arg(long)]
         settings: Option<PathBuf>,
+    },
+    /// Run by Codex after each turn (its `notify` program): reports the turn to macaroni, then
+    /// runs the program after `--`, if any. The JSON comes last.
+    #[command(hide = true)]
+    CodexNotify {
+        /// `[-- <program> <args>...] <json>`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run one of macaroni's built-in plugins (the app runs these for panels).
+    #[command(hide = true)]
+    Plugin {
+        /// Which plugin.
+        #[arg(value_enum)]
+        plugin: BuiltIn,
     },
     /// Run by Claude Code hooks: reads the hook's JSON on stdin and reports the agent's state.
     #[command(hide = true)]
@@ -233,6 +265,15 @@ enum BrowserCmd {
 enum Agent {
     /// Claude Code.
     Claude,
+    /// OpenAI's Codex CLI.
+    Codex,
+}
+
+/// macaroni's built-in plugins.
+#[derive(Clone, Copy, ValueEnum)]
+enum BuiltIn {
+    /// Whether an agent's prompt cache is still warm.
+    Cache,
 }
 
 /// An explicit `--tab` wins; inside a macaroni terminal the default is that terminal's tab.
@@ -323,8 +364,21 @@ fn call(cmd: &Cmd) -> Call {
         },
         Cmd::Clear { tab } => Call::ClearAttention { tab: own_tab(*tab) },
         Cmd::Events => Call::Subscribe,
+        Cmd::Open { path, split, tab } => Call::OpenFile {
+            tab: own_tab(*tab),
+            // The app runs elsewhere, so a relative path is made whole here.
+            path: std::path::absolute(path)
+                .unwrap_or_else(|_| path.clone())
+                .to_string_lossy()
+                .into_owned(),
+            split: split.map(direction),
+        },
         Cmd::Browser { command } => browser_call(command),
-        Cmd::Setup { .. } | Cmd::Hook | Cmd::Statusline => {
+        Cmd::Setup { .. }
+        | Cmd::Hook
+        | Cmd::Statusline
+        | Cmd::CodexNotify { .. }
+        | Cmd::Plugin { .. } => {
             unreachable!("handled before connecting")
         }
     }
@@ -357,6 +411,10 @@ fn print_tree(tree: &Tree) {
                 let kind = match tab.kind {
                     macaroni_ipc::TabKind::Terminal => "",
                     macaroni_ipc::TabKind::Browser => "browser  ",
+                    macaroni_ipc::TabKind::Git => "git      ",
+                    macaroni_ipc::TabKind::AgentSetup => "agents   ",
+                    macaroni_ipc::TabKind::File => "file     ",
+                    macaroni_ipc::TabKind::Tmux => "tmux     ",
                 };
                 let attention = tab
                     .attention
@@ -387,7 +445,7 @@ fn print_tree(tree: &Tree) {
     }
 }
 
-/// Runs one command: the Claude Code ones locally, everything else as a call to the app, then
+/// Runs one command: the agent integrations and built-in plugins locally, everything else as a call to the app, then
 /// prints the result. `events` keeps reading and printing event lines until the app goes away
 /// or stdout closes. Errors are messages for stderr.
 fn run(cli: &Cli) -> Result<(), String> {
@@ -406,6 +464,22 @@ fn run(cli: &Cli) -> Result<(), String> {
             yes,
             settings,
         } => return claude::setup(*remove, *yes, settings.clone()),
+        Cmd::Setup {
+            agent: Agent::Codex,
+            remove,
+            yes,
+            settings,
+        } => return codex::setup(*remove, *yes, settings.clone()),
+        Cmd::CodexNotify { args } => {
+            codex::notify(args);
+            return Ok(());
+        }
+        Cmd::Plugin {
+            plugin: BuiltIn::Cache,
+        } => {
+            plugins::cache();
+            return Ok(());
+        }
         _ => {}
     }
 

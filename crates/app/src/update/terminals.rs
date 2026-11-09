@@ -2,31 +2,43 @@
 //!
 //! A session the model asks for waits in `App.pending` until both its view has reported a
 //! grid size ([`ViewEvent::Resize`]) and the event channel exists ([`App::events_ready`]),
-//! whichever comes last; then [`App::spawn`] starts the shell at that size. The first one
-//! shown also starts the rest, the hidden tabs', at its size ([`App::start_hidden`]). Events from the
+//! whichever comes last; then [`App::spawn`] starts the shell at that size, off the UI thread,
+//! and [`App::session_started`] makes it the tab's running terminal. The hidden tabs' start
+//! at the last shown one's size, a few at a time ([`App::start_hidden`]). Events from the
 //! session's threads arrive as [`App::session_event`], and input, selection, scrolling and
-//! clicks from its view as [`App::view_event`]. Programs asking for attention go through
+//! clicks from its view as [`App::view_event`] (Ctrl+clicked links go to `update/links.rs`).
+//! Programs asking for attention go through
 //! [`App::attention`], whatever the source (OSC 9/777/99, the bell, `macaroni-cli notify`).
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use iced::Task;
 use iced::futures::channel::mpsc::UnboundedSender;
-use macaroni_core::{AgentState, Command, SessionId, TabId, TabKind};
+use macaroni_core::{AgentKind, AgentState, Command, SessionId, TabId, TabKind};
 use macaroni_term::{
-    GridPoint, GridSize, Scroll, Session, SessionConfig, SessionEvent, encode_paste, file_at,
-    is_openable, url_at,
+    GridPoint, GridSize, Scroll, Session, SessionConfig, SessionEvent, Source, encode_paste,
 };
 
 use super::config::cursor_shape;
-use crate::message::Message;
-use crate::state::Running;
+use crate::message::{Message, Started};
+use crate::state::{Running, Starting};
 use crate::terminal::{SelectOp, ViewEvent};
+use crate::vscode::off_thread;
 use crate::{APP_NAME, App, bell, notifications, session};
 
 /// How many of a terminal's last non-blank rows must show a permission dialog for Allow and
 /// Deny to answer it: Claude Code draws it under its output, above at most a few lines of hints.
 const PERMISSION_ROWS: usize = 16;
+
+/// How many terminals may be on their way to a first prompt before hidden tabs' wait their
+/// turn. Git Bash runs dozens of short-lived processes before its prompt, and many shells
+/// doing that at once slow every one of them.
+const MAX_BOOTING: usize = 3;
+
+/// How long a terminal counts as on its way to a prompt. A shell without the prompt
+/// integration (cmd, fish, a remote shell) never reports one.
+const BOOT_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl App {
     /// The session event channel exists: start every terminal whose view already has a size.
@@ -40,10 +52,12 @@ impl App {
             .iter()
             .filter_map(|(id, size)| size.map(|s| (*id, s)))
             .collect();
-        for (id, size) in ready {
-            self.spawn(id, size);
-        }
-        Task::none()
+        let mut tasks: Vec<_> = ready
+            .into_iter()
+            .map(|(id, size)| self.spawn(id, size))
+            .collect();
+        tasks.push(self.start_hidden());
+        Task::batch(tasks)
     }
 
     /// Pastes clipboard text into a terminal, bracketed if the program asked for that.
@@ -56,19 +70,21 @@ impl App {
 
     /// Starts the terminal `id` at `size`, or remembers the size until the event channel exists.
     ///
-    /// Side effects: spawns the shell (with its reader and waiter threads), types
-    /// `claude --resume` into it for a restored agent, and on failure shows the error as the
-    /// tab's title.
-    fn spawn(&mut self, id: SessionId, size: GridSize) {
+    /// The shell is spawned off the UI thread: creating the pseudoconsole and the process takes
+    /// tens of milliseconds, which for a restored session's many tabs froze the window.
+    /// [`App::session_started`] finishes the job. The task also wakes [`App::start_hidden`]
+    /// after [`BOOT_TIMEOUT`] when hidden tabs are waiting, in case this shell never reports
+    /// a prompt.
+    fn spawn(&mut self, id: SessionId, size: GridSize) -> Task<Message> {
         let Some(events) = self.events.clone() else {
             self.pending.insert(id, Some(size));
-            return;
+            return Task::none();
         };
         self.pending.remove(&id);
-        let restored = self
-            .model
-            .tab_for_session(id)
-            .and_then(|tab| self.restored.remove(&tab))
+        let tab = self.model.tab_for_session(id);
+        // Kept in `restored` until the shell runs, so a save meanwhile still has it.
+        let restored = tab
+            .and_then(|tab| self.restored.get(&tab).cloned())
             .unwrap_or_default();
         // A restored tab reopens where it was; a new one starts in its workspace's folder, or
         // `[terminal] default_dir` for a workspace without one. A directory that's gone
@@ -91,7 +107,16 @@ impl App {
                     .filter(|dir| dir.is_dir())
             });
         let (program, args) = self.program_for(id, &restored);
+        let source = match self
+            .ssh_tabs
+            .get(&id)
+            .and_then(|name| self.config.ssh.iter().find(|p| p.label() == name))
+        {
+            Some(profile) => Source::Ssh(crate::update::menus::ssh_target(profile)),
+            None => Source::Local,
+        };
         let config = SessionConfig {
+            source,
             // Blank means the platform's default shell.
             program: Some(program).filter(|p| !p.trim().is_empty()),
             args,
@@ -103,65 +128,108 @@ impl App {
             cursor: cursor_shape(self.config.terminal.cursor_style),
             triggers: self.triggers.watched(),
         };
-        match Session::spawn(config, move |event| {
-            let _ = events.unbounded_send((id, event));
-        }) {
-            Ok(session) => {
-                self.show_saved_scrollback(&session, &restored);
-                // The workspace's startup command, for shells only: not SSH tabs, whose shell is
-                // on another machine.
-                let startup = self
-                    .model
-                    .tab_for_session(id)
-                    .and_then(|tab| self.workspace_of_tab(tab))
-                    .and_then(|ws| self.model.workspace(ws)?.startup.clone())
-                    .filter(|_| !self.ssh_tabs.contains_key(&id) && restored.ssh.is_none());
-                if let Some(command) = startup {
-                    session.write(format!("{command}\r").as_bytes());
-                }
-                self.resume_agent(&session, &restored);
-                if let Some(text) = self
-                    .model
-                    .tab_for_session(id)
-                    .and_then(|tab| self.startup_input.remove(&tab))
-                {
-                    session.write(text.as_bytes());
-                }
-                let snapshot = session.snapshot();
-                self.running.insert(
-                    id,
-                    Running {
-                        session,
-                        snapshot,
-                        size,
-                    },
-                );
-            }
-            Err(err) => {
-                // Setting a title never quits, so there's no task to keep.
-                let _ = self.apply(Command::SetTabTitle(
-                    id,
-                    Some(format!("failed to start: {err}")),
-                ));
-            }
+        self.starting.insert(
+            id,
+            Starting {
+                tab,
+                spawned: size,
+                size,
+                restored,
+            },
+        );
+        self.booting.insert(id, Instant::now());
+        let started = Task::future(off_thread(move || {
+            Session::spawn(config, move |event| {
+                let _ = events.unbounded_send((id, event));
+            })
+        }))
+        .map(move |result| Message::SessionStarted(id, Started::new(result)));
+        if self.pending.values().any(Option::is_none) {
+            let wake = Task::future(off_thread(|| std::thread::sleep(BOOT_TIMEOUT)))
+                .map(|()| Message::StartHidden);
+            Task::batch([started, wake])
+        } else {
+            started
         }
     }
 
-    /// What a new terminal runs: the launch command for the first one, else the shell picked
-    /// for its tab (or the SSH profile a restored tab ran, while it's still in `[[ssh]]`), else
-    /// the configured shell (an empty program for the default shell).
+    /// A shell started by [`App::spawn`] is up: shows the tab's saved scrollback, types its
+    /// startup command, agent resume and typeahead, and makes it the tab's running terminal.
+    /// A tab closed meanwhile drops the session, which kills it. On failure, the error becomes
+    /// the tab's title.
+    pub(crate) fn session_started(&mut self, id: SessionId, started: &Started) -> Task<Message> {
+        let Some(result) = started.take() else {
+            return Task::none();
+        };
+        let Some(starting) = self.starting.remove(&id) else {
+            return Task::none();
+        };
+        if let Some(tab) = starting.tab {
+            self.restored.remove(&tab);
+        }
+        let typed = self.typeahead.remove(&id);
+        let session = match result {
+            Ok(session) => session,
+            Err(err) => {
+                self.booting.remove(&id);
+                return Task::batch([
+                    self.apply(Command::SetTabTitle(
+                        id,
+                        Some(format!("failed to start: {err}")),
+                    )),
+                    self.start_hidden(),
+                ]);
+            }
+        };
+        let restored = &starting.restored;
+        self.show_saved_scrollback(&session, restored);
+        // The workspace's startup command, for shells only: not SSH tabs, whose shell is on
+        // another machine.
+        let startup = starting
+            .tab
+            .and_then(|tab| self.workspace_of_tab(tab))
+            .and_then(|ws| self.model.workspace(ws)?.startup.clone())
+            .filter(|_| !self.ssh_tabs.contains_key(&id) && restored.ssh.is_none());
+        if let Some(command) = startup {
+            session.write(format!("{command}\r").as_bytes());
+        }
+        self.resume_agent(&session, restored);
+        if let Some(text) = starting.tab.and_then(|tab| self.startup_input.remove(&tab)) {
+            session.write(text.as_bytes());
+        }
+        // After the commands macaroni types, so what the user typed lands on their line.
+        if let Some(typed) = typed {
+            session.write(&typed);
+        }
+        if starting.size != starting.spawned {
+            session.resize(starting.size);
+        }
+        let snapshot = session.snapshot();
+        self.running.insert(
+            id,
+            Running {
+                session,
+                snapshot,
+                size: starting.size,
+            },
+        );
+        Task::none()
+    }
+
+    /// What a new terminal runs locally: the launch command for the first one, else the shell
+    /// picked for its tab, else the configured shell (an empty program for the default shell).
+    /// A restored SSH tab is noted in `ssh_tabs` (while its profile is still in `[[ssh]]`), which
+    /// makes `spawn` connect instead.
     fn program_for(
         &mut self,
         id: SessionId,
         restored: &session::SavedTab,
     ) -> (String, Vec<String>) {
-        let mut picked = self.tab_shells.remove(&id);
-        if picked.is_none()
-            && let Some(name) = &restored.ssh
-            && let Some(profile) = self.config.ssh.iter().find(|p| p.label() == name)
+        let picked = self.tab_shells.remove(&id);
+        if let Some(name) = &restored.ssh
+            && self.config.ssh.iter().any(|p| p.label() == name)
         {
             self.ssh_tabs.insert(id, name.clone());
-            picked = Some(crate::update::menus::ssh_shell(profile));
         }
         self.first_command.take().unwrap_or_else(|| match picked {
             Some(choice) => (choice.program, choice.args),
@@ -214,14 +282,16 @@ impl App {
         let _ = std::fs::remove_file(path);
     }
 
-    /// Resumes the Claude Code session a restored tab had, if enabled and its id is safe to type.
-    /// Typed straight away: the shell reads it once it's ready, like typeahead.
+    /// Resumes the agent session a restored tab had (Claude Code's or Codex's), if enabled and
+    /// its id is safe to type. Typed straight away: the shell reads it once it's ready, like
+    /// typeahead.
     fn resume_agent(&self, session: &Session, restored: &session::SavedTab) {
         if self.config.session.resume_agents
             && let Some(agent) = restored.agent_session.as_deref()
             && session::is_safe_session_id(agent)
         {
-            session.write(format!("claude --resume {agent}\r").as_bytes());
+            let command = restored.agent_kind.resume(agent);
+            session.write(format!("{command}\r").as_bytes());
         }
     }
 
@@ -229,6 +299,11 @@ impl App {
     /// notification, a directory change, a clipboard write, or the program exiting (which the
     /// model turns into closing the tab).
     pub(crate) fn session_event(&mut self, id: SessionId, event: SessionEvent) -> Task<Message> {
+        // A tmux pane's session has no tab of its own: only its screen matters here, and its
+        // end, which tmux has already reported.
+        if Self::is_tmux_pane(id) && !matches!(event, SessionEvent::Wakeup) {
+            return Task::none();
+        }
         match event {
             SessionEvent::Wakeup => {
                 if let Some(r) = self.running.get_mut(&id) {
@@ -253,22 +328,70 @@ impl App {
                 }
             }
             SessionEvent::Notify(n) => self.attention(id, n.title, n.body),
+            SessionEvent::CommandStarted(command) => {
+                self.record_command(id, command);
+                Task::none()
+            }
             SessionEvent::CommandFinished { exit, elapsed } => {
+                // Codex never says it exited (Claude Code's `SessionEnd` does), so its agent
+                // ends with the command it ran as.
+                let mut cleared = Task::none();
+                if let Some(tab) = self.model.tab_for_session(id)
+                    && self
+                        .model
+                        .tab(tab)
+                        .and_then(|t| t.agent.as_ref())
+                        .is_some_and(|a| a.kind == AgentKind::Codex)
+                {
+                    cleared = self.apply(Command::ClearAgent(tab));
+                }
                 let long = self.config.notifications.long_command;
                 if long == 0 || elapsed.as_secs() < u64::from(long) {
-                    return Task::none();
+                    return cleared;
                 }
                 let took = crate::label::duration(elapsed);
                 let body = match exit {
                     Some(0) | None => format!("Finished after {took}"),
                     Some(code) => format!("Failed (exit {code}) after {took}"),
                 };
-                self.attention(id, Some("Command finished".to_owned()), body)
+                Task::batch([
+                    cleared,
+                    self.attention(id, Some("Command finished".to_owned()), body),
+                ])
             }
-            SessionEvent::Cwd(path) => self.apply(Command::SetTabCwd(id, Some(path))),
+            SessionEvent::Cwd(path) => {
+                // The first directory comes with the first prompt: this shell is up, and the
+                // next hidden tab's can start.
+                let up = self.booting.remove(&id).is_some();
+                let cwd = self.apply(Command::SetTabCwd(id, Some(path)));
+                if up {
+                    Task::batch([cwd, self.start_hidden()])
+                } else {
+                    cwd
+                }
+            }
             SessionEvent::Triggered { trigger, line } => self.triggered(id, trigger, line),
             SessionEvent::ClipboardStore(text) => iced::clipboard::write(text),
-            SessionEvent::Exited(code) => self.session_exited(id, code),
+            SessionEvent::Exited(code) => {
+                // A gateway that ended without tmux saying so (a dropped connection) takes its
+                // tmux tabs with it.
+                let tmux = self.tmux_teardown(id);
+                self.booting.remove(&id);
+                Task::batch([tmux, self.session_exited(id, code), self.start_hidden()])
+            }
+            SessionEvent::Tmux(event) => self.tmux_event(id, event),
+        }
+    }
+
+    /// Remembers a command the user ran in terminal `id`, under its pane and workspace.
+    fn record_command(&mut self, id: SessionId, command: String) {
+        let Some(tab) = self.model.tab_for_session(id) else {
+            return;
+        };
+        if let (Some(pane), Some(ws)) = (self.model.pane_of_tab(tab), self.workspace_of_tab(tab)) {
+            self.history
+                .record(ws, pane, command, crate::history::now());
+            self.session_dirty = true;
         }
     }
 
@@ -292,8 +415,8 @@ impl App {
         Task::batch([badge, notice])
     }
 
-    /// A terminal's program exited: its tab closes, except an SSH tab whose `ssh` failed (a
-    /// connection that couldn't be made or was dropped), which stays to show why.
+    /// A terminal's program exited: its tab closes, except an SSH tab whose connection failed or
+    /// dropped (a non-zero exit), which stays to show why.
     fn session_exited(&mut self, id: SessionId, code: Option<u32>) -> Task<Message> {
         self.triggers.forget(id);
         let Some(name) = self.ssh_tabs.get(&id).filter(|_| code != Some(0)).cloned() else {
@@ -314,7 +437,7 @@ impl App {
         ))
     }
 
-    /// Enter in a disconnected SSH tab: runs its profile again in the same tab, at its size.
+    /// Enter in a disconnected SSH tab: connects its profile again in the same tab, at its size.
     /// The profile is looked up by name, so a removed one closes the tab instead.
     fn reconnect(&mut self, id: SessionId) -> Task<Message> {
         self.disconnected.remove(&id);
@@ -322,19 +445,29 @@ impl App {
             .ssh_tabs
             .get(&id)
             .and_then(|name| self.config.ssh.iter().find(|p| p.label() == name));
-        let (Some(profile), Some(size)) = (profile, self.running.get(&id).map(|r| r.size)) else {
+        let (Some(_), Some(size)) = (profile, self.running.get(&id).map(|r| r.size)) else {
             return self.apply(Command::SessionExited(id));
         };
-        self.tab_shells
-            .insert(id, crate::update::menus::ssh_shell(profile));
-        self.spawn(id, size);
-        self.apply(Command::SetTabTitle(id, None))
+        let spawned = self.spawn(id, size);
+        Task::batch([spawned, self.apply(Command::SetTabTitle(id, None))])
     }
 
     /// Handles what a terminal's view reported.
     pub(crate) fn view_event(&mut self, id: SessionId, event: ViewEvent) -> Task<Message> {
+        if matches!(event, ViewEvent::Write(_)) {
+            // Screen readers echo typed keys themselves; see `accessibility::tree`.
+            self.reader.typed = Some(std::time::Instant::now());
+        }
+        if let ViewEvent::Write(bytes) = &event
+            && self.tmux_gateway_input(id, bytes)
+        {
+            return Task::none();
+        }
+        if Self::is_tmux_pane(id) && matches!(event, ViewEvent::Clicked) {
+            return self.tmux_pane_clicked(id);
+        }
         match event {
-            ViewEvent::Resize(size) => self.resize_session(id, size),
+            ViewEvent::Resize(size) => return self.resize_session(id, size),
             ViewEvent::Write(bytes) if self.disconnected.contains(&id) => {
                 if bytes.contains(&b'\r') {
                     return self.reconnect(id);
@@ -345,6 +478,8 @@ impl App {
             ViewEvent::Scroll(scroll) => self.scroll(id, scroll),
             ViewEvent::Focus(focused) => self.report_focus(id, focused),
             ViewEvent::Link(at) => return self.open_link_at(id, at),
+            ViewEvent::MoveCursor(at) => self.move_cursor(id, at),
+            ViewEvent::LinkMenu(at, point) => return self.link_menu(id, at, point),
             ViewEvent::RenameItem => return self.rename_focused_item(),
             ViewEvent::Clicked => return self.view_clicked(id),
             ViewEvent::Action(action) => {
@@ -358,7 +493,11 @@ impl App {
 
     /// Resizes a running terminal to its view, or starts one that was waiting for its size. A
     /// report of the size it already has is ignored, so the shell doesn't reflow for nothing.
-    fn resize_session(&mut self, id: SessionId, size: GridSize) {
+    fn resize_session(&mut self, id: SessionId, size: GridSize) -> Task<Message> {
+        // A reconnecting SSH tab is both: the old session still shows until the new one runs.
+        if let Some(starting) = self.starting.get_mut(&id) {
+            starting.size = size;
+        }
         if let Some(r) = self.running.get_mut(&id) {
             if r.size != size {
                 r.session.resize(size);
@@ -366,31 +505,51 @@ impl App {
                 r.snapshot = r.session.snapshot();
             }
         } else if self.pending.contains_key(&id) {
-            self.spawn(id, size);
-            self.start_hidden(size);
+            self.hidden_size = Some(size);
+            return Task::batch([self.spawn(id, size), self.start_hidden()]);
         }
+        Task::none()
     }
 
-    /// Starts every terminal that's waiting with no size, because its tab isn't shown (another
-    /// workspace's, or behind its pane's open tab), at `size`: the size the terminal just shown
-    /// got, the best guess there is. So after a restart every tab's shell runs and its agent
-    /// resumes without the tab being opened first; showing one resizes it to its view.
-    fn start_hidden(&mut self, size: GridSize) {
+    /// Starts terminals that are waiting with no size, because their tab isn't shown (another
+    /// workspace's, or behind its pane's open tab), at the size the last terminal shown got,
+    /// the best guess there is. So after a restart every tab's shell runs and its agent resumes
+    /// without the tab being opened first; showing one resizes it to its view.
+    ///
+    /// Only while fewer than [`MAX_BOOTING`] terminals are on their way to a first prompt: a
+    /// restored session can have dozens of tabs, and starting every shell at once slowed each
+    /// of them, the ones being looked at included, from about a second to several. A tab
+    /// shown before its turn starts right away (`resize_session`). Called again as shells
+    /// reach their prompt or exit, and by [`Message::StartHidden`].
+    pub(crate) fn start_hidden(&mut self) -> Task<Message> {
+        let Some(size) = self.hidden_size.filter(|_| self.events.is_some()) else {
+            return Task::none();
+        };
+        self.booting
+            .retain(|_, since| since.elapsed() < BOOT_TIMEOUT);
+        let room = MAX_BOOTING.saturating_sub(self.booting.len());
         let hidden: Vec<_> = self
             .pending
             .iter()
             .filter(|(_, size)| size.is_none())
             .map(|(id, _)| *id)
+            .take(room)
             .collect();
-        for id in hidden {
-            self.spawn(id, size);
-        }
+        Task::batch(hidden.into_iter().map(|id| self.spawn(id, size)))
     }
 
     /// Sends typed input to the shell, first dropping the selection and scrolling to the bottom.
     fn write_input(&mut self, id: SessionId, bytes: &[u8]) {
         self.item_focus = None;
         self.clear_attention(id);
+        // Checked first: a reconnecting SSH tab still has its old, ended session running.
+        if self.starting.contains_key(&id) || self.pending.contains_key(&id) {
+            self.typeahead
+                .entry(id)
+                .or_default()
+                .extend_from_slice(bytes);
+            return;
+        }
         if let Some(r) = self.running.get_mut(&id) {
             if r.snapshot.has_selection {
                 r.session.clear_selection();
@@ -418,6 +577,15 @@ impl App {
         }
     }
 
+    /// Moves the shell's cursor to a clicked cell of the command being typed, with arrow keys.
+    fn move_cursor(&self, id: SessionId, at: GridPoint) {
+        if let Some(r) = self.running.get(&id)
+            && let Some(keys) = r.session.click_to_cursor(at)
+        {
+            r.session.write(&keys);
+        }
+    }
+
     /// Scrolls a terminal through its scrollback.
     fn scroll(&mut self, id: SessionId, scroll: Scroll) {
         if let Some(r) = self.running.get_mut(&id) {
@@ -435,66 +603,6 @@ impl App {
         }
     }
 
-    /// Opens the link at a cell: an OSC 8 hyperlink, else a URL in the text, else a file
-    /// reference (`src/main.rs:12:5`) that exists, in a text editor at its line.
-    fn open_link_at(&mut self, id: SessionId, at: GridPoint) -> Task<Message> {
-        let Some(r) = self.running.get(&id) else {
-            return Task::none();
-        };
-        let url = r
-            .session
-            .hyperlink_at(at)
-            .filter(|u| is_openable(u))
-            .or_else(|| url_at(r.snapshot.rows.get(at.row)?, at.col).map(|link| link.url));
-        if let Some(url) = url {
-            return self.open_link(url);
-        }
-        let file = r
-            .snapshot
-            .rows
-            .get(at.row)
-            .and_then(|row| file_at(row, at.col));
-        if let Some(file) = file
-            && let Some(path) = self.resolve_file(id, &file.path)
-        {
-            crate::open_text_file(&path, file.line, file.column);
-        }
-        Task::none()
-    }
-
-    /// `path` as written in a terminal's output, as an existing file: Git Bash's `/c/x` read as
-    /// `C:/x`, and a relative path taken from the tab's directory (else its workspace's).
-    /// `None` when there's no such file.
-    fn resolve_file(&self, id: SessionId, path: &str) -> Option<std::path::PathBuf> {
-        let mut written = path.to_owned();
-        if cfg!(windows) {
-            let bytes = path.as_bytes();
-            if bytes.len() >= 3
-                && bytes[0] == b'/'
-                && bytes[1].is_ascii_alphabetic()
-                && bytes[2] == b'/'
-            {
-                written = format!("{}:{}", (bytes[1] as char).to_ascii_uppercase(), &path[2..]);
-            }
-        }
-        let path = std::path::PathBuf::from(&written);
-        let full = if path.is_absolute() {
-            path
-        } else {
-            let tab = self.model.tab_for_session(id)?;
-            let base = self
-                .model
-                .tab(tab)
-                .and_then(|t| t.cwd.clone())
-                .or_else(|| {
-                    let ws = self.workspace_of_tab(tab)?;
-                    self.workspace_dir(self.model.workspace(ws)?)
-                })?;
-            std::path::Path::new(&base).join(path)
-        };
-        full.is_file().then_some(full)
-    }
-
     /// A click in an unfocused terminal selects its tab.
     fn view_clicked(&mut self, id: SessionId) -> Task<Message> {
         self.item_focus = None;
@@ -506,9 +614,10 @@ impl App {
     }
 
     /// A program asked for attention. Nothing happens if the tab is muted or the user is
-    /// already looking at it; otherwise the tab is marked, subscribers are told, and an OS
-    /// notification goes out (if enabled) when the tab is off screen or the window isn't
-    /// focused.
+    /// already looking at it; otherwise the tab is marked, subscribers are told, and when the
+    /// tab is off screen or the window isn't focused, `[notifications] sound` plays and an OS
+    /// notification goes out (if enabled). `"system"` is the notification's own sound (the
+    /// system's alert when notifications are off).
     pub(crate) fn attention(
         &mut self,
         id: SessionId,
@@ -530,8 +639,16 @@ impl App {
                     .and_then(|t| t.label().map(str::to_owned))
             })
             .unwrap_or_else(|| APP_NAME.to_owned());
-        if self.config.notifications.os && (!self.window_focused || !visible) {
-            notifications::show(heading, body.clone(), tab, self.asks_permission(tab));
+        if !self.window_focused || !visible {
+            let n = &self.config.notifications;
+            let system = n.sound.trim() == "system";
+            if n.os {
+                let ask = self.asks_permission(tab);
+                notifications::show(heading, body.clone(), tab, ask, system);
+            }
+            if !(system && n.os) {
+                bell::play(&n.sound);
+            }
         }
         self.broadcast(macaroni_ipc::Event::Notification {
             tab: tab.0,

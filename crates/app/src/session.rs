@@ -1,6 +1,7 @@
 //! The saved session (`session.json` next to the config): workspaces, splits, tabs, and for each
 //! tab its working directory and the coding-agent session running in it (or, for a browser tab,
-//! its address), so the next launch can rebuild the layout and resume the agents.
+//! its address), so the next launch can rebuild the layout and resume the agents. Each workspace
+//! also carries the commands run in it (`history.rs`).
 //!
 //! [`capture`] turns the model into a [`Saved`] (written by [`save`] from
 //! `update/effects.rs`), and [`into_spec`] turns a loaded one back into what [`Model::restore`]
@@ -11,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use macaroni_core::{
-    Axis, LayoutSpec, Model, SessionId, Spec, TabId, TabKind, TabSpec, WorkspaceSpec,
+    AgentKind, Axis, LayoutSpec, Model, SessionId, Spec, TabId, TabKind, TabSpec, WorkspaceSpec,
 };
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +44,9 @@ pub struct Saved {
     /// The sidebar's dragged width and whether it's folded away.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar: Option<SidebarLayout>,
+    /// File tabs show the folder tree.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub file_tree: bool,
 }
 
 /// Whether `n` is 0, so a default is left out of the file.
@@ -129,6 +133,23 @@ pub struct SavedWorkspace {
     /// The index in [`Saved::windows`] of its window.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub window: usize,
+    /// The commands run in it, for the command history picker (see `history.rs`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<SavedCommand>,
+}
+
+/// A command run in a workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedCommand {
+    /// The command line.
+    pub command: String,
+    /// The index of the pane it ran in, in the layout's leaf order; unset when that pane closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<usize>,
+    /// How many times it ran in that pane.
+    pub runs: u32,
+    /// When it last ran, in seconds since the Unix epoch.
+    pub last: u64,
 }
 
 /// A workspace's split tree, mirroring [`LayoutSpec`] with each tab's details in place.
@@ -172,15 +193,28 @@ pub struct SavedTab {
     /// The terminal's working directory (from OSC 7, else the agent's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    /// The Claude Code session to resume in this tab.
+    /// The coding agent session to resume in this tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<String>,
+    /// Which agent `agent_session` belongs to; absent for Claude Code (files from before Codex
+    /// was known only had Claude Code's).
+    #[serde(default, skip_serializing_if = "SavedAgent::is_claude")]
+    pub agent_kind: SavedAgent,
     /// Set for SSH tabs: the `[[ssh]]` profile to connect to again, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<String>,
     /// Set for browser tabs: the page to reopen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// A Git tab's folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<String>,
+    /// Set for agent setup tabs: the project folder (empty for none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_setup: Option<String>,
+    /// Set for file tabs: the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
     /// The user's name for the tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -199,6 +233,46 @@ pub struct SavedTab {
     /// The file in [`scrollback_dir`] holding the terminal's text from before the restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scrollback: Option<String>,
+    /// Plugins turned on or off for the tab, by id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugins: BTreeMap<String, bool>,
+}
+
+/// Which coding agent a [`SavedTab::agent_session`] belongs to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedAgent {
+    /// Claude Code: resumed with `claude --resume <id>`.
+    #[default]
+    Claude,
+    /// Codex: resumed with `codex resume <id>`.
+    Codex,
+}
+
+impl SavedAgent {
+    /// Whether it's Claude Code, which the file leaves out.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn is_claude(&self) -> bool {
+        *self == SavedAgent::Claude
+    }
+
+    /// The command that resumes session `id` of this agent in a shell. `id` must have passed
+    /// [`is_safe_session_id`].
+    pub fn resume(self, id: &str) -> String {
+        match self {
+            SavedAgent::Claude => format!("claude --resume {id}"),
+            SavedAgent::Codex => format!("codex resume {id}"),
+        }
+    }
+}
+
+impl From<AgentKind> for SavedAgent {
+    fn from(kind: AgentKind) -> Self {
+        match kind {
+            AgentKind::Claude => SavedAgent::Claude,
+            AgentKind::Codex => SavedAgent::Codex,
+        }
+    }
 }
 
 /// Where terminals' text is kept across a restart (`[session] keep_scrollback`): a
@@ -253,6 +327,7 @@ pub fn capture(
                 .group
                 .and_then(|g| groups.iter().position(|group| group.id == g)),
             window: spec.window,
+            commands: Vec::new(),
         })
         .collect();
     Saved {
@@ -278,6 +353,7 @@ pub fn capture(
             })
             .collect(),
         sidebar: None,
+        file_tree: false,
     }
 }
 
@@ -296,6 +372,7 @@ pub fn saved_tab(
         pinned: tab.is_some_and(|t| t.pinned),
         icon: tab.and_then(|t| t.icon.clone()),
         color: tab.and_then(|t| t.color.clone()),
+        plugins: tab.map(|t| t.plugins.clone()).unwrap_or_default(),
         ..SavedTab::default()
     };
     if let Some(tab) = tab
@@ -306,10 +383,35 @@ pub fn saved_tab(
             ..common
         };
     }
+    if let Some(tab) = tab
+        && tab.kind == TabKind::File
+    {
+        return SavedTab {
+            file: Some(tab.file.clone().unwrap_or_default()),
+            ..common
+        };
+    }
+    if let Some(tab) = tab
+        && tab.kind == TabKind::AgentSetup
+    {
+        return SavedTab {
+            agent_setup: Some(tab.cwd.clone().unwrap_or_default()),
+            ..common
+        };
+    }
+    if let Some(tab) = tab
+        && tab.kind == TabKind::Git
+    {
+        return SavedTab {
+            git: Some(tab.cwd.clone().unwrap_or_default()),
+            ..common
+        };
+    }
     if let Some(pending) = restored.get(&id) {
         return SavedTab {
             cwd: pending.cwd.clone(),
             agent_session: pending.agent_session.clone(),
+            agent_kind: pending.agent_kind,
             ssh: pending.ssh.clone(),
             ..common
         };
@@ -323,6 +425,7 @@ pub fn saved_tab(
             .and_then(|a| a.cwd.clone())
             .or_else(|| tab.and_then(|t| t.cwd.clone())),
         agent_session: agent.and_then(|a| a.session_id.clone()),
+        agent_kind: agent.map(|a| a.kind.into()).unwrap_or_default(),
         ssh: match tab.map(|t| &t.kind) {
             Some(TabKind::Terminal(session)) => ssh.get(session).cloned(),
             _ => None,
@@ -418,9 +521,18 @@ fn spec_from_layout(layout: SavedLayout, out: &mut Vec<SavedTab>) -> LayoutSpec 
             }
             let specs = tabs
                 .iter()
-                .map(|t| match &t.url {
-                    Some(url) => TabSpec::Browser(url.clone()),
-                    None => TabSpec::Terminal,
+                .map(|t| {
+                    if let Some(url) = &t.url {
+                        TabSpec::Browser(url.clone())
+                    } else if let Some(folder) = &t.git {
+                        TabSpec::Git(folder.clone())
+                    } else if let Some(folder) = &t.agent_setup {
+                        TabSpec::AgentSetup(folder.clone())
+                    } else if let Some(file) = &t.file {
+                        TabSpec::File(file.clone())
+                    } else {
+                        TabSpec::Terminal
+                    }
                 })
                 .collect();
             out.extend(tabs);
@@ -472,8 +584,8 @@ pub fn forget(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
-/// Whether `id` is safe to type into a shell as `claude --resume <id>`: 1 to 128 ASCII
-/// letters, digits, `-` or `_`. Claude Code session ids are UUIDs; anything else (which could
+/// Whether `id` is safe to type into a shell as `claude --resume <id>` or `codex resume <id>`:
+/// 1 to 128 ASCII letters, digits, `-` or `_`. Both agents' session ids are UUIDs; anything else (which could
 /// carry shell syntax from a tampered file) isn't typed.
 pub fn is_safe_session_id(id: &str) -> bool {
     !id.is_empty()
@@ -485,7 +597,7 @@ pub fn is_safe_session_id(id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use macaroni_core::{AgentState, Command, Direction};
+    use macaroni_core::{AgentKind, AgentState, Command, Direction};
 
     use super::*;
 
@@ -495,10 +607,12 @@ mod tests {
         let first = model.focused_tab().id;
         model.apply(Command::SetAgent {
             tab: first,
+            kind: AgentKind::Claude,
             state: AgentState::Working,
             detail: None,
             session_id: Some("1f2e-33".into()),
             cwd: Some("C:/repo".into()),
+            transcript: None,
         });
         model.apply(Command::SplitPane(Direction::Down));
         model.apply(Command::NewTab);
@@ -560,10 +674,12 @@ mod tests {
         model.apply(Command::SetTabCwd(session, Some("C:/Users/me".into())));
         model.apply(Command::SetAgent {
             tab: first,
+            kind: AgentKind::Claude,
             state: AgentState::Idle,
             detail: None,
             session_id: Some("1f2e-33".into()),
             cwd: Some("C:/repo".into()),
+            transcript: None,
         });
         // The second tab was restored but never shown, so its terminal hasn't started.
         let restored = BTreeMap::from([(
@@ -586,6 +702,31 @@ mod tests {
         assert_eq!(tabs[1].cwd.as_deref(), Some("C:/other"));
         assert_eq!(tabs[1].agent_session.as_deref(), Some("4a5b-66"));
         assert_eq!(tabs[0].ssh, None);
+    }
+
+    #[test]
+    fn file_and_agent_setup_tabs_come_back_as_themselves() {
+        let (mut model, _) = Model::new();
+        model.apply(Command::OpenFile {
+            path: "C:/repo/README.md".into(),
+            split: None,
+        });
+        model.apply(Command::OpenAgentSetup {
+            folder: "C:/repo".into(),
+            split: None,
+        });
+
+        let saved = capture(&model, &BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new());
+        let json = serde_json::to_string(&saved).unwrap();
+        let (spec, tabs) = into_spec(serde_json::from_str(&json).unwrap());
+        assert_eq!(tabs[1].file.as_deref(), Some("C:/repo/README.md"));
+        assert_eq!(tabs[2].agent_setup.as_deref(), Some("C:/repo"));
+
+        let (restored, _, new_tabs) = Model::restore(spec);
+        let file = restored.tab(new_tabs[1]).unwrap();
+        assert_eq!(file.kind, TabKind::File);
+        assert_eq!(file.file.as_deref(), Some("C:/repo/README.md"));
+        assert_eq!(restored.tab(new_tabs[2]).unwrap().kind, TabKind::AgentSetup);
     }
 
     #[test]

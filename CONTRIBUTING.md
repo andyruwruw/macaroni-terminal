@@ -5,8 +5,8 @@ Thanks for helping out. This page covers how to build, what has to pass before a
 ## Setup
 
 - Install [rustup](https://rustup.rs). `rust-toolchain.toml` pins the toolchain (with rustfmt and clippy), and it installs itself on the first build.
-- Windows: Visual Studio Build Tools with "Desktop development with C++", plus CMake and Ninja on `PATH`. Visual Studio ships both under `Common7\IDE\CommonExtensions\Microsoft\CMake`. The first build downloads Chromium (CEF, about 170 MB) into `target/cef`; see [`references/browser.md`](references/browser.md) if it fails.
-- macOS: Xcode Command Line Tools.
+- Windows: Visual Studio Build Tools with "Desktop development with C++", CMake and Ninja are used from `PATH` or Visual Studio when there; otherwise `cargo xtask` and `./install` download them into `target/tools`. The first build downloads Chromium (CEF, about 170 MB) into `target/cef`; see [`references/browser.md`](references/browser.md) if it fails.
+- macOS: Xcode Command Line Tools. CMake and Ninja come from `PATH`, or are downloaded as on Windows.
 
 `cargo xtask dev` rebuilds and restarts the app on every save, with its own settings folder and socket so it runs beside an everyday macaroni. `./install` installs a release build as your everyday macaroni.
 

@@ -14,12 +14,15 @@ use crate::message::{ColorTarget, GroupAction, Message, TabAction, WorkspaceActi
 use crate::state::{Menu, MenuPage, MenuTarget, Submenu};
 use crate::{App, chromium, home_dir, open_vscode, theme, vscode};
 
-/// What a terminal runs for an `[[ssh]]` profile.
-pub(crate) fn ssh_shell(profile: &macaroni_config::SshProfile) -> ShellOption {
-    ShellOption {
-        name: profile.label().to_owned(),
-        program: "ssh".to_owned(),
-        args: profile.ssh_args(),
+/// Where an `[[ssh]]` profile connects, for the session.
+pub(crate) fn ssh_target(profile: &macaroni_config::SshProfile) -> macaroni_term::SshTarget {
+    macaroni_term::SshTarget {
+        host: profile.host.clone(),
+        user: profile.user.clone(),
+        port: profile.port,
+        identity_file: profile.identity_file.clone(),
+        proxy_jump: profile.proxy_jump.clone(),
+        command: profile.remote_command(),
     }
 }
 
@@ -39,6 +42,7 @@ impl App {
             target,
             at,
             sub: None,
+            cursor: None,
         });
         Task::none()
     }
@@ -75,7 +79,7 @@ impl App {
                 MenuTarget::Workspace(ws) => self.model.workspace(ws).and_then(|w| w.color.clone()),
                 MenuTarget::Group(group) => self.model.group(group).and_then(|g| g.color.clone()),
                 MenuTarget::Tab(tab) => self.model.tab(tab).and_then(|t| t.color.clone()),
-                MenuTarget::NewTab(_) => None,
+                MenuTarget::NewTab(_) | MenuTarget::Link => None,
             };
             self.color_input = color.filter(|c| c.starts_with('#')).unwrap_or_default();
         }
@@ -156,6 +160,13 @@ impl App {
         if self.sidebar_search_focused {
             return self.sidebar_search_end();
         }
+        // A submenu the keyboard went into closes before its menu.
+        if self
+            .menu
+            .is_some_and(|m| m.sub.is_some() && m.cursor.is_some_and(|c| c.sub))
+        {
+            return self.close_key_submenu();
+        }
         // An open color picker closes before the dialog it's over.
         if let Some(settings) = &mut self.settings
             && settings.close_picker()
@@ -187,14 +198,18 @@ impl App {
         self.new_tab_running(Some(pane), choice)
     }
 
-    /// The new-tab menu's SSH profile at `index` was picked: a tab running `ssh` to it, with the
-    /// server icon.
+    /// The new-tab menu's SSH profile at `index` was picked: a tab with a shell on its host,
+    /// with the server icon.
     pub(crate) fn new_ssh_tab(&mut self, pane: PaneId, index: usize) -> Task<Message> {
         self.menu = None;
         let Some(profile) = self.config.ssh.get(index).cloned() else {
             return Task::none();
         };
-        let task = self.new_tab_running(Some(pane), ssh_shell(&profile));
+        let task = Task::batch([
+            self.apply(Command::FocusPane(pane)),
+            self.apply(Command::NewTab),
+        ]);
+        // The new tab is focused and its session only queued, so `spawn` finds the profile.
         let Some(session) = self.focused_session() else {
             return task;
         };
@@ -255,7 +270,7 @@ impl App {
     }
 
     /// The directory of the pane's active tab, else its workspace's folder, else home.
-    fn pane_dir(&self, pane: PaneId) -> Option<PathBuf> {
+    pub(crate) fn pane_dir(&self, pane: PaneId) -> Option<PathBuf> {
         let tab = self.model.pane(pane).and_then(|p| self.model.tab(p.active));
         tab.and_then(|t| t.cwd.clone())
             .or_else(|| {
@@ -277,7 +292,9 @@ impl App {
         self.vscode_web.error = None;
         if self.vscode_web.ensure_started().is_some() {
             // Opened by `vscode_ready`.
-            self.vscode_web.waiting.push((pane, folder));
+            self.vscode_web
+                .waiting
+                .push(vscode::Waiting::Tab(pane, folder));
             return Task::none();
         }
         if self.vscode_web.server.is_none() {
@@ -291,7 +308,7 @@ impl App {
     /// A browser tab in `pane` showing VS Code at `folder`, with the code icon. The server is
     /// running.
     fn open_vscode_tab(&mut self, pane: PaneId, folder: Option<&std::path::Path>) -> Task<Message> {
-        let Some(url) = self.vscode_web.server.as_ref().map(|s| s.url(folder)) else {
+        let Some(url) = self.vscode_web.server.as_ref().map(|s| s.url(folder, None)) else {
             return Task::none();
         };
         let mut tasks = Vec::new();
@@ -319,7 +336,14 @@ impl App {
         Task::batch(
             waiting
                 .into_iter()
-                .map(|(pane, folder)| self.open_vscode_tab(pane, folder.as_deref()))
+                .map(|waiting| match waiting {
+                    vscode::Waiting::Tab(pane, folder) => {
+                        self.open_vscode_tab(pane, folder.as_deref())
+                    }
+                    vscode::Waiting::File(folder, file) => {
+                        self.open_vscode_file(folder.as_deref(), &file)
+                    }
+                })
                 .collect::<Vec<_>>(),
         )
     }
@@ -374,6 +398,40 @@ impl App {
         }
         self.chromium.installed = chromium::installed();
         Task::none()
+    }
+
+    /// Downloads (`true`) or removes a viewer extension on a thread;
+    /// [`Message::ViewerInstalled`] reports.
+    pub(crate) fn viewer_install(
+        &mut self,
+        extension: crate::viewers::Extension,
+        install: bool,
+    ) -> Task<Message> {
+        if !self.viewers.busy.insert(extension) {
+            return Task::none();
+        }
+        self.viewers.errors.remove(&extension);
+        Task::future(crate::viewers::Viewers::work(extension, install))
+            .map(move |result| Message::ViewerInstalled(extension, result))
+    }
+
+    /// A viewer's download or removal finished: file tabs' pages are built again, so their
+    /// diagrams are drawn (or say what to download).
+    pub(crate) fn viewer_installed(
+        &mut self,
+        extension: crate::viewers::Extension,
+        result: Result<bool, String>,
+    ) -> Task<Message> {
+        self.viewers.busy.remove(&extension);
+        if let Err(error) = result {
+            self.viewers.errors.insert(extension, error);
+        }
+        if extension.installed() {
+            self.viewers.installed.insert(extension);
+        } else {
+            self.viewers.installed.remove(&extension);
+        }
+        self.rebuild_pages()
     }
 
     /// Opens the home page in a new browser tab in `pane`.

@@ -31,7 +31,7 @@ Request `{"id": 1, "method": "<name>", "params": {...}}`; response `{"id": 1, "r
 ## Invariants and traps
 
 - `split`, `new_tab` and `focus` go through `SelectTab`, so they move the user's focus, to another window if the tab is there.
-- `list` covers every window: each `WorkspaceInfo` has its `window` (counting from 1) and `focused_window`, and `active` means active in its window (both default for an app from before windows). `new_window` opens a window with a new workspace and answers with its focused ids. A workspace or tab id works whatever window it's in.
+- `list` covers every window: each `WorkspaceInfo` has its `window` (counting from 1) and `focused_window`, and `active` means active in its window (both default for an app from before windows). `new_window` opens a window with a new workspace and answers with its focused ids. A workspace or tab id works whatever window it's in. Each `WorkspaceInfo` also has its sidebar `group` (`GroupInfo`: `id`, `name`, `collapsed`), `null` while ungrouped or from an older server; workspaces stay in sidebar order, so a group's are next to each other.
 - Commands go through `run`, which keeps the iced `Task` the reducer returns in `IpcState.tasks`; `ipc_message` answers first, then returns them. This is what lets closing the last workspace over the socket quit the app.
 - `send_text` and `read_screen` need a running terminal. Terminals start lazily when first shown, so a tab in a never-displayed workspace returns an error.
 - `notify` takes the same path as an OSC notification (`App::attention`), including muting and the "user is looking at it" check. Agent gating is in [`claude-code.md`](claude-code.md).

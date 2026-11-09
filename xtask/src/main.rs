@@ -12,6 +12,8 @@
 mod dev;
 /// `cargo xtask install`: install the bundle and start it.
 mod install;
+/// CMake and Ninja, downloaded when missing.
+mod tools;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -54,42 +56,133 @@ fn root() -> PathBuf {
         .to_path_buf()
 }
 
-/// `cargo`, with Visual Studio's Ninja on `PATH` when none is there: CEF's C++ wrapper is built
-/// with CMake and Ninja, and Visual Studio ships both but only puts them on `PATH` in its own
-/// developer shells.
-fn cargo() -> Command {
+/// `cargo`, with CMake and Ninja on `PATH`: CEF's C++ wrapper is built with both. Whichever is
+/// missing comes from Visual Studio on Windows (which ships both, but only puts them on `PATH`
+/// in its own developer shells), else is downloaded into `target/tools` (see `tools.rs`).
+///
+/// # Errors
+///
+/// When one is missing and can't be downloaded, saying how to install it, so the build doesn't
+/// fail minutes in with a CMake error.
+fn cargo() -> Result<Command, String> {
     let mut command = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-    if cfg!(windows)
-        && !on_path("ninja.exe")
-        && let Some(ninja) = visual_studio_ninja()
-    {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let paths = std::iter::once(ninja).chain(std::env::split_paths(&path));
-        if let Ok(path) = std::env::join_paths(paths) {
-            command.env("PATH", path);
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let visual_studio = if cfg!(windows) {
+        visual_studio_cmake()
+    } else {
+        None
+    };
+    for program in ["cmake", "ninja"] {
+        if find(&paths, program).is_some() {
+            continue;
         }
+        let bundled = visual_studio.as_ref().map(|vs| match program {
+            "cmake" => vs.join(r"CMake\bin"),
+            _ => vs.join("Ninja"),
+        });
+        let dir = match bundled.filter(|dir| find(std::slice::from_ref(dir), program).is_some()) {
+            Some(dir) => dir,
+            None => tools::fetch(&root(), program).map_err(|err| missing(program, &err))?,
+        };
+        paths.insert(0, dir);
     }
-    command
+    let path = std::env::join_paths(&paths).map_err(|e| format!("building PATH: {e}"))?;
+    command.env("PATH", path);
+    Ok(command)
 }
 
-/// Whether `program` (with its extension) is a file in some `PATH` directory.
-fn on_path(program: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
+/// The most a profile's build folder (`target/debug`, `target/release`) holds before [`trim`]
+/// empties it.
+const PROFILE_CAP: u64 = 40 << 30;
+
+/// The build folder: `CARGO_TARGET_DIR` (relative to `root`) if set, else `root/target`.
+fn target(root: &Path) -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), |dir| root.join(dir))
 }
 
-/// The directory holding the newest Visual Studio's bundled `ninja.exe`, found with
+/// Empties `profile`'s build folder with `cargo clean --profile` once it's past
+/// [`PROFILE_CAP`], before a build. Cargo never deletes old builds: each change to a
+/// dependency, a feature or the compiler leaves the previous copies beside the new ones, so
+/// the folder only grows. The build after a trim starts over; `target/cef` and `target/tools`
+/// are outside the profile folders and kept.
+///
+/// # Errors
+///
+/// When `cargo clean` can't run or fails.
+fn trim(root: &Path, profile: &str) -> Result<(), String> {
+    let folder = target(root).join(if profile == "dev" { "debug" } else { profile });
+    let size = size(&folder);
+    if size <= PROFILE_CAP {
+        return Ok(());
+    }
+    println!(
+        "xtask: {} holds {} GB of old builds; clearing it (this build starts over)",
+        folder.display(),
+        size >> 30
+    );
+    let status = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .current_dir(root)
+        .args(["clean", "--profile", profile])
+        .status()
+        .map_err(|e| format!("running cargo clean: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("cargo clean --profile {profile} failed"))
+    }
+}
+
+/// The bytes in every file under `dir`; 0 if it doesn't exist. Doesn't follow links.
+fn size(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => size(&entry.path()),
+            _ => entry.metadata().map_or(0, |m| m.len()),
+        })
+        .sum()
+}
+
+/// The error for `program` missing and failing to download with `err`: how to install it.
+fn missing(program: &str, err: &str) -> String {
+    let how = match (std::env::consts::OS, program) {
+        ("windows", "cmake") => "winget install Kitware.CMake",
+        ("windows", _) => "winget install Ninja-build.Ninja",
+        ("macos", "cmake") => "brew install cmake",
+        ("macos", _) => "brew install ninja",
+        (_, "cmake") => "your package manager's cmake (e.g. sudo apt install cmake)",
+        _ => "your package manager's ninja (e.g. sudo apt install ninja-build)",
+    };
+    format!(
+        "{program} isn't installed and couldn't be downloaded ({err}). The browser's C++ \
+         wrapper builds with it; install it with:\n  {how}\nthen open a new terminal and run \
+         this again"
+    )
+}
+
+/// Where `program` is in one of `dirs` (with `.exe` on Windows), if it's in any.
+fn find(dirs: &[PathBuf], program: &str) -> Option<PathBuf> {
+    let file = format!("{program}{}", std::env::consts::EXE_SUFFIX);
+    dirs.iter()
+        .map(|dir| dir.join(&file))
+        .find(|path| path.is_file())
+}
+
+/// The newest Visual Studio's CMake folder (holding `CMake\bin` and `Ninja`), found with
 /// `vswhere`; `None` without Visual Studio or without its CMake component. Runs `vswhere.exe`.
-fn visual_studio_ninja() -> Option<PathBuf> {
+fn visual_studio_cmake() -> Option<PathBuf> {
     let vswhere = r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe";
     let output = Command::new(vswhere)
         .args(["-latest", "-products", "*", "-property", "installationPath"])
         .output()
         .ok()?;
     let install = String::from_utf8(output.stdout).ok()?;
-    let ninja =
-        Path::new(install.trim()).join(r"Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja");
-    ninja.join("ninja.exe").is_file().then_some(ninja)
+    let cmake = Path::new(install.trim()).join(r"Common7\IDE\CommonExtensions\Microsoft\CMake");
+    cmake.is_dir().then_some(cmake)
 }
 
 /// `cargo xtask bundle`: builds `macaroni` and `macaroni-cli` in release, then lays out the
@@ -97,7 +190,8 @@ fn visual_studio_ninja() -> Option<PathBuf> {
 /// `target/release/dist/macaroni`. The output directory is deleted and recreated each time.
 fn bundle() -> Result<PathBuf, String> {
     let root = root();
-    let status = cargo()
+    trim(&root, "release")?;
+    let status = cargo()?
         .current_dir(&root)
         .args([
             "build",

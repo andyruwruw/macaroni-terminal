@@ -65,6 +65,8 @@ pub enum Icon {
     PinOff,
     /// A collapsed group's chevron, and menu entries that open a submenu.
     ChevronRight,
+    /// A file tab's previous file.
+    ChevronLeft,
     /// Copy Tab ID and Copy Workspace ID, in menus.
     Copy,
     /// A workspace icon, and Open in VS Code.
@@ -143,6 +145,30 @@ pub enum Icon {
     Columns,
     /// The settings dialog's Menus & Controls page.
     Menu,
+    /// A Git tab's file that goes into the next commit.
+    Checked,
+    /// A Git tab's file with only some of its changes in the next commit.
+    PartlyChecked,
+    /// A Git tab's file left out of the next commit.
+    Unchecked,
+    /// A file tab, and File in the new-tab menu.
+    FileText,
+    /// A Git tab's diff: wrap long lines.
+    TextWrap,
+    /// A Git tab.
+    GitCompare,
+    /// A Git tab's History view.
+    History,
+    /// Discarding a file's changes.
+    Undo,
+    /// A repository, in a Git tab's top bar.
+    Repository,
+    /// The settings' Accessibility page.
+    Accessibility,
+    /// Plays a sound in the settings' sound menu.
+    Play,
+    /// The chosen item in a list, such as the settings' sound menu.
+    Check,
 }
 
 /// Defines `handle`, mapping each [`Icon`] to its file in `assets/icons/`: one lazily decoded
@@ -190,6 +216,7 @@ handles! {
     Pin => "pin.svg",
     PinOff => "pin-off.svg",
     ChevronRight => "chevron-right.svg",
+    ChevronLeft => "chevron-left.svg",
     Copy => "copy.svg",
     Code => "code.svg",
     Rocket => "rocket.svg",
@@ -229,6 +256,18 @@ handles! {
     PanelTop => "panel-top.svg",
     Columns => "columns-2.svg",
     Menu => "menu.svg",
+    Checked => "square-check.svg",
+    PartlyChecked => "square-minus.svg",
+    Unchecked => "square.svg",
+    FileText => "file-text.svg",
+    TextWrap => "text-wrap.svg",
+    GitCompare => "git-compare-arrows.svg",
+    History => "history.svg",
+    Undo => "undo-2.svg",
+    Repository => "folder-git-2.svg",
+    Accessibility => "accessibility.svg",
+    Play => "play.svg",
+    Check => "check.svg",
 }
 
 /// The icons a workspace can have, by the names saved with it.

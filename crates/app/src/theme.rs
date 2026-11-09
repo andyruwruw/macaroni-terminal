@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use macaroni_config::{COLORS, ColorValue, Config, Rgba, Style, UiTheme};
 
+use crate::accessibility::contrast;
 use crate::glass::Glass;
 use macaroni_term::{Color as TermColor, DefaultColors, Rgb};
 
@@ -98,7 +99,7 @@ impl Palette {
     }
 
     /// The xterm 256-color palette: 16 theme colors, a 6x6x6 cube, then a 24-step gray ramp.
-    fn indexed(&self, i: u8) -> Rgb {
+    pub fn indexed(&self, i: u8) -> Rgb {
         const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
         match i {
             0..=15 => self.ansi[usize::from(i)],
@@ -599,7 +600,8 @@ impl Chrome {
     /// darkest; the window, pane cards (the terminal theme's background, `#121314` in the
     /// default theme) and the open tab are one color, so the open tab opens into its pane, and
     /// the sidebar and the tab slot are a step lighter. Every line between parts is one
-    /// `#2a2b2c`. Workspaces have the sidebar's fill, lighter when open; panes have no shadow.
+    /// `#2a2b2c`. Workspaces have the sidebar's fill, lighter when open, and like the New
+    /// workspace button no border; panes have no shadow.
     /// Text runs from white to grey.
     fn solid(p: &Palette) -> Self {
         Self {
@@ -635,7 +637,7 @@ impl Chrome {
             tab_border_hover: hex(0x2a2b2c),
             tab_accent: hex(0x009ced),
             add_workspace: iced::Color::TRANSPARENT,
-            add_workspace_border: hex(0x1f1f1f),
+            add_workspace_border: iced::Color::TRANSPARENT,
             add_tab: iced::Color::TRANSPARENT,
             add_tab_border: hex(0x2a2b2c),
             item_edge: hex(0x4a4a4a),
@@ -678,6 +680,62 @@ impl Chrome {
                 danger: self.danger,
             },
         )
+    }
+}
+
+impl Chrome {
+    /// High contrast (`[accessibility] high_contrast`): text at least 7:1 against the
+    /// background (details 4.5:1), every line between parts in the label color, and thicker
+    /// focus and open tab lines.
+    pub fn high_contrast(mut self) -> Self {
+        /// AAA for text, AA for the faint details.
+        const TEXT: f32 = 7.0;
+        /// See [`TEXT`].
+        const DETAIL: f32 = 4.5;
+        let behind = iced::Color {
+            a: 1.0,
+            ..self.background
+        };
+        for (color, min) in [
+            (&mut self.text, TEXT),
+            (&mut self.label, TEXT),
+            (&mut self.muted, TEXT),
+            (&mut self.faint, DETAIL),
+            (&mut self.attention, DETAIL),
+            (&mut self.working, DETAIL),
+            (&mut self.danger, DETAIL),
+        ] {
+            *color = contrast::ensure(iced::Color { a: 1.0, ..*color }, behind, min);
+        }
+        let line = self.label;
+        for color in [
+            &mut self.border,
+            &mut self.card_border,
+            &mut self.separator,
+            &mut self.item_edge,
+            &mut self.sidebar_border,
+            &mut self.title_bar_border,
+            &mut self.tab_border,
+            &mut self.tab_border_active,
+            &mut self.tab_border_hover,
+            &mut self.workspace_border,
+            &mut self.workspace_border_active,
+            &mut self.workspace_border_hover,
+            &mut self.add_tab_border,
+            &mut self.add_workspace_border,
+        ] {
+            *color = line;
+        }
+        self.outline = self.text;
+        self.popup = iced::Color {
+            a: 1.0,
+            ..self.popup
+        };
+        let s = &mut self.s;
+        s.panes.focus_border_width = s.panes.focus_border_width.max(2.0);
+        s.panes.attention_border_width = s.panes.attention_border_width.max(2.5);
+        s.tabs.accent_width = s.tabs.accent_width.max(3.0);
+        self
     }
 }
 

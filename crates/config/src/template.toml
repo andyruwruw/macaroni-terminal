@@ -1,8 +1,9 @@
 # macaroni settings. Changes apply as soon as you save.
 # Every setting below shows its default; uncomment a line to change it.
 
-# Color theme: a built-in theme (macaroni-dark, macaroni-light) or the name of a file in the
-# "themes" folder next to this file, e.g. themes/mytheme.toml -> theme = "mytheme".
+# Color theme: a built-in theme (macaroni-dark, macaroni-light, macaroni-high-contrast) or the
+# name of a file in the "themes" folder next to this file, e.g. themes/mytheme.toml ->
+# theme = "mytheme".
 # theme = "macaroni-dark"
 
 # How the app around the terminals looks: "solid" (flat greys) or "glass" (translucent sheets
@@ -28,15 +29,19 @@
 # program = "powershell.exe"
 # args = ["-NoLogo"]
 
-# SSH profiles: terminals that run ssh to a host, listed in the new-tab menu (right-click a
-# pane's + button). Add one per [[ssh]] table. Only host is required; the rest are optional.
+# SSH profiles: shells on other machines over macaroni's own SSH client, listed in the new-tab
+# menu (right-click a pane's + button). Add one per [[ssh]] table. Only host is required; what
+# a profile leaves out comes from ~/.ssh/config (HostName, User, Port, IdentityFile, ProxyJump).
+# Keys come from the SSH agent, then the identity files; passwords and passphrases are asked
+# in the tab. Tabs to the same host share one connection.
 # [[ssh]]
 # name = "Home server"
 # host = "me@192.168.1.20"   # or a Host from ~/.ssh/config
-# user = "me"                # -l
-# port = 22                  # -p
-# identity_file = "~/.ssh/id_ed25519"   # -i
-# args = ["-A"]              # more ssh arguments
+# user = "me"
+# port = 22
+# identity_file = "~/.ssh/id_ed25519"
+# proxy_jump = "me@bastion.example.com"   # hosts to go through, comma-separated
+# tmux = "main"              # attach this tmux session in control mode: its windows open as tabs
 
 # Triggers: a regex run over each line a terminal prints (colors taken out), and what a match
 # does. Add one per [[trigger]] table; give each at least one of highlight, notify or badge.
@@ -65,10 +70,16 @@
 # marked until you type or click in that tab. Show an OS notification too when that tab isn't
 # in view or the window isn't focused.
 # os = true
+# What a tab asking for attention (an agent finishing or waiting) sounds like when it isn't in
+# view: "off", "system" (the notification's own sound), one of macaroni's (Settings >
+# Notifications lists them all), such as "chime", "ding", "chord" or "buzzer", or the path of
+# a sound file (.wav on Windows; anything afplay plays on macOS).
+# sound = "chime"
 # Treat the terminal bell as a request for attention.
 # bell = false
-# What the bell sounds like: "off", "system" (the system's alert sound), or the path of a sound
-# file (.wav on Windows; anything afplay plays on macOS).
+# What the bell sounds like: "off", "system" (the system's alert sound), one of macaroni's
+# sounds (as for sound), or the path of a sound file (.wav on Windows; anything afplay plays on
+# macOS).
 # bell_sound = "off"
 # When a command runs at least this many seconds, its finish asks for attention like a
 # notification (0 turns it off). Needs a shell that marks commands (OSC 133): Git Bash does
@@ -78,19 +89,50 @@
 [session]
 # Reopen the last layout (workspaces, splits, tabs and their directories) when macaroni starts.
 # restore = true
-# In restored tabs that were running Claude Code, resume that session (claude --resume <id>).
+# In restored tabs that were running Claude Code or Codex, resume that session
+# (claude --resume <id>, codex resume <id>).
 # resume_agents = true
 # Save each terminal's text when macaroni quits and show it again, dimmed, in its restored tab.
 # keep_scrollback = true
 
+[accessibility]
+# Scale the whole window, interface and terminal text, on top of the display's own scaling.
+# From 0.5 to 3.
+# ui_scale = 1
+# "system" follows the operating system's setting; "on" or "off" overrides it.
+# Turn off fades and other movement.
+# reduce_motion = "system"
+# Stronger borders and text in the interface, and the high contrast terminal theme.
+# high_contrast = "system"
+# The least contrast terminal text may have against its background, as a WCAG ratio from 1
+# (off) to 21. Text below it is lightened or darkened until it reaches it; 4.5 is WCAG AA.
+# minimum_contrast = 1
+# How thick the bar and underline cursors are, in pixels, from 1 to 8.
+# cursor_thickness = 2
+# Have screen readers read out new output in the focused terminal.
+# announce_output = true
+
 [agents]
-# Coding agents report what they're doing once their hooks are installed
-# (macaroni-cli setup claude, or the settings' Agents section).
+# Coding agents report what they're doing once they're set up: macaroni-cli setup claude, or
+# macaroni-cli setup codex (Codex reports when each turn finishes), or the settings' Agents
+# section.
 # Mark the tab and notify when an agent finishes responding, or when it needs your input.
 # notify_finished = true
 # notify_input = true
 # Give a tab running an agent the sparkles icon.
 # tab_icon = true
+
+[plugins]
+# Plugins add rows to the top or bottom of the panels they apply to. Each is a folder in the
+# plugins folder next to this file, holding a plugin.toml and what it runs; "cache" is built
+# in and shows whether an agent's prompt cache is still warm. Turn one on or off for a panel
+# from its tab's menu (Plugins). A [plugins.<name>] table changes a plugin everywhere: on,
+# agents, kinds, position ("top" or "bottom") and interval (seconds), and any other key is a
+# setting passed to the plugin.
+#
+# [plugins.cache]
+# agents = ["codex"]   # only Codex panels
+# minutes = 5          # how long the cache lasts; codex_minutes or claude_minutes for one agent
 
 [browser]
 # The page a new browser tab opens.
@@ -101,6 +143,16 @@
 # What shows pages: "system" for Edge's WebView2 on Windows or Safari's WebKit on macOS,
 # "chromium" for embedded Chromium (Windows only). Applies to pages opened afterwards.
 # engine = "system"
+
+[files]
+# Where a file you Ctrl+click (Cmd+click on macOS) in a terminal's output opens: "viewer" for a
+# file tab next to the terminal, "vscode" for a VS Code tab (Windows, once VS Code for the web
+# is downloaded), "app" for the program below. Ctrl+right-click (Cmd+right-click) a file to
+# pick where it opens instead.
+# open = "viewer"
+# The program "app" opens files with: a path, or a command on PATH. Empty means VS Code when its
+# code command is installed, else the system's text editor.
+# app = ""
 
 [workspace_items]
 # What each workspace's row in the sidebar shows. Text settings are templates: placeholders in
@@ -308,7 +360,8 @@
 #          toggle_sidebar, command_palette, show_waiting, next_waiting, new_worktree,
 #          previous_prompt, next_prompt, copy_output, agent_dashboard, jump_to_pane,
 #          reopen_tab, save_scrollback, search_workspace, search_all, new_window,
-#          close_window, move_to_new_window.
+#          close_window, move_to_new_window, git_tab, focus_next_region,
+#          focus_previous_region, command_history, agent_setup, open_file.
 #
 # "ctrl+shift+t" = "none"
 # "alt+t" = "new_tab"

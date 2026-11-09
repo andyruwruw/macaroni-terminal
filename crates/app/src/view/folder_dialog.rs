@@ -1,17 +1,19 @@
-//! The workspace folder dialog: a small modal with a text field for the folder new tabs in a
-//! workspace open in.
+//! The folder dialog: a small modal with a text field for the folder new tabs in a workspace
+//! open in, or the folder whose repository a Git tab shows.
 //!
-//! "Set Active Folder…" on a workspace's menu opens it ([`FolderMessage::Open`]) with the
-//! current folder typed in and selected. Browse picks one with the system folder dialog (`rfd`,
+//! "Set Active Folder…" on a workspace's menu opens it ([`FolderMessage::Open`]), and "Change
+//! Folder…" on a Git tab's menu ([`FolderMessage::OpenGit`]), with the current folder typed in
+//! and selected. Browse picks one with the system folder dialog (`rfd`,
 //! run as a task so the UI keeps drawing). Enter or Save checks the path is a folder and applies
 //! [`Command::SetWorkspaceCwd`]; a leading `~` means the home folder, and an empty field puts the
-//! workspace back on the home folder. Escape, Cancel or a click outside closes it.
+//! workspace back on the home folder. For a Git tab the folder must be in a repository, and
+//! Save applies [`Command::SetGitFolder`] and reloads the tab. Escape, Cancel or a click outside closes it.
 
 use std::path::PathBuf;
 
 use iced::widget::{Space, button, column, container, mouse_area, opaque, row, text, text_input};
 use iced::{Border, Color, Element, Fill, Task, alignment};
-use macaroni_core::{Command, WorkspaceId};
+use macaroni_core::{Command, TabId, WorkspaceId};
 
 use super::widgets::{flat_button, input_style, one_line, shadow};
 use crate::icons::{Icon, icon};
@@ -36,11 +38,20 @@ const TITLE_SIZE: f32 = 16.0;
 /// Everything else's text size.
 const TEXT_SIZE: f32 = 12.5;
 
+/// Whose folder the dialog sets.
+#[derive(Debug, Clone, Copy)]
+enum FolderTarget {
+    /// A workspace's: where its new tabs open.
+    Workspace(WorkspaceId),
+    /// A Git tab's: the repository it shows.
+    Git(TabId),
+}
+
 /// The open dialog, kept in `App.folder_dialog`.
 #[derive(Debug)]
 pub struct FolderDialog {
     /// Whose folder it sets.
-    workspace: WorkspaceId,
+    target: FolderTarget,
     /// The field's text.
     value: String,
     /// Why the last save failed, shown until the text changes.
@@ -52,6 +63,8 @@ pub struct FolderDialog {
 pub enum FolderMessage {
     /// Open it for this workspace (closing the menu it was opened from).
     Open(WorkspaceId),
+    /// Open it for this Git tab.
+    OpenGit(TabId),
     /// Close it without saving.
     Close,
     /// The field changed.
@@ -67,13 +80,26 @@ pub enum FolderMessage {
 impl App {
     /// Applies a dialog message. Ignored while it's closed, except [`FolderMessage::Open`].
     pub(crate) fn folder_update(&mut self, message: FolderMessage) -> Task<Message> {
-        if let FolderMessage::Open(workspace) = message {
-            self.menu = None;
-            self.folder_dialog = Some(FolderDialog {
-                workspace,
+        let open = match message {
+            FolderMessage::Open(workspace) => Some(FolderDialog {
+                target: FolderTarget::Workspace(workspace),
                 value: self.workspace_folder(workspace),
                 error: None,
-            });
+            }),
+            FolderMessage::OpenGit(tab) => Some(FolderDialog {
+                target: FolderTarget::Git(tab),
+                value: self
+                    .model
+                    .tab(tab)
+                    .and_then(|t| t.cwd.clone())
+                    .unwrap_or_default(),
+                error: None,
+            }),
+            _ => None,
+        };
+        if let Some(dialog) = open {
+            self.menu = None;
+            self.folder_dialog = Some(dialog);
             // Selected, so typing replaces it and the arrow keys keep it.
             return iced::widget::operation::focus(FOLDER_INPUT)
                 .chain(iced::widget::operation::select_all(FOLDER_INPUT));
@@ -82,15 +108,18 @@ impl App {
             return Task::none();
         };
         match message {
-            FolderMessage::Open(_) => {}
+            FolderMessage::Open(_) | FolderMessage::OpenGit(_) => {}
             FolderMessage::Close => self.folder_dialog = None,
             FolderMessage::Input(value) => {
                 dialog.value = value;
                 dialog.error = None;
             }
             FolderMessage::Browse => {
-                let mut picker =
-                    rfd::AsyncFileDialog::new().set_title("Choose the workspace folder");
+                let title = match dialog.target {
+                    FolderTarget::Workspace(_) => "Choose the workspace folder",
+                    FolderTarget::Git(_) => "Choose a folder in a Git repository",
+                };
+                let mut picker = rfd::AsyncFileDialog::new().set_title(title);
                 let start = PathBuf::from(expand_home(dialog.value.trim()));
                 if start.is_dir() {
                     picker = picker.set_directory(start);
@@ -108,7 +137,10 @@ impl App {
             FolderMessage::Save => {
                 let typed = dialog.value.trim();
                 if typed.is_empty() {
-                    let ws = dialog.workspace;
+                    let FolderTarget::Workspace(ws) = dialog.target else {
+                        dialog.error = Some("Type a folder in a Git repository.".to_owned());
+                        return Task::none();
+                    };
                     self.folder_dialog = None;
                     return self.apply(Command::SetWorkspaceCwd(ws, None));
                 }
@@ -117,9 +149,21 @@ impl App {
                     dialog.error = Some(format!("{typed} isn't a folder."));
                     return Task::none();
                 }
-                let ws = dialog.workspace;
-                self.folder_dialog = None;
-                return self.apply(Command::SetWorkspaceCwd(ws, Some(path)));
+                match dialog.target {
+                    FolderTarget::Workspace(ws) => {
+                        self.folder_dialog = None;
+                        return self.apply(Command::SetWorkspaceCwd(ws, Some(path)));
+                    }
+                    FolderTarget::Git(tab) => {
+                        if crate::git::top(std::path::Path::new(&path)).is_none() {
+                            dialog.error = Some(format!("{typed} isn't in a Git repository."));
+                            return Task::none();
+                        }
+                        self.folder_dialog = None;
+                        let set = self.apply(Command::SetGitFolder(tab, path));
+                        return Task::batch([set, self.git_folder_changed(tab)]);
+                    }
+                }
             }
         }
         Task::none()
@@ -129,13 +173,27 @@ impl App {
     pub(crate) fn folder_dialog_view(&self) -> Option<Element<'_, Message>> {
         let dialog = self.folder_dialog.as_ref()?;
         let c = self.chrome;
-        let name = self
-            .model
-            .workspace(dialog.workspace)
-            .map(|w| w.name.as_str())
-            .unwrap_or_default();
+        let (title, note, placeholder) = match dialog.target {
+            FolderTarget::Workspace(ws) => {
+                let name = self
+                    .model
+                    .workspace(ws)
+                    .map(|w| w.name.as_str())
+                    .unwrap_or_default();
+                (
+                    "Workspace folder",
+                    format!("New tabs in {name} open here."),
+                    "Folder (empty for your home folder)",
+                )
+            }
+            FolderTarget::Git(_) => (
+                "Repository folder",
+                "This Git tab shows the repository holding this folder.".to_owned(),
+                "A folder in a Git repository",
+            ),
+        };
         let field = row![
-            text_input("Folder (empty for your home folder)", &dialog.value)
+            text_input(placeholder, &dialog.value)
                 .id(FOLDER_INPUT)
                 .on_input(|value| Message::Folder(FolderMessage::Input(value)))
                 .on_submit(Message::Folder(FolderMessage::Save))
@@ -146,12 +204,8 @@ impl App {
         ]
         .spacing(8)
         .align_y(alignment::Vertical::Center);
-        let mut content = column![
-            header(c),
-            one_line(format!("New tabs in {name} open here."), TEXT_SIZE, c.muted),
-            field,
-        ]
-        .spacing(12);
+        let mut content =
+            column![header(c, title), one_line(note, TEXT_SIZE, c.muted), field,].spacing(12);
         if let Some(error) = &dialog.error {
             content = content.push(text(error.clone()).size(TEXT_SIZE).color(c.danger));
         }
@@ -213,9 +267,9 @@ fn expand_home(path: &str) -> String {
 }
 
 /// The dialog's title and close button.
-fn header<'a>(c: Chrome) -> Element<'a, Message> {
+fn header<'a>(c: Chrome, title: &'a str) -> Element<'a, Message> {
     row![
-        one_line("Workspace folder", TITLE_SIZE, c.text),
+        one_line(title, TITLE_SIZE, c.text),
         Space::new().width(Fill),
         button(icon(Icon::Close, 14.0, c.muted))
             .on_press(Message::Folder(FolderMessage::Close))

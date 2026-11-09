@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::chord::Chord;
+use crate::plugins::Plugin;
 use crate::style::{Colors, Style};
 use crate::theme::{DEFAULT_THEME, Theme};
 
@@ -63,7 +64,8 @@ pub struct ShellSettings {
     pub args: Vec<String>,
 }
 
-/// One `[[ssh]]` entry: a terminal that runs `ssh` to a host, opened from the new-tab menu.
+/// One `[[ssh]]` entry: a shell on another machine over macaroni's own SSH client, opened from
+/// the new-tab menu. What it leaves out comes from `~/.ssh/config`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SshProfile {
@@ -71,14 +73,17 @@ pub struct SshProfile {
     pub name: String,
     /// The destination: a host name or address, `user@host`, or a `Host` from `~/.ssh/config`.
     pub host: String,
-    /// The login name (`-l`), when `host` doesn't include one.
+    /// The login name, when `host` doesn't include one.
     pub user: Option<String>,
-    /// The port (`-p`).
+    /// The port.
     pub port: Option<u16>,
-    /// A private key file (`-i`).
+    /// A private key file, tried before the configured ones.
     pub identity_file: Option<String>,
-    /// More `ssh` arguments, placed before the destination.
-    pub args: Vec<String>,
+    /// Hosts to connect through first, `[user@]host[:port]`, comma-separated.
+    pub proxy_jump: Option<String>,
+    /// A tmux session to attach to (made if it doesn't exist) in control mode, so its windows
+    /// open as tabs, instead of a plain shell.
+    pub tmux: Option<String>,
 }
 
 /// One `[[trigger]]`: a regex run over each line of terminal output, and what a match does.
@@ -109,21 +114,40 @@ impl SshProfile {
         }
     }
 
-    /// The `ssh` arguments that connect to it.
-    pub fn ssh_args(&self) -> Vec<String> {
-        let mut args = Vec::new();
-        if let Some(user) = &self.user {
-            args.extend(["-l".to_owned(), user.clone()]);
-        }
+    /// Where it connects, for showing: `user@host:port`, and the jump hosts after `via`.
+    pub fn destination(&self) -> String {
+        let mut out = match &self.user {
+            Some(user) if !self.host.contains('@') => format!("{user}@{}", self.host),
+            _ => self.host.clone(),
+        };
         if let Some(port) = self.port {
-            args.extend(["-p".to_owned(), port.to_string()]);
+            out.push_str(&format!(":{port}"));
         }
-        if let Some(key) = &self.identity_file {
-            args.extend(["-i".to_owned(), key.clone()]);
+        if let Some(jump) = self.proxy_jump.as_deref().filter(|j| !j.trim().is_empty()) {
+            out.push_str(&format!(" via {jump}"));
         }
-        args.extend(self.args.iter().cloned());
-        args.push(self.host.clone());
-        args
+        if let Some(session) = self.tmux_session() {
+            out.push_str(&format!(", tmux {session}"));
+        }
+        out
+    }
+
+    /// The tmux session to attach, when one is named.
+    pub fn tmux_session(&self) -> Option<&str> {
+        self.tmux
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    /// What runs on the host instead of the login shell: tmux in control mode, attached to the
+    /// named session (made if missing). The name is quoted for the remote shell.
+    pub fn remote_command(&self) -> Option<String> {
+        let session = self.tmux_session()?;
+        Some(format!(
+            "tmux -CC new-session -A -s '{}'",
+            session.replace('\'', r"'\''")
+        ))
     }
 }
 
@@ -176,10 +200,16 @@ impl Default for TerminalSettings {
 pub struct NotificationSettings {
     /// Show an OS notification when a tab that isn't in view asks for attention.
     pub os: bool,
+    /// What a tab that isn't in view asking for attention (an agent finishing) sounds like:
+    /// `"off"`, `"system"` (the OS notification's own sound), one of macaroni's sounds
+    /// (the app's `sounds::BUILT_IN`, such as `"chime"`, `"ding"` or `"chord"`) or the path of
+    /// a sound file.
+    pub sound: String,
     /// Treat the terminal bell as a request for attention.
     pub bell: bool,
-    /// What the terminal bell sounds like: `"off"`, `"system"` (the system's alert sound) or
-    /// the path of a sound file (`.wav` on Windows; anything `afplay` plays on macOS).
+    /// What the terminal bell sounds like: `"off"`, `"system"` (the system's alert sound), one
+    /// of macaroni's sounds (as for `sound`) or the path of a sound file (`.wav` on Windows;
+    /// anything `afplay` plays on macOS).
     pub bell_sound: String,
     /// Seconds a command the shell marked (OSC 133) has to run for its finish to ask for
     /// attention; 0 never does. [`Config::parse`] rejects more than a day.
@@ -190,6 +220,7 @@ impl Default for NotificationSettings {
     fn default() -> Self {
         Self {
             os: true,
+            sound: "chime".to_owned(),
             bell: false,
             bell_sound: "off".to_owned(),
             long_command: 30,
@@ -197,7 +228,7 @@ impl Default for NotificationSettings {
     }
 }
 
-/// `[agents]`: how coding agents (Claude Code, through `macaroni-cli setup claude`) show up.
+/// `[agents]`: how coding agents (Claude Code and Codex, through `macaroni-cli setup`) show up.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentSettings {
@@ -225,7 +256,8 @@ impl Default for AgentSettings {
 pub struct SessionSettings {
     /// Reopen the last layout (workspaces, splits, tabs, directories) on launch.
     pub restore: bool,
-    /// In restored tabs that were running Claude Code, run `claude --resume <session>`.
+    /// In restored tabs that were running Claude Code or Codex, run `claude --resume <session>`
+    /// or `codex resume <session>`.
     pub resume_agents: bool,
     /// Save each terminal's text on quit and show it again, dimmed, in its restored tab.
     pub keep_scrollback: bool,
@@ -237,6 +269,64 @@ impl Default for SessionSettings {
             restore: true,
             resume_agents: true,
             keep_scrollback: true,
+        }
+    }
+}
+
+/// An accessibility option that can follow the system's own setting: `"system"`, `"on"` or
+/// `"off"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Follow {
+    /// Whatever the operating system's accessibility settings say, checked as they change.
+    #[default]
+    System,
+    /// Always on.
+    On,
+    /// Always off.
+    Off,
+}
+
+impl Follow {
+    /// Whether the option is on, given whether the system's setting is.
+    pub fn resolve(self, system: bool) -> bool {
+        match self {
+            Follow::System => system,
+            Follow::On => true,
+            Follow::Off => false,
+        }
+    }
+}
+
+/// `[accessibility]`: scaling, contrast, motion and screen readers.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AccessibilitySettings {
+    /// Scales the whole window (interface and terminal text), on top of the display's own
+    /// scaling. 0.5 to 3.
+    pub ui_scale: f32,
+    /// Turns off fades and other movement.
+    pub reduce_motion: Follow,
+    /// Stronger borders and text in the interface, and the high contrast terminal theme.
+    pub high_contrast: Follow,
+    /// The least contrast terminal text may have against its background, as a WCAG ratio from 1
+    /// (off) to 21 (black on white). Text below it is lightened or darkened until it reaches it.
+    pub minimum_contrast: f32,
+    /// How thick the bar and underline cursors are, in pixels, from 1 to 8.
+    pub cursor_thickness: f32,
+    /// Have screen readers read out new output in the focused terminal.
+    pub announce_output: bool,
+}
+
+impl Default for AccessibilitySettings {
+    fn default() -> Self {
+        Self {
+            ui_scale: 1.0,
+            reduce_motion: Follow::System,
+            high_contrast: Follow::System,
+            minimum_contrast: 1.0,
+            cursor_thickness: 2.0,
+            announce_output: true,
         }
     }
 }
@@ -271,6 +361,39 @@ pub enum BrowserEngine {
     System,
     /// Chromium, embedded (CEF). Windows only; elsewhere the system engine is used.
     Chromium,
+}
+
+/// `[files] open`: where a file Ctrl+clicked (Cmd+clicked on macOS) in a terminal opens
+/// (`"viewer"`, `"vscode"` or `"app"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenFiles {
+    /// In a file tab, in a split next to the terminal.
+    Viewer,
+    /// In a VS Code tab (VS Code for the web, Windows only), in a split next to the terminal.
+    Vscode,
+    /// With the program in `[files] app`.
+    App,
+}
+
+/// `[files]`: opening files named in a terminal's output.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FileSettings {
+    /// Where a Ctrl+clicked file opens.
+    pub open: OpenFiles,
+    /// The program `open = "app"` runs with the file: a path, or a command on `PATH`. Empty
+    /// means VS Code when its `code` command is installed, else the system's text editor.
+    pub app: String,
+}
+
+impl Default for FileSettings {
+    fn default() -> Self {
+        Self {
+            open: OpenFiles::Viewer,
+            app: String::new(),
+        }
+    }
 }
 
 /// `[browser]`: browser tabs.
@@ -411,14 +534,20 @@ struct File {
     notifications: NotificationSettings,
     /// `[session]`.
     session: SessionSettings,
+    /// `[accessibility]`.
+    accessibility: AccessibilitySettings,
     /// `[agents]`.
     agents: AgentSettings,
     /// `[browser]`.
     browser: BrowserSettings,
+    /// `[files]`.
+    files: FileSettings,
     /// `[workspace_items]`.
     workspace_items: WorkspaceItemSettings,
     /// `[tab_items]`.
     tab_items: TabItemSettings,
+    /// `[plugins.<id>]`: overrides and settings for each plugin, by id.
+    plugins: BTreeMap<String, toml::Table>,
     /// `[style.*]`.
     style: Style,
     /// `[colors.solid]` and `[colors.glass]`.
@@ -440,10 +569,13 @@ impl Default for File {
             terminal: TerminalSettings::default(),
             notifications: NotificationSettings::default(),
             session: SessionSettings::default(),
+            accessibility: AccessibilitySettings::default(),
             agents: AgentSettings::default(),
             browser: BrowserSettings::default(),
+            files: FileSettings::default(),
             workspace_items: WorkspaceItemSettings::default(),
             tab_items: TabItemSettings::default(),
+            plugins: BTreeMap::new(),
             style: Style::default(),
             colors: Colors::default(),
             keybindings: BTreeMap::new(),
@@ -475,14 +607,23 @@ pub struct Config {
     pub notifications: NotificationSettings,
     /// `[session]`.
     pub session: SessionSettings,
+    /// `[accessibility]`.
+    pub accessibility: AccessibilitySettings,
     /// `[agents]`.
     pub agents: AgentSettings,
     /// `[browser]`.
     pub browser: BrowserSettings,
+    /// `[files]`.
+    pub files: FileSettings,
     /// `[workspace_items]`.
     pub workspace_items: WorkspaceItemSettings,
     /// `[tab_items]`.
     pub tab_items: TabItemSettings,
+    /// The plugins: built in, then from the plugins folder, with `[plugins.<id>]` applied.
+    pub plugins: Vec<Plugin>,
+    /// What was wrong with plugin folders or `[plugins]` (those parts are left out); the rest of
+    /// the config still applies.
+    pub plugin_problems: Vec<String>,
     /// `[style.*]`, already range-checked.
     pub style: Style,
     /// `[colors.*]`, every name checked against [`crate::COLORS`].
@@ -511,10 +652,14 @@ impl Default for Config {
             terminal: file.terminal,
             notifications: file.notifications,
             session: file.session,
+            accessibility: file.accessibility,
             agents: file.agents,
             browser: file.browser,
+            files: file.files,
             workspace_items: file.workspace_items,
             tab_items: file.tab_items,
+            plugins: crate::plugins::built_in(),
+            plugin_problems: Vec::new(),
             style: file.style,
             colors: file.colors,
             keybindings: Vec::new(),
@@ -558,7 +703,7 @@ impl Config {
     }
 
     /// Parses and checks a config file's text. `dir` is the config directory, where user themes
-    /// are looked up.
+    /// and plugins are looked up.
     ///
     /// Errors are readable messages: TOML errors with line, column and the valid key names, an
     /// out-of-range number with its key and limits, or an unknown color, theme or chord. Unknown
@@ -594,6 +739,25 @@ impl Config {
                 file.terminal.scroll_lines
             ));
         }
+        let a = &file.accessibility;
+        if !(0.5..=3.0).contains(&a.ui_scale) {
+            return Err(format!(
+                "accessibility.ui_scale must be between 0.5 and 3, got {}",
+                a.ui_scale
+            ));
+        }
+        if !(1.0..=21.0).contains(&a.minimum_contrast) {
+            return Err(format!(
+                "accessibility.minimum_contrast must be between 1 and 21, got {}",
+                a.minimum_contrast
+            ));
+        }
+        if !(1.0..=8.0).contains(&a.cursor_thickness) {
+            return Err(format!(
+                "accessibility.cursor_thickness must be between 1 and 8, got {}",
+                a.cursor_thickness
+            ));
+        }
         if let Some(n) = file.ssh.iter().position(|p| p.host.trim().is_empty()) {
             return Err(format!("ssh entry {} has no host", n + 1));
         }
@@ -614,6 +778,7 @@ impl Config {
         file.style.check()?;
         file.colors.check()?;
         let theme = Theme::resolve(&file.theme, dir)?;
+        let (plugins, plugin_problems) = crate::plugins::load(dir, &file.plugins);
         let keybindings = file
             .keybindings
             .into_iter()
@@ -633,10 +798,14 @@ impl Config {
             terminal: file.terminal,
             notifications: file.notifications,
             session: file.session,
+            accessibility: file.accessibility,
             agents: file.agents,
             browser: file.browser,
+            files: file.files,
             workspace_items: file.workspace_items,
             tab_items: file.tab_items,
+            plugins,
+            plugin_problems,
             style: file.style,
             colors: file.colors,
             keybindings,

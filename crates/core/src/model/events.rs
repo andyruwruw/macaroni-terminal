@@ -6,7 +6,7 @@
 //! and never change structure or emit effects, so a report for a tab that has already closed is
 //! silently dropped.
 
-use super::{Agent, AgentState, Model, Notice, Tab, TabKind};
+use super::{Agent, AgentKind, AgentState, Model, Notice, Tab, TabKind};
 use crate::ids::{BrowserId, SessionId, TabId};
 
 impl Model {
@@ -54,18 +54,25 @@ impl Model {
     pub(super) fn set_agent(
         &mut self,
         tab: TabId,
+        kind: AgentKind,
         state: AgentState,
         detail: Option<String>,
-        session_id: Option<String>,
-        cwd: Option<String>,
+        [session_id, cwd, transcript]: [Option<String>; 3],
     ) {
         self.edit_tab(tab, |tab| {
+            // Another agent in the same tab (one exited without saying so, another started)
+            // starts afresh: the old one's session isn't the new one's.
+            if tab.agent.as_ref().is_some_and(|a| a.kind != kind) {
+                tab.agent = None;
+            }
             let agent = tab.agent.get_or_insert(Agent {
+                kind,
                 state,
                 detail: None,
                 session_id: None,
                 cwd: None,
                 summary: None,
+                transcript: None,
             });
             agent.state = state;
             agent.detail = non_blank(detail);
@@ -74,6 +81,9 @@ impl Model {
             }
             if cwd.is_some() {
                 agent.cwd = cwd;
+            }
+            if transcript.is_some() {
+                agent.transcript = transcript;
             }
         });
     }

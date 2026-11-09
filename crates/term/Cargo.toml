@@ -11,6 +11,8 @@ portable-pty.workspace = true
 regex.workspace = true
 image.workspace = true
 base64.workspace = true
+russh.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

@@ -1,14 +1,15 @@
-//! [`Session`]: one program running in a PTY, with the emulator its output feeds and the threads
-//! that move bytes between them.
+//! [`Session`]: one program, local in a PTY or remote over SSH, with the emulator its output
+//! feeds and the threads that move bytes between them.
 //!
-//! [`Session::spawn`] opens the PTY (portable-pty; ConPTY on Windows), starts the program through
-//! [`crate::shell::command`] and starts three threads:
+//! [`Session::spawn`] opens its [`Source`] (a local PTY through portable-pty, ConPTY on Windows,
+//! with the program started through [`crate::shell::command`]; or an SSH channel through
+//! [`crate::ssh`]) and starts three threads:
 //!
 //! - `pty-reader` reads output, runs it through [`OscSniffer`] (notifications, OSC 7, prompt
 //!   marks, inline images), through
 //!   [`Lines`] and the triggers when there are any, and then the emulator, and raises
 //!   [`SessionEvent::Wakeup`].
-//! - `pty-waiter` waits on the child and raises [`SessionEvent::Exited`].
+//! - `pty-waiter` waits for the program to end and raises [`SessionEvent::Exited`].
 //! - `pty-sync` flushes a synchronized update (mode 2026) the program never closed.
 //!
 //! The app (`crates/app/src/session.rs` and `update/terminals.rs`) forwards the events into its
@@ -23,7 +24,6 @@ use std::thread;
 use std::time::Instant;
 
 use alacritty_terminal::sync::FairMutex;
-use portable_pty::{ChildKiller, MasterPty, PtySize, native_pty_system};
 use regex::RegexSet;
 
 use crate::emulator::{AlacrittyEmulator, Emulator, EmulatorEvent};
@@ -33,10 +33,15 @@ use crate::grid::{
 };
 use crate::lines::Lines;
 use crate::osc::{Notification, OscEvent, OscSniffer};
+use crate::source::{Control, LocalCommand, Opened, Source, open_local};
+use crate::tmux::{Gate, TmuxClient, TmuxEvent};
 
 /// What to run in a new [`Session`].
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
+    /// What runs: a local program (the default), or a shell over SSH, which ignores
+    /// `program`, `args` and `cwd`.
+    pub source: Source,
     /// Program to run; `None` runs the platform default shell.
     pub program: Option<String>,
     /// Arguments for `program`. Ignored when `program` is `None`.
@@ -95,6 +100,9 @@ pub enum SessionEvent {
         /// The line, in plain text.
         line: String,
     },
+    /// The shell started running a command the user typed (OSC 133 `C`): the command, as
+    /// shown after the prompt.
+    CommandStarted(String),
     /// A command the shell marked (OSC 133 `C` to `D`) finished: its exit code when the shell
     /// gave one, and how long it ran.
     CommandFinished {
@@ -106,6 +114,8 @@ pub enum SessionEvent {
     /// The child exited, with its exit code when it could be read. Output may still arrive after
     /// this (see the `pty-waiter` thread in [`Session::spawn`]).
     Exited(Option<u32>),
+    /// tmux control mode in this session started, changed or ended.
+    Tmux(TmuxEvent),
 }
 
 /// The reader thread's OSC 133 state: turns each mark into an OSC 8 link for the emulator
@@ -167,7 +177,10 @@ impl Marks {
 
 /// `bytes` with each insert's bytes placed at its offset (offsets in order); `bytes` itself,
 /// unallocated, when there are none.
-fn with_inserts<'a>(bytes: &'a [u8], inserts: &[(usize, Vec<u8>)]) -> std::borrow::Cow<'a, [u8]> {
+fn with_inserts<'a, B: AsRef<[u8]>>(
+    bytes: &'a [u8],
+    inserts: &[(usize, B)],
+) -> std::borrow::Cow<'a, [u8]> {
     if inserts.is_empty() {
         return std::borrow::Cow::Borrowed(bytes);
     }
@@ -175,7 +188,7 @@ fn with_inserts<'a>(bytes: &'a [u8], inserts: &[(usize, Vec<u8>)]) -> std::borro
     let mut from = 0;
     for (at, insert) in inserts {
         out.extend_from_slice(&bytes[from..*at]);
-        out.extend_from_slice(insert);
+        out.extend_from_slice(insert.as_ref());
         from = *at;
     }
     out.extend_from_slice(&bytes[from..]);
@@ -190,18 +203,22 @@ pub struct Session {
     /// The emulator, shared with the reader and sync threads. A [`FairMutex`] so a reader thread
     /// that relocks constantly under heavy output can't starve [`Session::snapshot`].
     emulator: Arc<FairMutex<AlacrittyEmulator>>,
-    /// The PTY's input, shared with the reader and sync threads, which send the emulator's
+    /// The program's input, shared with the reader and sync threads, which send the emulator's
     /// replies to terminal queries.
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    /// The PTY master, kept to resize it. Dropping it closes the pseudoconsole, which is what
-    /// finally ends the reader thread on Windows.
-    master: Box<dyn MasterPty + Send>,
-    /// Kills the child on drop; the child itself was moved into the waiter thread.
-    killer: Box<dyn ChildKiller + Send + Sync>,
+    /// Resizes the program's terminal; dropping it (with the session) ends the program, which
+    /// ends the waiter thread, and closing its output ends the reader and sync threads. Nothing
+    /// is joined.
+    control: Box<dyn Control>,
     /// Set when output has been parsed since the last snapshot; merges wakeups.
     dirty: Arc<AtomicBool>,
     /// The triggers, shared with the reader thread.
     triggers: Triggers,
+    /// The tmux control client while this session carries one (`tmux -CC` runs in it).
+    tmux: Arc<Mutex<Option<Arc<TmuxClient>>>>,
+    /// Set by the reader thread from the shell's marks: on at the prompt's end (OSC 133 `B`),
+    /// off at anything else, so it's on while the shell's line editor has the input.
+    at_prompt: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -220,34 +237,29 @@ impl Session {
     ) -> io::Result<Self> {
         let notify: Arc<dyn Fn(SessionEvent) + Send + Sync> = Arc::new(notify);
 
-        let pair = native_pty_system()
-            .openpty(pty_size(config.size))
-            .map_err(io::Error::other)?;
-
-        let mut command = crate::shell::command(config.program.as_deref(), &config.args);
-        if let Some(cwd) = &config.cwd {
-            command.cwd(cwd);
-        }
-        command.env("TERM", "xterm-256color");
-        command.env("COLORTERM", "truecolor");
-        command.env("TERM_PROGRAM", "macaroni");
-        for (key, value) in &config.env {
-            command.env(key, value);
-        }
-
-        let mut child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(io::Error::other)?;
-        // Only the child should hold the slave side; our copy would keep the PTY open after the
-        // child exits.
-        drop(pair.slave);
-        let killer = child.clone_killer();
-
-        let mut reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
-        let writer = Arc::new(Mutex::new(
-            pair.master.take_writer().map_err(io::Error::other)?,
-        ));
+        let opened = match &config.source {
+            Source::Local => open_local(
+                &LocalCommand {
+                    program: config.program.as_deref(),
+                    args: &config.args,
+                    cwd: config.cwd.as_ref(),
+                    env: &config.env,
+                },
+                config.size,
+            )?,
+            Source::Ssh(target) => crate::ssh::open(target.clone(), config.size, &config.env),
+            Source::Tmux(pane) => crate::tmux::open(pane),
+        };
+        // A tmux pane can't start control mode itself; any other source can carry it.
+        let watch_tmux = !matches!(config.source, Source::Tmux(_));
+        let Opened {
+            mut reader,
+            writer,
+            control,
+            waiter,
+        } = opened;
+        let writer = Arc::new(Mutex::new(writer));
+        let tmux: Arc<Mutex<Option<Arc<TmuxClient>>>> = Arc::new(Mutex::new(None));
 
         // Replies to terminal queries, collected while `feed` runs and written by whoever fed
         // once the emulator lock is released (`send_replies`). Writing from inside `feed` would
@@ -324,12 +336,15 @@ impl Session {
                 })?;
         }
 
+        let at_prompt = Arc::new(AtomicBool::new(false));
         {
             let emulator = emulator.clone();
             let dirty = dirty.clone();
             let notify = notify.clone();
             let writer = writer.clone();
             let triggers = triggers.clone();
+            let tmux_slot = tmux.clone();
+            let at_prompt = at_prompt.clone();
             thread::Builder::new()
                 .name("pty-reader".into())
                 .spawn(move || {
@@ -337,12 +352,24 @@ impl Session {
                     let mut sniffer = OscSniffer::default();
                     let mut marks = Marks::default();
                     let mut lines = Lines::default();
+                    let mut gate =
+                        watch_tmux.then(|| Gate::new(writer.clone(), notify.clone(), tmux_slot));
                     loop {
                         match reader.read(&mut buf) {
                             // EOF ends the thread but is not how exit is detected (ConPTY keeps
                             // the pipe open; see `pty-waiter` below).
                             Ok(0) | Err(_) => break,
                             Ok(n) => {
+                                // In tmux control mode the protocol goes to the client, and the
+                                // terminal only shows what's around it.
+                                let data: std::borrow::Cow<'_, [u8]> = match &mut gate {
+                                    Some(gate) => gate.filter(&buf[..n]).into(),
+                                    None => (&buf[..n]).into(),
+                                };
+                                if data.is_empty() {
+                                    continue;
+                                }
+                                let n = data.len();
                                 // The sniffer runs first and outside the lock: it has its own
                                 // parser and doesn't need the grid.
                                 let mut inserts = Vec::new();
@@ -350,7 +377,9 @@ impl Session {
                                 // `Lines` to leave them out.
                                 let mut quiet = Vec::new();
                                 let mut images = Vec::new();
-                                for (at, event) in sniffer.feed_at(&buf[..n]) {
+                                // Where commands' output starts, to read each command there.
+                                let mut starts = Vec::new();
+                                for (at, event) in sniffer.feed_at(&data[..n]) {
                                     match event {
                                         OscEvent::Notify(n) => notify(SessionEvent::Notify(n)),
                                         OscEvent::Cwd(path) => notify(SessionEvent::Cwd(path)),
@@ -361,6 +390,11 @@ impl Session {
                                                 at,
                                                 matches!(mark, Mark::Prompt | Mark::Command),
                                             ));
+                                            if mark == Mark::Output {
+                                                starts.push(at);
+                                            }
+                                            at_prompt
+                                                .store(mark == Mark::Command, Ordering::Relaxed);
                                             let (link, finished) = marks.next(mark);
                                             inserts.push((at, link));
                                             if let Some(event) = finished {
@@ -385,14 +419,15 @@ impl Session {
                                     };
                                     let mut from = 0;
                                     for &(at, on) in &quiet {
-                                        lines.feed(&buf[from..at], &mut matched);
+                                        lines.feed(&data[from..at], &mut matched);
                                         lines.set_quiet(on);
                                         from = at;
                                     }
-                                    lines.feed(&buf[from..n], &mut matched);
+                                    lines.feed(&data[from..n], &mut matched);
                                 } else if let Some(&(_, on)) = quiet.last() {
                                     lines.set_quiet(on);
                                 }
+                                let mut commands = Vec::new();
                                 let deadline = {
                                     let mut emulator = emulator.lock();
                                     // Placed under the lock: how many cells an image covers
@@ -406,9 +441,34 @@ impl Session {
                                     // Stable, so a mark and an image ending together stay in
                                     // the order they came.
                                     inserts.sort_by_key(|(at, _)| *at);
-                                    emulator.feed(&with_inserts(&buf[..n], &inserts));
+                                    // Fed in parts cut where each command's output starts: the
+                                    // command is read off the grid there, before output moves
+                                    // the cursor away from it.
+                                    let mut from = 0;
+                                    let mut next = 0;
+                                    for (i, &cut) in starts.iter().chain([&n]).enumerate() {
+                                        let end = inserts[next..]
+                                            .iter()
+                                            .position(|(at, _)| *at > cut)
+                                            .map_or(inserts.len(), |p| next + p);
+                                        let part: Vec<(usize, &[u8])> = inserts[next..end]
+                                            .iter()
+                                            .map(|(at, bytes)| (at - from, bytes.as_slice()))
+                                            .collect();
+                                        emulator.feed(&with_inserts(&data[from..cut], &part));
+                                        if i < starts.len()
+                                            && let Some(command) = emulator.typed_command()
+                                        {
+                                            commands.push(command);
+                                        }
+                                        from = cut;
+                                        next = end;
+                                    }
                                     emulator.sync_deadline()
                                 };
+                                for command in commands {
+                                    notify(SessionEvent::CommandStarted(command));
+                                }
                                 // Before the next read, and so before any further output: this
                                 // is load-bearing on Windows. ConPTY sends `ESC[6n` at startup
                                 // (the pseudoconsole is created with
@@ -430,24 +490,25 @@ impl Session {
                 })?;
         }
 
-        // ConPTY keeps the output pipe open after the child exits, so the reader never sees EOF
-        // until the pseudoconsole is closed. Exit is detected by waiting on the child instead.
         // The reader runs independently, so the last output can be parsed after `Exited`.
         thread::Builder::new()
             .name("pty-waiter".into())
-            .spawn(move || {
-                let code = child.wait().ok().map(|status| status.exit_code());
-                notify(SessionEvent::Exited(code));
-            })?;
+            .spawn(move || notify(SessionEvent::Exited(waiter())))?;
 
         Ok(Self {
             emulator,
             writer,
-            master: pair.master,
-            killer,
+            control,
             dirty,
             triggers,
+            tmux,
+            at_prompt,
         })
+    }
+
+    /// The tmux client this session carries while `tmux -CC` runs in it.
+    pub fn tmux(&self) -> Option<Arc<TmuxClient>> {
+        self.tmux.lock().ok()?.clone()
     }
 
     /// Replaces the patterns output lines are matched against; `None` stops matching.
@@ -482,7 +543,7 @@ impl Session {
 
     /// Resizes the PTY (so the program gets `SIGWINCH` or the ConPTY equivalent) and the grid.
     pub fn resize(&self, size: GridSize) {
-        let _ = self.master.resize(pty_size(size));
+        self.control.resize(size);
         self.emulator.lock().resize(size);
     }
 
@@ -539,6 +600,25 @@ impl Session {
         self.emulator.lock().last_output()
     }
 
+    /// The arrow keys that move the cursor to the screen cell `at` (left-clicked) in the
+    /// command being typed at the shell's prompt, as the program expects them; `None` unless
+    /// the shell is waiting at a marked prompt and `at` is in that command
+    /// ([`Emulator::cursor_moves`]) somewhere other than the cursor.
+    pub fn click_to_cursor(&self, at: GridPoint) -> Option<Vec<u8>> {
+        if !self.at_prompt.load(Ordering::Relaxed) {
+            return None;
+        }
+        let emulator = self.emulator.lock();
+        let moves = emulator.cursor_moves(at).filter(|&n| n != 0)?;
+        let arrow: &[u8] = match (moves > 0, emulator.modes().app_cursor) {
+            (true, false) => b"\x1b[C",
+            (false, false) => b"\x1b[D",
+            (true, true) => b"\x1bOC",
+            (false, true) => b"\x1bOD",
+        };
+        Some(arrow.repeat(moves.unsigned_abs() as usize))
+    }
+
     /// See [`Emulator::hyperlink_at`].
     pub fn hyperlink_at(&self, at: GridPoint) -> Option<String> {
         self.emulator.lock().hyperlink_at(at)
@@ -552,15 +632,6 @@ impl Session {
     /// See [`Emulator::reset_search`].
     pub fn reset_search(&self) {
         self.emulator.lock().reset_search();
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        // Runs before the fields drop. Killing the child ends the waiter thread; dropping
-        // `master` afterwards closes the pseudoconsole, which ends the reader thread, which in
-        // turn ends the sync thread. Nothing is joined.
-        let _ = self.killer.kill();
     }
 }
 
@@ -581,16 +652,6 @@ fn write_all(writer: &Mutex<Box<dyn Write + Send>>, bytes: &[u8]) {
         return;
     };
     let _ = writer.write_all(bytes).and_then(|()| writer.flush());
-}
-
-/// The PTY size for a grid size. Rows and columns are at least 1, matching the emulator's clamp.
-fn pty_size(size: GridSize) -> PtySize {
-    PtySize {
-        rows: size.rows.max(1),
-        cols: size.cols.max(1),
-        pixel_width: size.cols.saturating_mul(size.cell_width),
-        pixel_height: size.rows.saturating_mul(size.cell_height),
-    }
 }
 
 #[cfg(test)]
@@ -629,7 +690,7 @@ mod tests {
         let inserts = [(1, b"<".to_vec()), (3, b">".to_vec())];
         assert_eq!(&*super::with_inserts(b"abcd", &inserts), b"a<bc>d");
         assert!(matches!(
-            super::with_inserts(b"abcd", &[]),
+            super::with_inserts::<Vec<u8>>(b"abcd", &[]),
             std::borrow::Cow::Borrowed(_)
         ));
     }
@@ -656,6 +717,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let session = Session::spawn(
             SessionConfig {
+                source: crate::Source::Local,
                 program: Some(program.into()),
                 args: args.into_iter().map(String::from).collect(),
                 cwd: None,
@@ -702,5 +764,142 @@ mod tests {
             }
         }
         panic!("{expected:?} never appeared (triggered: {triggered}):\n{screen}");
+    }
+
+    /// A program that prints a marked prompt, a command and its output start, as a shell with
+    /// the integration does, reports the command when its output starts.
+    #[test]
+    fn a_marked_command_is_reported_when_it_starts() {
+        // Pauses between the parts, as typing makes, so ConPTY has drawn the command before
+        // the output mark passes through.
+        let (program, args) = if cfg!(windows) {
+            (
+                "powershell.exe",
+                vec![
+                    "-NoProfile",
+                    "-Command",
+                    "$e=[char]27; $b=[char]7; \
+                     [Console]::Write(\"$e]133;A$b`$ $e]133;B$b\"); Start-Sleep -m 300; \
+                     [Console]::Write('git  status'); Start-Sleep -m 300; \
+                     [Console]::Write(\"`r`n$e]133;C$b\"); Start-Sleep -m 300; \
+                     [Console]::Write(\"clean`r`n$e]133;D;0$b\"); Start-Sleep -m 300",
+                ],
+            )
+        } else {
+            (
+                "/bin/sh",
+                vec![
+                    "-c",
+                    "printf '\\033]133;A\\007$ \\033]133;B\\007git  status'; \
+                     printf '\\r\\n\\033]133;C\\007clean\\r\\n\\033]133;D;0\\007'",
+                ],
+            )
+        };
+        let (tx, rx) = mpsc::channel();
+        let _session = Session::spawn(
+            SessionConfig {
+                source: crate::Source::Local,
+                program: Some(program.into()),
+                args: args.into_iter().map(String::from).collect(),
+                cwd: None,
+                size: GridSize {
+                    cols: 80,
+                    rows: 24,
+                    cell_width: 8,
+                    cell_height: 16,
+                },
+                scrollback: 100,
+                env: Vec::new(),
+                colors: None,
+                cursor: CursorShape::Block,
+                triggers: None,
+            },
+            move |event| {
+                let _ = tx.send(event);
+            },
+        )
+        .expect("spawn");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(SessionEvent::CommandStarted(command)) => {
+                    assert_eq!(command, "git  status");
+                    return;
+                }
+                Ok(SessionEvent::CommandFinished { .. }) => panic!("finished, never started"),
+                _ => {}
+            }
+        }
+        panic!("the command was never reported");
+    }
+
+    /// The real shells' integrations mark where the command line starts, so a typed command
+    /// is reported: bash (Git Bash on Windows) and, on Windows, PowerShell.
+    #[test]
+    fn shells_report_typed_commands() {
+        let mut shells: Vec<(String, Vec<String>)> = Vec::new();
+        let bash = if cfg!(windows) {
+            crate::shell::git_bash()
+        } else {
+            Some(std::path::PathBuf::from("/bin/bash")).filter(|p| p.exists())
+        };
+        if let Some(bash) = bash {
+            shells.push((
+                bash.to_string_lossy().into_owned(),
+                vec!["--norc".into(), "--noprofile".into(), "-i".into()],
+            ));
+        }
+        if cfg!(windows) {
+            shells.push(("powershell.exe".into(), Vec::new()));
+        }
+        for (program, args) in shells {
+            let (tx, rx) = mpsc::channel();
+            let session = Session::spawn(
+                SessionConfig {
+                    source: crate::Source::Local,
+                    program: Some(program.clone()),
+                    args,
+                    cwd: None,
+                    size: GridSize {
+                        cols: 100,
+                        rows: 24,
+                        cell_width: 8,
+                        cell_height: 16,
+                    },
+                    scrollback: 100,
+                    env: Vec::new(),
+                    colors: None,
+                    cursor: CursorShape::Block,
+                    triggers: None,
+                },
+                move |event| {
+                    let _ = tx.send(event);
+                },
+            )
+            .expect("spawn");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut typed = false;
+            let mut reported = None;
+            while Instant::now() < deadline && reported.is_none() {
+                // Typed once the first prompt is up, as a person would.
+                if !typed && !session.all_text().trim().is_empty() {
+                    std::thread::sleep(Duration::from_millis(1000));
+                    session.write(b"echo  macaroni-history\r");
+                    typed = true;
+                }
+                if let Ok(SessionEvent::CommandStarted(command)) =
+                    rx.recv_timeout(Duration::from_millis(100))
+                {
+                    reported = Some(command);
+                }
+            }
+            session.write(b"exit\r");
+            assert_eq!(
+                reported.as_deref(),
+                Some("echo  macaroni-history"),
+                "{program} (typed: {typed}):\n{}",
+                session.all_text()
+            );
+        }
     }
 }

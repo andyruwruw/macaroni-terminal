@@ -2,7 +2,8 @@
 //! sets every item's targets after each message ([`Fades::sync`]); the view reads the eased
 //! levels ([`Fades::get`]), and while any is moving ([`Fades::animating`]) the app subscribes to
 //! `window::frames` so it keeps redrawing. Levels are computed from the time of the last `sync`,
-//! so a frame message (which runs `sync` again) is what advances them.
+//! so a frame message (which runs `sync` again) is what advances them. With reduced motion
+//! ([`Fades::instant`]) every level jumps straight to its target.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -80,23 +81,26 @@ pub struct Fades {
     /// The time of the last [`Fades::sync`], what [`Fades::get`] reads levels at; `None` before
     /// the first.
     now: Option<Instant>,
+    /// Reduced motion (`[accessibility] reduce_motion`): levels jump to their targets.
+    pub instant: bool,
 }
 
 impl Fades {
     /// Sets each item's targets, as `(item, selected, hovered)`; items left out are forgotten.
-    /// New items start at their targets, so nothing animates in when a workspace or tab appears.
+    /// New items start at their targets, so nothing animates in when a workspace or tab appears;
+    /// with [`Fades::instant`], every item does.
     pub fn sync(&mut self, now: Instant, targets: impl IntoIterator<Item = (Item, bool, bool)>) {
         let level = |on: bool| if on { 1.0 } else { 0.0 };
         let mut items = HashMap::with_capacity(self.items.len());
         for (item, selected, hovered) in targets {
             let (selected, hovered) = (level(selected), level(hovered));
             let fades = match self.items.remove(&item) {
-                Some((mut s, mut h)) => {
+                Some((mut s, mut h)) if !self.instant => {
                     s.retarget(selected, now);
                     h.retarget(hovered, now);
                     (s, h)
                 }
-                None => {
+                _ => {
                     let still = |to| Fade {
                         from: to,
                         to,

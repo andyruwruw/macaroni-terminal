@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*", "xtask"]
 
 [workspace.package]
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -12,7 +12,7 @@ publish = false
 macaroni-core = { path = "crates/core" }
 macaroni-term = { path = "crates/term" }
 macaroni-config = { path = "crates/config" }
-iced = { version = "0.14", features = ["advanced", "svg", "image"] }
+iced = { version = "0.14", features = ["advanced", "svg", "image", "markdown", "highlighter"] }
 alacritty_terminal = "0.26"
 portable-pty = "0.9"
 insta = "1"
@@ -38,6 +38,17 @@ rfd = "0.15"
 regex = "1"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+accesskit = "0.25"
+accesskit_windows = "0.35"
+accesskit_macos = "0.27"
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+syntect = { version = "5.3", default-features = false, features = ["html"] }
+two-face = { version = "0.4", default-features = false, features = ["syntect-default-fancy"] }
+sha2 = "0.10"
+getrandom = "0.3"
+objc2-app-kit = { version = "0.2", default-features = false, features = ["std", "NSWorkspace"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -52,3 +63,11 @@ all = { level = "warn", priority = -1 }
 missing_docs_in_private_items = "warn"
 missing_panics_doc = "warn"
 undocumented_unsafe_blocks = "warn"
+
+# Full debug info made `target/debug` most of a 150 GB `target` folder. Line tables keep
+# backtraces' file and line (the crash log's too); dependencies get none.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

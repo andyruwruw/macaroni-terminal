@@ -1,5 +1,6 @@
-//! The terminal bell's sound (`[notifications] bell_sound`): nothing, the system's alert, or a
-//! sound file.
+//! Playing sounds: the terminal bell's (`[notifications] bell_sound`) and a tab's when it asks
+//! for attention (`sound`). Each is nothing, the system's alert, one of macaroni's own
+//! ([`crate::sounds`]), or a sound file.
 //!
 //! [`ring`] is called for every BEL a terminal prints, which a program can do in a tight loop,
 //! so rings closer together than [`MIN_GAP`] are dropped. Playing never blocks the UI thread:
@@ -15,12 +16,10 @@ const MIN_GAP: Duration = Duration::from_millis(150);
 /// When the bell last rang.
 static LAST: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// Plays `sound` (a `bell_sound` value): `"off"` (or empty) plays nothing, `"system"` the
-/// system's alert sound, anything else is a sound file's path. A file that can't be played is
-/// silently skipped, as a bell should never get in the way.
+/// Rings the bell with `sound` (a `bell_sound` value; see [`play`]), unless it rang less than
+/// [`MIN_GAP`] ago.
 pub fn ring(sound: &str) {
-    let sound = sound.trim();
-    if sound.is_empty() || sound == "off" {
+    if silent(sound) {
         return;
     }
     {
@@ -34,10 +33,32 @@ pub fn ring(sound: &str) {
     play(sound);
 }
 
-/// Plays the system alert, or the file at `sound`, without waiting for it.
+/// Whether `sound` plays nothing: `"off"` or empty.
+fn silent(sound: &str) -> bool {
+    let sound = sound.trim();
+    sound.is_empty() || sound == "off"
+}
+
+/// Plays `sound` without waiting for it: `"off"` (or empty) plays nothing, `"system"` the
+/// system's alert sound, a built-in name ([`crate::sounds::BUILT_IN`]) that sound, anything
+/// else is a sound file's path. A sound that can't be played is silently skipped, as it should
+/// never get in the way.
+pub fn play(sound: &str) {
+    let sound = sound.trim();
+    if silent(sound) {
+        return;
+    }
+    match crate::sounds::file(sound) {
+        Some(file) => play_file(&file.to_string_lossy()),
+        None if crate::sounds::BUILT_IN.iter().any(|(n, _)| *n == sound) => {}
+        None => play_file(sound),
+    }
+}
+
+/// Plays the system alert (`"system"`), or the file at `sound`, without waiting for it.
 #[cfg(windows)]
 #[allow(unsafe_code)]
-fn play(sound: &str) {
+fn play_file(sound: &str) {
     use windows_sys::Win32::Media::Audio::{
         PlaySoundW, SND_ALIAS, SND_ASYNC, SND_FILENAME, SND_NODEFAULT,
     };
@@ -61,9 +82,9 @@ fn play(sound: &str) {
     };
 }
 
-/// Plays the system alert, or the file at `sound`, without waiting for it.
+/// Plays the system alert (`"system"`), or the file at `sound`, without waiting for it.
 #[cfg(not(windows))]
-fn play(sound: &str) {
+fn play_file(sound: &str) {
     let mut command = if sound == "system" {
         let mut c = std::process::Command::new("osascript");
         c.args(["-e", "beep"]);

@@ -14,10 +14,15 @@
 //! `search_all`), it copies the text of the workspace's (or every) terminal when it opens and
 //! lists the lines containing what's typed, newest first. Running one shows its tab with the
 //! find bar on that line.
+//!
+//! Opened as the command history ([`PaletteMessage::OpenHistory`], `command_history`), it lists
+//! the commands run in a pane's workspace ([`crate::history::History::listed`]). Enter types the
+//! pick at that pane's prompt; with Ctrl (Cmd on macOS) held it runs it too, and Shift+Delete
+//! forgets it.
 
 use iced::widget::{button, column, container, mouse_area, opaque, row, text_input};
 use iced::{Border, Color, Element, Fill, Task, alignment};
-use macaroni_core::{Command, TabId, WorkspaceId};
+use macaroni_core::{Command, PaneId, TabId, TabKind, WorkspaceId};
 
 use super::settings::{Section, SettingsMessage};
 use super::widgets::{flat_button, input_style, one_line, shadow};
@@ -58,6 +63,8 @@ pub struct Palette {
     query: String,
     /// The highlighted match, counting from the best.
     selected: usize,
+    /// The modifiers held, for Ctrl+Enter in the command history.
+    modifiers: iced::keyboard::Modifiers,
 }
 
 /// What the palette lists.
@@ -70,6 +77,25 @@ enum Mode {
     Waiting,
     /// Lines of terminals' scrollback, copied when it opened.
     Search(Vec<Scrollback>),
+    /// The commands run in a workspace, for one of its panes.
+    History {
+        /// The workspace.
+        ws: WorkspaceId,
+        /// The pane its pick is typed into, whose own commands come first.
+        pane: PaneId,
+    },
+}
+
+/// The open palette, as a screen reader is told about it.
+pub(crate) struct PaletteAccess {
+    /// What its field is for.
+    pub(crate) purpose: &'static str,
+    /// What's typed.
+    pub(crate) query: String,
+    /// Each match's label and detail.
+    pub(crate) matches: Vec<(String, String)>,
+    /// The highlighted match.
+    pub(crate) selected: usize,
 }
 
 /// One terminal's text, for scrollback search.
@@ -92,6 +118,12 @@ pub enum PaletteMessage {
     OpenWaiting,
     /// Open it as scrollback search: every terminal (`true`) or the active workspace's.
     OpenSearch(bool),
+    /// Open it as the command history for a pane (`None`: the focused one).
+    OpenHistory(Option<PaneId>),
+    /// Shift+Delete: in the command history, forget the highlighted command.
+    Forget,
+    /// The modifiers held changed.
+    Modifiers(iced::keyboard::Modifiers),
     /// The field changed.
     Input(String),
     /// Move the highlight by this many matches (Up is -1, Down 1), stopping at the ends.
@@ -125,6 +157,8 @@ enum Target {
     },
     /// Open the settings dialog at a page.
     Settings(Section),
+    /// Type a command from the history at a pane's prompt.
+    Typed(String),
 }
 
 /// One entry: what it runs, what it's called, what's shown beside it, and its icon.
@@ -149,6 +183,12 @@ impl App {
             PaletteMessage::OpenSearch(everywhere) => {
                 Some(Mode::Search(self.scrollbacks(*everywhere)))
             }
+            PaletteMessage::OpenHistory(pane) => {
+                let pane = pane.unwrap_or(self.model.active_workspace().focused);
+                self.model
+                    .workspace_of_pane(pane)
+                    .map(|ws| Mode::History { ws, pane })
+            }
             _ => None,
         };
         if let Some(mode) = opened {
@@ -163,7 +203,32 @@ impl App {
             return Task::none();
         };
         match message {
-            PaletteMessage::Open | PaletteMessage::OpenWaiting | PaletteMessage::OpenSearch(_) => {
+            PaletteMessage::Open
+            | PaletteMessage::OpenWaiting
+            | PaletteMessage::OpenSearch(_)
+            | PaletteMessage::OpenHistory(_) => Task::none(),
+            PaletteMessage::Modifiers(modifiers) => {
+                palette.modifiers = modifiers;
+                Task::none()
+            }
+            PaletteMessage::Forget => {
+                let Mode::History { ws, .. } = palette.mode else {
+                    return Task::none();
+                };
+                let selected = palette.selected;
+                if let Some(Target::Typed(command)) = self
+                    .palette_matches()
+                    .into_iter()
+                    .nth(selected)
+                    .map(|i| i.target)
+                {
+                    self.history.forget(ws, &command);
+                    self.session_dirty = true;
+                }
+                let count = self.palette_matches().len();
+                if let Some(palette) = &mut self.command_palette {
+                    palette.selected = palette.selected.min(count.saturating_sub(1));
+                }
                 Task::none()
             }
             PaletteMessage::Input(query) => {
@@ -192,7 +257,18 @@ impl App {
     /// Closes the palette and runs the match at `at`, if there's one.
     fn palette_run(&mut self, at: usize) -> Task<Message> {
         let target = self.palette_matches().into_iter().nth(at).map(|i| i.target);
-        self.command_palette = None;
+        let palette = self.command_palette.take();
+        if let Some(Target::Typed(command)) = target {
+            let Some(Palette {
+                mode: Mode::History { pane, .. },
+                modifiers,
+                ..
+            }) = palette
+            else {
+                return Task::none();
+            };
+            return self.type_command(pane, command, modifiers.command());
+        }
         match target {
             None => Task::none(),
             Some(Target::Action(name)) => match keymap::action(name) {
@@ -214,7 +290,63 @@ impl App {
                 self.open_settings(),
                 self.settings_update(SettingsMessage::Section(section)),
             ]),
+            Some(Target::Typed(_)) => Task::none(),
         }
+    }
+
+    /// Shows `pane`'s terminal and types `command` at its prompt, pressing Enter too if `run`.
+    fn type_command(&mut self, pane: PaneId, command: String, run: bool) -> Task<Message> {
+        let Some(tab) = self.model.pane(pane).map(|p| p.active) else {
+            return Task::none();
+        };
+        let Some(TabKind::Terminal(session)) = self.model.tab(tab).map(|t| t.kind.clone()) else {
+            return Task::none();
+        };
+        let shown = self.apply(Command::SelectTab(tab));
+        // Pasted, so a program reading the line takes it as text rather than keys, and a
+        // command of several lines doesn't run line by line.
+        let typed = self.paste(session, command);
+        let enter = if run {
+            self.view_event(session, crate::terminal::ViewEvent::Write(b"\r".to_vec()))
+        } else {
+            Task::none()
+        };
+        Task::batch([shown, typed, enter])
+    }
+
+    /// The command history's items: [`crate::history::History::listed`], at most
+    /// [`MAX_SHOWN`], each with where and how often it ran.
+    fn history_items(&self, ws: WorkspaceId, pane: PaneId, query: &str) -> Vec<Item> {
+        let now = crate::history::now();
+        self.history
+            .listed(ws, pane, query)
+            .into_iter()
+            .take(MAX_SHOWN)
+            .map(|listed| {
+                let mut detail = vec![
+                    if listed.here {
+                        "This pane"
+                    } else {
+                        "Other pane"
+                    }
+                    .to_owned(),
+                ];
+                if listed.runs > 1 {
+                    detail.push(format!("{} runs", listed.runs));
+                }
+                detail.push(crate::history::ago(now, listed.last));
+                Item {
+                    label: listed.command.replace('\n', " \u{21b5} "),
+                    target: Target::Typed(listed.command),
+                    detail: detail.join(" \u{b7} "),
+                    icon: if listed.common {
+                        Icon::Star
+                    } else {
+                        Icon::History
+                    },
+                }
+            })
+            .collect()
     }
 
     /// Every running terminal's text (just the active workspace's unless `everywhere`), in
@@ -377,6 +509,10 @@ impl App {
                         icon: match t.kind {
                             macaroni_core::TabKind::Terminal(_) => Icon::Terminal,
                             macaroni_core::TabKind::Browser(_) => Icon::Globe,
+                            macaroni_core::TabKind::Git => Icon::GitCompare,
+                            macaroni_core::TabKind::Tmux => Icon::Columns,
+                            macaroni_core::TabKind::AgentSetup => Icon::Bot,
+                            macaroni_core::TabKind::File => Icon::FileText,
                         },
                     });
                 }
@@ -417,6 +553,13 @@ impl App {
         {
             return Self::search_items(scrollbacks, query);
         }
+        if let Some(Palette {
+            mode: Mode::History { ws, pane },
+            ..
+        }) = &self.command_palette
+        {
+            return self.history_items(*ws, *pane, query);
+        }
         let mut scored: Vec<(i32, Item)> = self
             .palette_items()
             .into_iter()
@@ -430,6 +573,28 @@ impl App {
             .collect()
     }
 
+    /// What a screen reader is told about the open palette.
+    pub(crate) fn palette_access(&self) -> Option<PaletteAccess> {
+        let palette = self.command_palette.as_ref()?;
+        let purpose = match &palette.mode {
+            Mode::Waiting => "Tabs waiting for you",
+            Mode::Search(_) => "Search terminals' scrollback",
+            Mode::History { .. } => "Command history",
+            Mode::Commands => "Command palette",
+        };
+        let matches = self
+            .palette_matches()
+            .into_iter()
+            .map(|item| (item.label, item.detail))
+            .collect();
+        Some(PaletteAccess {
+            purpose,
+            query: palette.query.clone(),
+            matches,
+            selected: palette.selected,
+        })
+    }
+
     /// The palette over a dimmed app, or nothing while it's closed.
     pub(crate) fn palette_view(&self) -> Option<Element<'_, Message>> {
         let palette = self.command_palette.as_ref()?;
@@ -440,6 +605,10 @@ impl App {
                 ("Search terminals' scrollback", "Type to search.")
             }
             Mode::Search(_) => ("Search terminals' scrollback", "No line matches."),
+            Mode::History { .. } => (
+                "Commands run here: Enter types one, Ctrl+Enter runs it",
+                "No command matches. Commands are recorded in shells with macaroni's integration.",
+            ),
             Mode::Commands => (
                 "Run a command, or go to a workspace, tab or setting",
                 "Nothing matches.",

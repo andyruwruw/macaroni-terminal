@@ -10,7 +10,7 @@ Model { window (focused), workspaces (its sidebar order), active, groups, parked
 Workspace { id, name, layout: SplitNode, focused: PaneId, cwd, group, maximized, env, startup }
 SplitNode = Leaf(PaneId) | Split { axis: Row|Column, ratio, first, second }
 Pane { id, tabs: Vec<TabId>, active }
-Tab { id, title, name, kind: TabKind, attention, badge, agent, cwd, url, muted, pinned }
+Tab { id, title, name, kind: TabKind (Terminal | Browser | Git | Tmux | AgentSetup | File), attention, badge, agent, cwd, url, file, muted, pinned, icon, color, plugins }
 ```
 
 - **`Model::apply` is the only way to change state.** Keybindings, menus, the sidebar and the socket API all produce `Command`s. Side effects are returned, never performed: `SpawnSession`, `KillSession`, `OpenBrowser`, `CloseBrowser`, `Quit`.
@@ -55,7 +55,7 @@ Tab { id, title, name, kind: TabKind, attention, badge, agent, cwd, url, muted, 
 
 - **Command:** add a `Command` variant, a dispatch line in `Model::apply`, and the body in the right `model/` file. Push effects rather than doing work. Add a unit test in `tests.rs` and, if valid at random, a case in the random test's generator.
 - **Effect:** add the variant and handle it in the app's `run_effects` (`crates/app/src/update/effects.rs`).
-- **Tab kind:** a `TabKind` variant, a `TabSpec` variant for saved layouts, an open/close `Effect` pair if it owns a resource, and a body in the app's pane view. Code that needs a terminal (`App::focused_session`, the IPC `session` helper, the find bar) matches on the kind and treats others as "not a terminal".
+- **Tab kind:** a `TabKind` variant, a `TabSpec` variant for saved layouts, an open/close `Effect` pair if it owns a resource, and a body in the app's pane view. `TabKind::Git` owns nothing: `OpenGit` and `SetGitFolder` emit no effects, and its folder is `Tab.cwd` (see [`git-tab.md`](git-tab.md)). `TabKind::Tmux` owns nothing either (`OpenTmux` puts it after a tab without selecting it, `SetTmuxTitle` names it) and `spec()` leaves it out (see [`tmux.md`](tmux.md)). `TabKind::AgentSetup` owns nothing: `OpenAgentSetup` emits nothing and its project folder is `Tab.cwd`, unset for none (see [`agent-setup.md`](agent-setup.md)). `TabKind::File` owns nothing: `OpenFile` and `SetFile` (point the tab at another file) emit nothing, the file is `Tab.file` and its folder `Tab.cwd` (see [`file-tab.md`](file-tab.md)). Code that needs a terminal (`App::focused_session`, the IPC `session` helper, the find bar) matches on the kind and treats others as "not a terminal".
 - **Invariant:** add it to the relevant `check_*` in `model/check.rs`.
 
 ## Tests
