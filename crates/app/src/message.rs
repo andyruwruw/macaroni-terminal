@@ -5,12 +5,14 @@
 //! handler in `update/`. The action enums ([`TabAction`], [`WorkspaceAction`], [`GroupAction`])
 //! are what right-click menu items carry; `update/actions.rs` turns them into model commands.
 
+use std::sync::{Arc, Mutex};
+
 use iced::futures::channel::mpsc::UnboundedSender;
 use iced::{Point, Rectangle, Size, window};
 use macaroni_core::{
     BrowserId, Command, Divider, GroupId, MoveTo, PaneId, SessionId, Shift, TabId, WorkspaceId,
 };
-use macaroni_term::{SearchDirection, SessionEvent};
+use macaroni_term::{SearchDirection, Session, SessionEvent};
 
 use crate::browser::BrowserMessage;
 use crate::keymap::Action;
@@ -18,6 +20,74 @@ use crate::terminal::ViewEvent;
 
 use crate::state::{MenuPage, MenuTarget, Renaming, SidebarHover};
 use crate::{ipc, pointer, view};
+
+/// A shell started off the UI thread, or why it couldn't start. Messages are cloned and a
+/// session can't be, so it's shared, and the first handler to [`Started::take`] it gets it.
+#[derive(Clone)]
+pub(crate) struct Started(Arc<Mutex<Option<std::io::Result<Session>>>>);
+
+impl Started {
+    /// Wraps the result of [`Session::spawn`].
+    pub(crate) fn new(result: std::io::Result<Session>) -> Self {
+        Self(Arc::new(Mutex::new(Some(result))))
+    }
+
+    /// The result, the first time; `None` after that.
+    pub(crate) fn take(&self) -> Option<std::io::Result<Session>> {
+        self.0.lock().ok()?.take()
+    }
+}
+
+impl std::fmt::Debug for Started {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Started")
+    }
+}
+
+/// A file named in a terminal's output, found on disk: where it is, and the line and column
+/// the reference gave (from 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileLink {
+    /// The file, absolute.
+    pub path: std::path::PathBuf,
+    /// The line, from 1.
+    pub line: Option<u32>,
+    /// The column, from 1.
+    pub column: Option<u32>,
+}
+
+/// What was Ctrl+clicked or Ctrl+right-clicked (Cmd on macOS) in a terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Clicked {
+    /// An http(s) URL.
+    Url(String),
+    /// A file that exists.
+    File(FileLink),
+}
+
+/// Where to open a [`Clicked`] link: a click's default, or an item on the link menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OpenIn {
+    /// A file tab: the one showing the file, else in the pane a file tab shows in, else a
+    /// split beside the terminal.
+    Viewer,
+    /// A VS Code tab, placed like a link's page.
+    VsCode,
+    /// `[files] app`.
+    App,
+    /// Ask for a program with the system's file dialog, then open with it.
+    PickApp,
+    /// This program, just picked.
+    Program(std::path::PathBuf),
+    /// The system's file manager, with the file selected.
+    Folder,
+    /// Copy the path or URL.
+    Copy,
+    /// A browser tab in the browser pane, else a split beside the terminal.
+    BrowserPanel,
+    /// The system's default browser.
+    SystemBrowser,
+}
 
 /// An item on a tab's right-click menu.
 #[derive(Debug, Clone, Copy)]
@@ -127,6 +197,11 @@ pub(crate) enum Message {
     /// A terminal's reader or waiter thread reported something (new output, a title, a bell, a
     /// notification, its working directory, a clipboard write, the process exiting).
     Session(SessionId, SessionEvent),
+    /// A terminal's shell, started off the UI thread, is running (or failed to start).
+    SessionStarted(SessionId, Started),
+    /// Starts more of the hidden tabs' terminals, if fewer are starting than allowed. Sent a
+    /// while after each terminal starts, for shells that never report a prompt.
+    StartHidden,
     /// A terminal view reported something: its grid size, typed input, a selection, scrolling,
     /// a click, a link, a shortcut, or Enter to rename the focused item.
     View(SessionId, ViewEvent),
@@ -159,7 +234,8 @@ pub(crate) enum Message {
     SidebarSearchSubmit,
     /// Empty the sidebar's search field.
     SidebarSearchClear,
-    /// A press anywhere: find out whether the sidebar's search field has the keyboard now.
+    /// A press anywhere: find out whether the sidebar's search field has the keyboard now, and
+    /// drop the keyboard's focus ring (the mouse is in use).
     SidebarSearchCheck,
     /// Whether the sidebar's search field has the keyboard.
     SidebarSearchFocused(bool),
@@ -203,6 +279,23 @@ pub(crate) enum Message {
     DragTick,
     /// Redraws while a selection or hover fade runs.
     Frame,
+    /// The system's accessibility settings changed (watched while an option follows them).
+    SystemPrefs(crate::accessibility::SystemPrefs),
+    /// A key nothing captured while the keyboard is on the sidebar or a tab strip, or a menu
+    /// is open.
+    FocusKey(
+        iced::keyboard::Key,
+        iced::keyboard::key::Physical,
+        iced::keyboard::Modifiers,
+    ),
+    /// Open this menu from the keyboard, under its item (where it was found on screen).
+    KeyMenu(MenuTarget, Option<iced::Rectangle>),
+    /// A screen reader started reading a window, or asked for an action.
+    Reader(crate::accessibility::adapter::Event),
+    /// Time to refresh what screen readers are told about terminals and where things are.
+    ReaderTick,
+    /// Where the items screen readers are told about are on screen, by widget id.
+    ReaderBounds(std::collections::HashMap<iced::widget::Id, iced::Rectangle>),
     /// A tick while the session has unsaved changes, so the last change is saved within a
     /// second even if no command follows it.
     SaveTick,
@@ -214,6 +307,34 @@ pub(crate) enum Message {
     GitTick,
     /// The workspaces' git state, by folder.
     GitInfo(std::collections::HashMap<String, crate::git::Repo>),
+    /// Something in a Git tab.
+    Git(TabId, view::git_tab::GitMessage),
+    /// Opens a Git tab in the pane, for its directory.
+    GitTab(PaneId),
+    /// Something in an agent setup tab.
+    AgentSetup(TabId, view::agent_tab::AgentMessage),
+    /// Opens an agent setup tab in the pane, for the project its directory is in.
+    AgentSetupTab(PaneId),
+    /// Time to read the agent setup tabs on screen again.
+    AgentTick,
+    /// Something in a file tab.
+    File(TabId, view::file_tab::FileMessage),
+    /// Asks for a file, to open in a file tab in the pane.
+    PickFile(PaneId),
+    /// Opens a file tab for the file in the pane.
+    OpenFile(PaneId, std::path::PathBuf),
+    /// Opens what was clicked in a terminal there.
+    OpenClicked(Clicked, OpenIn),
+    /// Time to check whether the files of file tabs on screen changed.
+    FileTick,
+    /// Time to run the plugins due in panels on screen.
+    PluginTick,
+    /// Turns a plugin on (`true`) or off for a tab, by id, from the tab's menu.
+    TabPlugin(TabId, String, bool),
+    /// A plugin ran for a tab: its rows, or why it failed.
+    PluginRan(TabId, String, Result<Vec<crate::plugins::Row>, String>),
+    /// Where a tmux tab's body was laid out, for tmux to size its windows to.
+    TmuxBounds(TabId, Rectangle),
     /// Something in the settings dialog: picking a section, searching, or changing a setting
     /// (which writes the config file).
     Settings(view::settings::SettingsMessage),
@@ -297,6 +418,9 @@ pub(crate) enum Message {
     VsCodeInstalled(Result<bool, String>),
     /// Downloading (`Ok(true)`) or removing (`Ok(false)`) Chromium finished.
     ChromiumInstalled(Result<bool, String>),
+    /// A viewer extension's download or removal finished: whether it's installed now, or why
+    /// it failed.
+    ViewerInstalled(crate::viewers::Extension, Result<bool, String>),
     /// A window opened: ask for its native handle and scale.
     WindowOpened(window::Id),
     /// A custom title bar control, or a press on a resize border, in the focused window.

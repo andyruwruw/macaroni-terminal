@@ -35,8 +35,9 @@ impl App {
             .item_drag
             .is_some_and(|d| d.dragging && d.tab().is_some());
         let focused_window = self.model.focused_window();
+        let ui = self.ui_scale();
         for id in ids {
-            let tab = self.model.tab_for_browser(id);
+            let tab = self.browser_tab(id);
             let window = tab.and_then(|t| self.model.window_of_tab(t));
             let Some(win) = window
                 .and_then(|w| self.os_window(w))
@@ -48,7 +49,11 @@ impl App {
             let Some(parent) = win.parent else {
                 continue;
             };
-            let visible = tab.is_some_and(|tab| self.model.tab_visible(tab));
+            // A file tab's page shows only while the tab shows it (not its source).
+            let visible = tab.is_some_and(|tab| {
+                self.model.tab_visible(tab)
+                    && (self.browsers[&id].file.is_none() || self.tab_page_shown(tab) == Some(id))
+            });
             // Menus and dialogs only open in the focused window.
             let here = window == Some(focused_window);
             if let Some(panel) = self.browsers.get_mut(&id)
@@ -84,7 +89,7 @@ impl App {
             let want = panel
                 .bounds
                 .filter(|b| visible && !covered(b))
-                .map(|b| browser::physical(b, win.scale));
+                .map(|b| browser::physical(b, win.scale * ui));
             // A page hidden while it holds the keyboard hands it back first: WebView2 takes
             // focus back into a page hidden with it, and the page would pull its tab forward.
             if want.is_none() && self.page_focus == Some(id) {
@@ -119,7 +124,11 @@ impl App {
                     self.page_focus = Some(id);
                 }
             }
-            TabKind::Terminal(_) => self.blur_page(),
+            TabKind::Terminal(_)
+            | TabKind::Git
+            | TabKind::Tmux
+            | TabKind::AgentSetup
+            | TabKind::File => self.blur_page(),
         }
     }
 
@@ -144,12 +153,20 @@ impl App {
         let Some(events) = self.browser_events.clone() else {
             return;
         };
-        let url = self
-            .model
-            .tab_for_browser(id)
-            .and_then(|t| self.model.tab(t)?.url.clone())
-            .filter(|u| !u.is_empty())
-            .unwrap_or_else(|| self.config.browser.home.clone());
+        let file_page = self.browsers.get(&id).is_some_and(|p| p.file.is_some());
+        let url = if file_page {
+            let Some(server) = crate::preview::server::running() else {
+                return;
+            };
+            server.connect(events.clone());
+            server.url(id)
+        } else {
+            self.model
+                .tab_for_browser(id)
+                .and_then(|t| self.model.tab(t)?.url.clone())
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| self.config.browser.home.clone())
+        };
         // A VS Code tab (restored, say) waits for its server, which starts now if it isn't
         // running; `place_browsers` tries again on the next update. One that failed to start
         // loads anyway and shows the browser's error.
@@ -201,9 +218,12 @@ impl App {
         message: BrowserMessage,
     ) -> Task<Message> {
         use macaroni_browser::Event;
-        let Some(tab) = self.model.tab_for_browser(id) else {
+        let Some(tab) = self.browser_tab(id) else {
             return Task::none();
         };
+        if self.browsers.get(&id).is_some_and(|p| p.file.is_some()) {
+            return self.file_page_message(id, tab, message);
+        }
         match message {
             BrowserMessage::Event(Event::Address(url)) => {
                 if let Some(panel) = self.browsers.get_mut(&id) {
@@ -238,6 +258,61 @@ impl App {
             }
             BrowserMessage::Found(query, found) => {
                 self.page_found(id, &query, found);
+                Task::none()
+            }
+            BrowserMessage::Link(_) => Task::none(),
+        }
+    }
+
+    /// The tab a page belongs to: its browser tab, or the file tab it renders.
+    pub(crate) fn browser_tab(&self, id: BrowserId) -> Option<TabId> {
+        self.model
+            .tab_for_browser(id)
+            .or_else(|| self.browsers.get(&id)?.file)
+    }
+
+    /// What a file or agent setup tab's page reported. Its links go to the tab (files open in tabs, web
+    /// addresses in the browser); a page that navigated away anyway (a link the script didn't
+    /// catch) is sent back. Titles, history and closing don't apply.
+    fn file_page_message(
+        &mut self,
+        id: BrowserId,
+        tab: TabId,
+        message: BrowserMessage,
+    ) -> Task<Message> {
+        use macaroni_browser::Event;
+        match message {
+            BrowserMessage::Event(Event::Address(url)) => {
+                let Some(server) = crate::preview::server::running() else {
+                    return Task::none();
+                };
+                if server.is_page(id, &url) || url.starts_with("about:") {
+                    return Task::none();
+                }
+                if let Some(b) = self.browsers.get(&id).and_then(|p| p.browser.as_ref()) {
+                    b.navigate(&server.url(id));
+                }
+                let link = server
+                    .file_of(&url)
+                    .map_or(url, |file| file.to_string_lossy().into_owned());
+                self.page_link(tab, link)
+            }
+            BrowserMessage::Event(Event::Loading { loading, .. }) => {
+                if let Some(panel) = self.browsers.get_mut(&id) {
+                    panel.loading = loading;
+                }
+                Task::none()
+            }
+            BrowserMessage::Event(Event::Focused) => self.page_focused(id, tab),
+            BrowserMessage::Event(Event::NewWindow(url)) | BrowserMessage::Link(url) => {
+                self.page_link(tab, url)
+            }
+            BrowserMessage::Action(action) => self.perform(action),
+            BrowserMessage::Found(query, found) => {
+                self.page_found(id, &query, found);
+                Task::none()
+            }
+            BrowserMessage::Event(Event::Title(_) | Event::Closed) | BrowserMessage::Text(..) => {
                 Task::none()
             }
         }

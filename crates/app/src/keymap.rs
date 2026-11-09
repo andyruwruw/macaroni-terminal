@@ -35,6 +35,9 @@ pub enum Action {
     CommandPalette,
     /// Open the palette listing the tabs waiting for the user.
     ShowWaiting,
+    /// Open the palette listing the commands run in the active workspace, the focused pane's
+    /// first.
+    CommandHistory,
     /// Open the new worktree dialog for the active workspace.
     NewWorktree,
     /// Scroll the focused terminal to the previous (`true`) or next prompt its shell marked.
@@ -43,6 +46,15 @@ pub enum Action {
     CopyOutput,
     /// Open or close the agent dashboard.
     AgentDashboard,
+    /// Open a Git tab for the focused pane's folder.
+    GitTab,
+    /// Open an agent setup tab for the focused pane's project.
+    AgentSetup,
+    /// Ask for a file and open it in a file tab in the focused pane.
+    OpenFile,
+    /// Move the keyboard to the next (`true`) or previous region: the terminal, its pane's tab
+    /// strip, the sidebar.
+    CycleRegion(bool),
     /// Show a letter over each pane; the next key focuses that pane.
     JumpToPane,
     /// Bring back the most recently closed tab.
@@ -109,9 +121,13 @@ const DEFAULTS_MAC: &[(&str, &str)] = &[
     ("cmd+down", "next_prompt"),
     ("cmd+shift+o", "copy_output"),
     ("cmd+shift+a", "agent_dashboard"),
+    ("cmd+shift+h", "git_tab"),
+    ("f6", "focus_next_region"),
+    ("shift+f6", "focus_previous_region"),
     ("cmd+shift+j", "jump_to_pane"),
     ("cmd+shift+r", "reopen_tab"),
     ("cmd+alt+f", "search_all"),
+    ("cmd+shift+k", "command_history"),
     ("cmd+shift+,", "open_config"),
     ("cmd+c", "copy"),
     ("cmd+v", "paste"),
@@ -160,9 +176,13 @@ const DEFAULTS_OTHER: &[(&str, &str)] = &[
     ("ctrl+shift+down", "next_prompt"),
     ("ctrl+shift+o", "copy_output"),
     ("ctrl+shift+a", "agent_dashboard"),
+    ("ctrl+shift+h", "git_tab"),
+    ("f6", "focus_next_region"),
+    ("shift+f6", "focus_previous_region"),
     ("ctrl+shift+j", "jump_to_pane"),
     ("ctrl+shift+r", "reopen_tab"),
     ("ctrl+shift+g", "search_all"),
+    ("ctrl+shift+k", "command_history"),
     ("ctrl+shift+,", "open_config"),
     ("ctrl+shift+c", "copy"),
     ("ctrl+shift+v", "paste"),
@@ -185,11 +205,17 @@ pub fn action(name: &str) -> Option<Action> {
         "toggle_sidebar" => return Some(Action::ToggleSidebar),
         "command_palette" => return Some(Action::CommandPalette),
         "show_waiting" => return Some(Action::ShowWaiting),
+        "command_history" => return Some(Action::CommandHistory),
         "new_worktree" => return Some(Action::NewWorktree),
         "previous_prompt" => return Some(Action::Prompt(true)),
         "next_prompt" => return Some(Action::Prompt(false)),
         "copy_output" => return Some(Action::CopyOutput),
         "agent_dashboard" => return Some(Action::AgentDashboard),
+        "git_tab" => return Some(Action::GitTab),
+        "agent_setup" => return Some(Action::AgentSetup),
+        "open_file" => return Some(Action::OpenFile),
+        "focus_next_region" => return Some(Action::CycleRegion(true)),
+        "focus_previous_region" => return Some(Action::CycleRegion(false)),
         "jump_to_pane" => return Some(Action::JumpToPane),
         "reopen_tab" => return Some(Action::ReopenTab),
         "close_window" => return Some(Action::CloseWindow),
@@ -267,6 +293,11 @@ pub const NAMES: &[&str] = &[
     "jump_to_pane",
     "show_waiting",
     "agent_dashboard",
+    "git_tab",
+    "agent_setup",
+    "open_file",
+    "focus_next_region",
+    "focus_previous_region",
     "next_waiting",
     "focus_left",
     "focus_right",
@@ -281,6 +312,7 @@ pub const NAMES: &[&str] = &[
     "find",
     "search_workspace",
     "search_all",
+    "command_history",
     "previous_prompt",
     "next_prompt",
     "copy_output",

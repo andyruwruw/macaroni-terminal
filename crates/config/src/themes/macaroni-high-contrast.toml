@@ -1,0 +1,8 @@
+foreground = "#ffffff"
+background = "#000000"
+cursor = "#ffff40"
+selection = "#1f4fbf"
+ansi = [
+  "#8a8a8a", "#ff7a7a", "#5cff5c", "#ffff40", "#7ab0ff", "#ff80ff", "#40ffff", "#e8e8e8",
+  "#a6a6a6", "#ff9e9e", "#99ff99", "#ffff99", "#a3c8ff", "#ffa6ff", "#99ffff", "#ffffff",
+]

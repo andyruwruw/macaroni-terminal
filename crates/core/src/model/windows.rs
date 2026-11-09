@@ -119,7 +119,8 @@ impl Model {
             | Command::SelectTab(id)
             | Command::SetTabPinned(id, _)
             | Command::MoveTab { tab: id, .. }
-            | Command::OpenBrowserBeside { beside: id, .. } => tab(id),
+            | Command::OpenBrowserBeside { beside: id, .. }
+            | Command::OpenTmux { beside: id } => tab(id),
             Command::SessionExited(session) => tab(&self.tab_for_session(*session)?),
             Command::BrowserClosed(browser) => tab(&self.tab_for_browser(*browser)?),
             Command::CloseWindow(id) | Command::FocusWindow(id) => self.window(*id).map(|w| w.id),

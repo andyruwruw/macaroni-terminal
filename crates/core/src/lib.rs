@@ -24,8 +24,8 @@ pub use layout::{
     Axis, Direction, Divider, MIN_RATIO, Rect, Side, SplitNode, neighbour, split_rect,
 };
 pub use model::{
-    Agent, AgentState, Command, Effect, Group, LayoutSpec, Model, MoveTo, Notice, Pane, Shift,
-    Spec, Tab, TabKind, TabSpec, WindowView, Workspace, WorkspaceSpec,
+    Agent, AgentKind, AgentState, Command, Effect, Group, LayoutSpec, Model, MoveTo, Notice, Pane,
+    Shift, Spec, Tab, TabKind, TabSpec, WindowView, Workspace, WorkspaceSpec,
 };
 
 #[cfg(test)]

@@ -59,6 +59,8 @@ pub enum Unit {
     Points,
     /// Seconds.
     Seconds,
+    /// A contrast ratio, shown as `n:1`.
+    Ratio,
 }
 
 impl Unit {
@@ -72,6 +74,7 @@ impl Unit {
             Self::Lines => "lines",
             Self::Points => "pt",
             Self::Seconds => "s",
+            Self::Ratio => ":1",
         }
     }
 

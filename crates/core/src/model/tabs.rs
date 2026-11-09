@@ -6,6 +6,8 @@
 //! id, so the session or browser keeps running. Every insertion goes through
 //! [`Model::insert_tab_at`], which keeps pinned tabs first.
 
+use std::collections::BTreeMap;
+
 use super::{Effect, Model, MoveTo, Tab, TabKind};
 use crate::ids::{BrowserId, PaneId, SessionId, TabId, WorkspaceId};
 use crate::layout::Direction;
@@ -31,6 +33,102 @@ impl Model {
         );
         effects.push(Effect::OpenBrowser(browser));
         id
+    }
+
+    /// A new Git tab for `folder`, not yet in any pane.
+    pub(super) fn new_git_tab(&mut self, folder: &str) -> TabId {
+        let id = TabId(self.next_id());
+        let mut tab = blank_tab(id, TabKind::Git, None);
+        tab.cwd = Some(folder.to_owned()).filter(|f| !f.trim().is_empty());
+        self.tabs.insert(id, tab);
+        id
+    }
+
+    /// Opens a Git tab for `folder` in the focused pane, or in a new pane on the given side of it.
+    pub(super) fn open_git(&mut self, folder: String, split: Option<Direction>) {
+        let tab = self.new_git_tab(&folder);
+        self.place_new_tab(tab, split);
+    }
+
+    /// A new agent setup tab for project `folder` (blank: none), not yet in any pane.
+    pub(super) fn new_agent_setup_tab(&mut self, folder: &str) -> TabId {
+        let id = TabId(self.next_id());
+        let mut tab = blank_tab(id, TabKind::AgentSetup, None);
+        tab.cwd = Some(folder.to_owned()).filter(|f| !f.trim().is_empty());
+        self.tabs.insert(id, tab);
+        id
+    }
+
+    /// Opens an agent setup tab for project `folder` in the focused pane, or in a new pane on
+    /// the given side of it.
+    pub(super) fn open_agent_setup(&mut self, folder: String, split: Option<Direction>) {
+        let tab = self.new_agent_setup_tab(&folder);
+        self.place_new_tab(tab, split);
+    }
+
+    /// A new file tab for `path`, not yet in any pane. Its folder is the file's, so a terminal
+    /// opened from it starts there.
+    pub(super) fn new_file_tab(&mut self, path: &str) -> TabId {
+        let id = TabId(self.next_id());
+        let mut tab = blank_tab(id, TabKind::File, None);
+        show_file(&mut tab, path);
+        self.tabs.insert(id, tab);
+        id
+    }
+
+    /// Points file tab `tab` at `path`; ignored for other tabs and blank paths.
+    pub(super) fn set_file(&mut self, tab: TabId, path: &str) {
+        if let Some(tab) = self.tabs.get_mut(&tab)
+            && tab.kind == TabKind::File
+            && !path.trim().is_empty()
+        {
+            show_file(tab, path);
+        }
+    }
+
+    /// Opens a file tab for `path` in the focused pane, or in a new pane on the given side of
+    /// it.
+    pub(super) fn open_file(&mut self, path: String, split: Option<Direction>) {
+        let tab = self.new_file_tab(&path);
+        self.place_new_tab(tab, split);
+    }
+
+    /// Puts a new tab in the focused pane, or in a new pane on the given side of it.
+    fn place_new_tab(&mut self, tab: TabId, split: Option<Direction>) {
+        match split {
+            Some(direction) => self.split_with(direction, tab),
+            None => self.insert_tab(self.active_workspace().focused, tab),
+        }
+    }
+
+    /// Opens a tmux tab right after `beside` in its pane, leaving the active tab as it is, if
+    /// `beside` exists.
+    pub(super) fn open_tmux(&mut self, beside: TabId) {
+        let Some(pane) = self.pane_of_tab(beside) else {
+            return;
+        };
+        let id = TabId(self.next_id());
+        self.tabs.insert(id, blank_tab(id, TabKind::Tmux, None));
+        let active = self.panes[&pane].active;
+        let at = self.panes[&pane]
+            .tabs
+            .iter()
+            .position(|t| *t == beside)
+            .map_or(usize::MAX, |i| i + 1);
+        self.insert_tab_at(pane, id, at);
+        if let Some(pane) = self.panes.get_mut(&pane) {
+            pane.active = active;
+        }
+    }
+
+    /// Points a Git tab at `folder`; other tabs and a blank folder are left alone.
+    pub(super) fn set_git_folder(&mut self, tab: TabId, folder: String) {
+        if let Some(tab) = self.tabs.get_mut(&tab)
+            && tab.kind == TabKind::Git
+            && !folder.trim().is_empty()
+        {
+            tab.cwd = Some(folder);
+        }
     }
 
     /// Adds a terminal tab to the focused pane, after its active tab, and activates it.
@@ -339,6 +437,7 @@ impl Model {
             match tab.kind {
                 TabKind::Terminal(session) => effects.push(Effect::KillSession(session)),
                 TabKind::Browser(browser) => effects.push(Effect::CloseBrowser(browser)),
+                TabKind::Git | TabKind::Tmux | TabKind::AgentSetup | TabKind::File => {}
             }
         }
     }
@@ -356,9 +455,20 @@ fn blank_tab(id: TabId, kind: TabKind, url: Option<String>) -> Tab {
         agent: None,
         cwd: None,
         url,
+        file: None,
         muted: false,
         pinned: false,
         icon: None,
         color: None,
+        plugins: BTreeMap::new(),
     }
+}
+
+/// Makes `tab` show `path`, with the file's folder as its working directory.
+fn show_file(tab: &mut Tab, path: &str) {
+    tab.cwd = std::path::Path::new(path)
+        .parent()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .filter(|dir| !dir.is_empty());
+    tab.file = Some(path.to_owned());
 }

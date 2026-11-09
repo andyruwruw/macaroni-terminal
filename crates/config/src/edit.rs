@@ -110,9 +110,11 @@ fn set_ssh(source: &str, profiles: &[SshProfile]) -> Result<String, String> {
         if let Some(key) = &profile.identity_file {
             table["identity_file"] = toml_edit::value(key);
         }
-        if !profile.args.is_empty() {
-            let args: toml_edit::Array = profile.args.iter().map(String::as_str).collect();
-            table["args"] = toml_edit::value(args);
+        if let Some(jump) = &profile.proxy_jump {
+            table["proxy_jump"] = toml_edit::value(jump);
+        }
+        if let Some(session) = &profile.tmux {
+            table["tmux"] = toml_edit::value(session);
         }
         tables.push(table);
     }
@@ -153,7 +155,8 @@ mod tests {
             },
             SshProfile {
                 host: "work".into(),
-                args: vec!["-A".into()],
+                proxy_jump: Some("me@bastion".into()),
+                tmux: Some("it's".into()),
                 ..SshProfile::default()
             },
         ];
@@ -161,9 +164,14 @@ mod tests {
         assert!(source.contains("# Color theme"));
         let config = Config::parse(&source, Path::new(".")).unwrap();
         assert_eq!(config.ssh, profiles);
+        assert_eq!(config.ssh[0].destination(), "pi@raspberrypi.local:2222");
         assert_eq!(
-            config.ssh[0].ssh_args(),
-            ["-p", "2222", "pi@raspberrypi.local"]
+            config.ssh[1].destination(),
+            "work via me@bastion, tmux it's"
+        );
+        assert_eq!(
+            config.ssh[1].remote_command().unwrap(),
+            r"tmux -CC new-session -A -s 'it'\''s'"
         );
         assert_eq!(config.ssh[1].label(), "work");
 

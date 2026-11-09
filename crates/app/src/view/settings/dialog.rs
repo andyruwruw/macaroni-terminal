@@ -17,9 +17,10 @@ use macaroni_term::shell::ShellOption;
 use super::color_picker::{self, PickerStart};
 use super::list::{format_number, number, theme_label, to_hex};
 use super::preview::Frame;
+use super::sound_menu::{self, SoundMenu};
 use super::{
     BODY_SCROLL, CUSTOM, Control, SEARCH_INPUT, SSH_HOST, SSH_NAME, Section, Setting, Settings,
-    SettingsMessage, group_id,
+    SettingsMessage, group_id, keys,
 };
 use crate::anim::mix;
 use crate::icons::{Icon, icon};
@@ -108,6 +109,9 @@ const SWATCH_SIZE: f32 = 20.0;
 
 /// A color swatch's corner radius.
 const SWATCH_RADIUS: f32 = 5.0;
+
+/// How much narrower a sound's button is than other controls, for its play button.
+const SOUND_PLAY_WIDTH: f32 = 32.0;
 
 /// How much narrower a color's field is than other controls, for its reset button and swatch.
 const COLOR_FIELD_INSET: f32 = 52.0;
@@ -215,8 +219,12 @@ impl App {
                 }),
         )
         .on_press(Message::SettingsClose);
-        // Always a stack, the picker an optional second layer: swapping the root between the
+        // Always a stack, the popups optional layers over it: swapping the root between the
         // backdrop and a stack would rebuild the widget tree and lose the page's scroll.
+        let sounds = settings
+            .sounds
+            .as_ref()
+            .map(|menu| sound_menu::menu_layer(c, menu, self.window_size()));
         let picker = settings.picker.as_ref().map(|picker| {
             let ui = self.config.ui_theme;
             let theme = ThemeColors::new(ui, self.config.colors.for_ui(ui));
@@ -226,7 +234,7 @@ impl App {
                 .collect();
             color_picker::picker_layer(c, picker, &themes, self.window_size())
         });
-        Some(stack![backdrop].push(picker).into())
+        Some(stack![backdrop].push(picker).push(sounds).into())
     }
 
     /// The page: its title row (the section's title and what it covers, or the search's, and the
@@ -427,6 +435,11 @@ impl App {
                 presets,
                 placeholder,
             } => template_control(c, settings, key, value, presets, placeholder),
+            Control::Sound {
+                key,
+                value,
+                presets,
+            } => sound_control(c, settings, key, value, presets),
             Control::Text {
                 key,
                 value,
@@ -493,11 +506,20 @@ impl App {
         } else {
             [12, 14]
         };
-        row![label.width(Fill), control]
+        let key = keys::row_key(setting);
+        let ringed = settings.row.as_ref() == Some(&key);
+        let row = row![label.width(Fill), control]
             .spacing(20)
             .padding(padding)
-            .align_y(alignment::Vertical::Center)
-            .into()
+            .align_y(alignment::Vertical::Center);
+        container(crate::view::widgets::ring(
+            c,
+            ringed,
+            GROUP_RADIUS,
+            row.into(),
+        ))
+        .id(keys::row_id(&key))
+        .into()
     }
 }
 
@@ -930,6 +952,80 @@ fn template_control<'a>(
     .into()
 }
 
+/// A sound: a play button for the one in effect, and a button showing its name that opens the
+/// sound menu where it's clicked; then a file's path field while it's custom (or a value no
+/// preset has).
+fn sound_control<'a>(
+    c: Chrome,
+    settings: &'a Settings,
+    key: &'static str,
+    value: &str,
+    presets: &[(String, String)],
+) -> Element<'a, Message> {
+    let preset = presets.iter().find(|(_, v)| v == value);
+    let custom = settings.custom.contains(key) || preset.is_none();
+    let label = match preset {
+        Some((l, _)) if !custom => l.clone(),
+        _ => CUSTOM.to_owned(),
+    };
+    let face = container(
+        row![
+            one_line(label, CONTROL_TEXT_SIZE, c.text).width(Fill),
+            icon(Icon::Down, CONTROL_TEXT_SIZE, c.muted),
+        ]
+        .spacing(8)
+        .align_y(alignment::Vertical::Center),
+    )
+    .padding([6, 10])
+    .width(CONTROL_WIDTH - SOUND_PLAY_WIDTH)
+    .style(move |_| container::Style {
+        border: Border {
+            color: c.separator,
+            width: 1.0,
+            radius: c.s.controls.radius.into(),
+        },
+        ..card_style(c.sunken, c.s.controls.radius)
+    });
+    let menu = SoundMenu {
+        key,
+        at: iced::Point::ORIGIN,
+        value: value.to_owned(),
+        presets: presets.to_vec(),
+    };
+    let open = RightClick::new(face, move |at| {
+        Message::Settings(SettingsMessage::SoundMenu(SoundMenu { at, ..menu.clone() }))
+    })
+    .on_left_click();
+    let audible = !value.trim().is_empty() && value != "off";
+    let glyph = if audible {
+        icon(Icon::Play, STEP_ICON_SIZE, c.label)
+    } else {
+        icon(Icon::Play, STEP_ICON_SIZE, c.faint).opacity(RESET_IDLE)
+    };
+    let play = button(glyph)
+        .on_press_maybe(
+            audible.then(|| Message::Settings(SettingsMessage::SoundPlay(value.to_owned()))),
+        )
+        .style(move |_, status| flat_button(c, status, None))
+        .padding(5);
+    let pick: Element<'a, Message> = row![play, open]
+        .spacing(8)
+        .align_y(alignment::Vertical::Center)
+        .into();
+    if !custom {
+        return pick;
+    }
+    let shown = settings.drafts.get(key).map_or(value, String::as_str);
+    column![
+        pick,
+        field(c, "Path to a sound file", shown, key)
+            .on_submit(Message::Settings(SettingsMessage::SubmitTemplate(key)))
+    ]
+    .spacing(6)
+    .align_x(alignment::Horizontal::Right)
+    .into()
+}
+
 /// The shell: the default, a shell found on this machine, or a program typed in. Picking a
 /// shell writes its arguments too, so Git Bash gets `--login -i`.
 fn shell_control<'a>(
@@ -1033,6 +1129,7 @@ fn number_control<'a>(
         .cloned()
         .unwrap_or_else(|| format_number(value * scale));
     let field = text_input(&format_number(default * scale), &shown)
+        .id(keys::field_id(key))
         .on_input(move |v| Message::Settings(SettingsMessage::Draft(key, v)))
         .on_submit(Message::Settings(SettingsMessage::SubmitNumber(key)))
         .size(CONTROL_TEXT_SIZE)
@@ -1214,6 +1311,7 @@ fn field<'a>(
     key: &'static str,
 ) -> iced::widget::TextInput<'a, Message> {
     text_input(placeholder, value)
+        .id(keys::field_id(key))
         .on_input(move |v| Message::Settings(SettingsMessage::Draft(key, v)))
         .size(CONTROL_TEXT_SIZE)
         .padding([6, 10])

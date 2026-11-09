@@ -111,10 +111,17 @@ pub struct Theme {
 }
 
 /// The themes compiled in, as `(name, TOML source)`.
-pub const BUILTIN_THEMES: [(&str, &str); 2] = [
+pub const BUILTIN_THEMES: [(&str, &str); 3] = [
     ("macaroni-dark", include_str!("themes/macaroni-dark.toml")),
     ("macaroni-light", include_str!("themes/macaroni-light.toml")),
+    (
+        "macaroni-high-contrast",
+        include_str!("themes/macaroni-high-contrast.toml"),
+    ),
 ];
+
+/// The theme high contrast mode (`[accessibility] high_contrast`) shows terminals in.
+pub const HIGH_CONTRAST_THEME: &str = "macaroni-high-contrast";
 
 /// The theme used when `config.toml` doesn't name one.
 pub const DEFAULT_THEME: &str = "macaroni-dark";

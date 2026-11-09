@@ -1,0 +1,272 @@
+/* A file tab's page. Colors and sizes come from the app as custom properties on :root (see
+   crates/app/src/preview/mod.rs); this sheet only arranges them. */
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--background);
+}
+
+body {
+  margin: 0;
+  color: var(--text);
+  background: var(--background);
+  font: var(--size) / 1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  overflow-wrap: break-word;
+}
+
+main {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 20px 28px 48px;
+}
+
+/* A diagram file: the drawing fills the tab. */
+body.mx-only main {
+  max-width: none;
+  padding: 16px;
+}
+
+body.mx-only figure.mx-diagram {
+  margin: 0;
+}
+
+/* The next body, drawn out of sight before it's swapped in. */
+main.mx-staging {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  margin: 1.4em 0 0.6em;
+  line-height: 1.25;
+  font-weight: 600;
+}
+
+h1, h2 {
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--border);
+}
+
+h1 { font-size: 2em; }
+h2 { font-size: 1.5em; }
+h3 { font-size: 1.25em; }
+h4 { font-size: 1em; }
+h5 { font-size: 0.875em; }
+h6 { font-size: 0.85em; color: var(--muted); }
+
+main > :first-child {
+  margin-top: 0;
+}
+
+p, ul, ol, blockquote, table, pre, figure, details, dl {
+  margin: 0 0 1em;
+}
+
+a {
+  color: var(--link);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+img, video {
+  max-width: 100%;
+}
+
+hr {
+  height: 1px;
+  border: 0;
+  background: var(--border);
+  margin: 1.5em 0;
+}
+
+blockquote {
+  margin-left: 0;
+  padding: 0 1em;
+  color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+
+ul, ol {
+  padding-left: 2em;
+}
+
+li + li {
+  margin-top: 0.25em;
+}
+
+li > input[type="checkbox"] {
+  margin: 0 0.4em 0 -1.4em;
+  vertical-align: middle;
+}
+
+ul:has(> li > input[type="checkbox"]) {
+  list-style: none;
+}
+
+code, kbd, pre, samp {
+  font-family: var(--mono);
+  font-size: var(--code-size);
+}
+
+:not(pre) > code {
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+  background: var(--sunken);
+}
+
+kbd {
+  padding: 0.1em 0.4em;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+pre {
+  padding: 10px 12px;
+  overflow: auto;
+  line-height: 1.45;
+  border-radius: 6px;
+  background: var(--sunken);
+}
+
+table {
+  display: block;
+  max-width: 100%;
+  overflow: auto;
+  border-collapse: collapse;
+}
+
+th, td {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+}
+
+th {
+  font-weight: 600;
+}
+
+tr:nth-child(2n) {
+  background: var(--sunken);
+}
+
+/* GitHub's alerts: > [!NOTE] and the rest. */
+blockquote[class^="markdown-alert"] {
+  color: var(--text);
+  border-left-color: var(--link);
+}
+
+.markdown-alert-warning, .markdown-alert-caution {
+  border-left-color: #d29922 !important;
+}
+
+/* Footnotes. */
+.footnote-definition {
+  font-size: 0.9em;
+  color: var(--muted);
+}
+
+.footnote-definition-label {
+  margin-right: 0.4em;
+}
+
+/* Math before KaTeX typesets it (or without it): its TeX, as code. */
+.mx-math:not(.mx-typeset) {
+  font-family: var(--mono);
+  font-size: var(--code-size);
+}
+
+.mx-math.mx-display {
+  display: block;
+  margin: 1em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
+}
+
+.mx-math.mx-display:not(.mx-typeset) {
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--sunken);
+}
+
+figure.mx-diagram {
+  margin: 0 0 1em;
+}
+
+figure.mx-diagram figcaption {
+  margin-top: 0.4em;
+  font-size: 0.85em;
+  color: var(--muted);
+}
+
+.mx-drawing {
+  overflow: auto;
+  text-align: center;
+}
+
+.mx-drawing svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* A picture, video or sound file: centered, as large as fits. */
+figure.mx-media {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: calc(100vh - 32px);
+  margin: 0;
+}
+
+figure.mx-media img, figure.mx-media video {
+  max-width: 100%;
+  max-height: calc(100vh - 32px);
+  object-fit: contain;
+}
+
+figure.mx-media audio {
+  width: min(560px, 100%);
+}
+
+figure.mx-media figcaption {
+  color: var(--muted);
+}
+
+p.mx-note {
+  color: var(--muted);
+}
+
+pre.mx-error {
+  color: #e5534b;
+  white-space: pre-wrap;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: var(--border);
+}
+
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--link) 35%, transparent);
+}

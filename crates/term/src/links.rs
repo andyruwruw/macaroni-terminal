@@ -2,9 +2,9 @@
 //! URLs may be opened.
 //!
 //! [`file_at`] finds compiler- and grep-style references (`src/main.rs:12:5`, `C:\x\y.py:3`,
-//! MSVC's `y.cpp(12,5)`). It only parses; the app checks the file exists (relative to the
-//! terminal's directory) and opens it in a text editor, never with the system's default
-//! handler, since output is untrusted.
+//! MSVC's `y.cpp(12,5)`) and bare names (`README.md`). It only parses; the app checks the file
+//! exists (relative to the terminal's directory) and opens it where the user chose, never with
+//! the system's default handler, since output is untrusted.
 //!
 //! Pure and unit tested. The app calls [`url_at`] on a row of a [`Snapshot`](crate::Snapshot)
 //! when the pointer hovers or clicks with the link modifier, and [`is_openable`] before opening
@@ -109,8 +109,8 @@ pub fn url_at(row: &[Cell], col: usize) -> Option<Link> {
     })
 }
 
-/// A file reference found in a row of cells: `path:line[:col]`, `path(line[,col])`, or a bare
-/// path with a separator and an extension.
+/// A file reference found in a row of cells: `path:line[:col]`, `path(line[,col])`, or a path
+/// with an extension (`src/a.rs`, `README.md`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileRef {
     /// First column the reference covers.
@@ -132,7 +132,9 @@ fn is_file_delimiter(c: char) -> bool {
 }
 
 /// The file reference covering `col` in `row`, if any. To keep ordinary words from looking like
-/// files, the path needs an extension, and either a line number or a folder separator.
+/// files, the path needs an extension, and a name with neither a line number nor a folder
+/// separator (`README.md`) needs a letter in it, so numbers like `1.2` aren't files. Whether
+/// the file exists is the caller's to check.
 pub fn file_at(row: &[Cell], col: usize) -> Option<FileRef> {
     let cells: Vec<(usize, char)> = row
         .iter()
@@ -197,7 +199,12 @@ pub fn file_at(row: &[Cell], col: usize) -> Option<FileRef> {
             && ext.chars().all(|c| c.is_ascii_alphanumeric())
     });
     let has_separator = path.contains(['/', '\\']);
-    if !has_extension || !(line.is_some() || has_separator) || path.contains("://") {
+    let bare_word = line.is_none()
+        && !has_separator
+        && !name
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext.chars().any(|c| c.is_ascii_alphabetic()));
+    if !has_extension || bare_word || path.contains("://") {
         return None;
     }
     if at > last {
@@ -279,12 +286,15 @@ mod tests {
 
         let f = file_at(&row("see docs/guide.md for more"), 6).unwrap();
         assert_eq!((f.path.as_str(), f.line), ("docs/guide.md", None));
+
+        let f = file_at(&row("see README.md."), 6).unwrap();
+        assert_eq!((f.path.as_str(), f.line, f.end), ("README.md", None, 12));
     }
 
     #[test]
     fn ordinary_words_and_urls_are_not_files() {
         assert_eq!(file_at(&row("version 1.2 is out"), 9), None);
-        assert_eq!(file_at(&row("readme.md alone"), 2), None);
+        assert_eq!(file_at(&row("pi is 3.14"), 7), None);
         assert_eq!(file_at(&row("https://a.dev/x.html"), 10), None);
         assert_eq!(file_at(&row("time 12:30"), 7), None);
     }

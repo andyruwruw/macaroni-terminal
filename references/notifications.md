@@ -8,7 +8,8 @@ A program asks for attention with an escape sequence or `macaroni-cli notify`. T
 PTY output ──► reader thread: OscSniffer::feed (before the emulator) ──► SessionEvent::Notify
   ──► App::attention (update/terminals.rs)
         muted, or window focused and it's the focused tab? → drop
-        OS notification if [notifications] os and (window unfocused or tab not visible)
+        window unfocused or tab not visible? → [notifications] sound, and the OS notification
+          if [notifications] os (silent unless sound = "system")
         broadcast Event::Notification, then Command::Notify ──► Tab.attention = Some(Notice)
 typing into or clicking the tab ──► Command::ClearAttention
 ```
@@ -31,6 +32,13 @@ Text is capped and stripped of control characters; a lone title becomes the body
 - Queries: `pane_attention`, `workspace_notice`, `tab_visible`, `is_muted`.
 - Muted tabs or workspaces drop notices in both `App::attention` and the reducer.
 - Triggers (`[[trigger]] notify`, see [`config.md`](config.md)) raise notices too: `App::triggered` calls `App::attention` with the trigger's `name` (else the tab's title) and the matching line, at most once per `NOTIFY_COOLDOWN` per trigger and terminal. A trigger's `badge` goes to `Tab.badge`, which clears with the notice; neither is set on the tab being looked at.
+
+## Sounds
+
+- `[notifications] sound` (default `"chime"`) plays when `App::attention` would notify, whether or not OS notifications are on. `bell::play` takes any sound value: `"off"`, `"system"`, a built-in name, or a file path. `bell::ring` is the bell's, the same with a minimum gap between rings.
+- `"system"` means the notification's own sound: the toast's default sound on Windows, `default_sound()` on macOS (where notifications are otherwise silent). With OS notifications off it plays the system alert instead. Any other value makes the notification silent (`notifications::show`'s `sound` flag; `Toast::sound(None)`) and the app plays its own, so the two never overlap.
+- The built-in sounds (`crates/app/src/sounds.rs`, `BUILT_IN`) are recordings first, then tones. Recordings live in `crates/app/assets/sounds/<kind>/<name>.wav` (kind: `success`, `notification`, `error`) and are embedded (`RECORDED`); each is a 16-bit mono PCM WAV at its own rate, trimmed of leading and trailing silence, faded out, and scaled to peak at `PEAK`, which `recordings_are_short_gentle_mono_wavs` checks. Tones are synthesized: a few notes of decaying sine partials (`Note`, `Partial`), normalized to `PEAK` and faded out. Either is written to `local_data("sounds")/<name>.wav` the first time it plays in a run (rewritten only when the bytes differ), since both players take a file (`PlaySoundW` async on Windows, which only plays WAV, and `afplay` on macOS). To add a recording: convert it to that format into its kind's folder, then add it to `BUILT_IN` (at the end of its kind) and `RECORDED`. To add a tone: a name in `BUILT_IN` and its notes in `notes`. Names must be unique across both.
+- Settings > Notifications picks `sound` and `bell_sound` with `Control::Sound`: a play button for the one in effect, and a button that opens the sound menu (`view/settings/sound_menu.rs`), listing Off, System, then `BUILT_IN` under a heading per kind (`KINDS`, counts in `BUILT_IN`'s order, checked by `the_kinds_cover_every_built_in_sound`), then a custom file. Each row's play button only plays it (`SettingsMessage::SoundPlay`); its name picks it (`SettingsMessage::Set`, which also plays it and closes the menu). From the keyboard, Left and Right step through the sounds and Enter plays the one picked. To add a recording or tone, also bump its kind's count in `KINDS`.
 
 ## UI
 

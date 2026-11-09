@@ -15,18 +15,31 @@ macaroni-browser.workspace = true
 macaroni-ipc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 rfd.workspace = true
 image.workspace = true
+accesskit.workspace = true
+pulldown-cmark.workspace = true
+syntect.workspace = true
+two-face.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Registry", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_UI_Accessibility", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 tauri-winrt-notification.workspace = true
+accesskit_windows.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-notification-sys.workspace = true
+accesskit_macos.workspace = true
+objc2-app-kit.workspace = true
 
 [target.'cfg(not(any(windows, target_os = "macos")))'.dependencies]
 notify-rust.workspace = true
+
+[dev-dependencies]
+accesskit_consumer = "0.39"
 
 [build-dependencies]
 embed-resource = "3"

@@ -48,6 +48,25 @@ impl App {
         if !effects.iter().any(|e| matches!(e, Effect::Quit)) {
             self.remember_closed(closing);
         }
+        let mut tmux = Task::none();
+        if closable {
+            self.git_tabs
+                .retain(|tab, _| self.model.tab(*tab).is_some());
+            self.agent_tabs
+                .retain(|tab, _| self.model.tab(*tab).is_some());
+            self.file_tabs
+                .retain(|tab, _| self.model.tab(*tab).is_some());
+            for page in self.orphaned_pages() {
+                if self.page_focus == Some(page) {
+                    self.blur_page();
+                }
+                self.browsers.remove(&page);
+                if let Some(server) = crate::preview::server::running() {
+                    server.forget(page);
+                }
+            }
+            tmux = self.tmux_prune();
+        }
         self.broadcast_workspace_changes(&before);
         let task = self.run_effects(effects);
         let changed: Vec<_> = open_tabs(&self.model)
@@ -56,7 +75,9 @@ impl App {
             .map(|(pane, _)| pane)
             .collect();
         let task = Task::batch(
-            std::iter::once(task).chain(changed.into_iter().map(|pane| self.reveal_tab(pane))),
+            [task, tmux]
+                .into_iter()
+                .chain(changed.into_iter().map(|pane| self.reveal_tab(pane))),
         );
         // Every command counts as a change (most do change something worth saving). After a
         // quit `restore` is off, so the save below does nothing and the forgotten file stays
@@ -78,6 +99,13 @@ impl App {
                     .map(|p| p.tabs.as_slice())
                     .unwrap_or_default()
                 {
+                    if self
+                        .model
+                        .tab(tab)
+                        .is_some_and(|t| t.kind == macaroni_core::TabKind::Tmux)
+                    {
+                        continue;
+                    }
                     tabs.push((
                         tab,
                         crate::ClosedTab {
@@ -113,8 +141,9 @@ impl App {
     }
 
     /// Reopens the most recently closed tab: in its old pane if that's still there, else the
-    /// focused one. A terminal starts in its old directory and resumes its Claude Code session
-    /// (as a restored tab does); a browser tab reopens its page. Its name and look come back.
+    /// focused one. A terminal starts in its old directory and resumes its agent session
+    /// (as a restored tab does); a browser tab reopens its page, and a Git, agent setup or file
+    /// tab its folder or file. Its name and look come back.
     pub(crate) fn reopen_tab(&mut self) -> Task<Message> {
         let Some(closed) = self.closed_tabs.pop() else {
             return Task::none();
@@ -126,15 +155,33 @@ impl App {
             tasks.push(self.apply(Command::SelectWorkspace(closed.workspace)));
         }
         let saved = closed.saved;
-        match saved.url.clone() {
-            Some(url) => tasks.push(self.apply(Command::OpenBrowser { url, split: None })),
-            None => {
-                // The terminal spawns later, at its real size; `spawn` reads this then, as for
-                // a restored tab.
-                tasks.push(self.apply(Command::NewTab));
-                let tab = self.model.focused_tab().id;
-                self.restored.insert(tab, saved.clone());
-            }
+        if let Some(url) = saved.url.clone() {
+            tasks.push(self.apply(Command::OpenBrowser { url, split: None }));
+        } else if let Some(folder) = saved.git.clone() {
+            tasks.push(self.apply(Command::OpenGit {
+                folder,
+                split: None,
+            }));
+        } else if let Some(folder) = saved.agent_setup.clone() {
+            tasks.push(self.apply(Command::OpenAgentSetup {
+                folder,
+                split: None,
+            }));
+            let tab = self.model.focused_tab().id;
+            tasks.push(self.agent_update(tab, crate::view::agent_tab::AgentMessage::Refresh));
+        } else if let Some(path) = saved.file.clone() {
+            tasks.push(self.apply(Command::OpenFile { path, split: None }));
+            let tab = self.model.focused_tab().id;
+            tasks.push(self.file_update(
+                tab,
+                crate::view::file_tab::FileMessage::Refresh { force: true },
+            ));
+        } else {
+            // The terminal spawns later, at its real size; `spawn` reads this then, as for a
+            // restored tab.
+            tasks.push(self.apply(Command::NewTab));
+            let tab = self.model.focused_tab().id;
+            self.restored.insert(tab, saved.clone());
         }
         let tab = self.model.focused_tab().id;
         tasks.push(self.apply(Command::RenameTab(tab, saved.name.clone())));
@@ -202,6 +249,7 @@ impl App {
         let path = session::path(&self.config_dir);
         let mut saved = session::Saved {
             sidebar: Some(self.sidebar),
+            file_tree: self.file_tree,
             ..session::capture(
                 &self.model,
                 &self.restored,
@@ -209,6 +257,10 @@ impl App {
                 &self.scrollback_files,
             )
         };
+        // The commands run in each workspace are ours too.
+        for (saved, ws) in saved.workspaces.iter_mut().zip(self.model.all_workspaces()) {
+            saved.commands = self.history.saved(ws.id, &ws.layout.leaves());
+        }
         // The model knows each window's active workspace; where it is on screen is ours.
         for (window, placed) in saved.windows.iter_mut().zip(self.saved_windows()) {
             *window = session::SavedWindow {
@@ -267,6 +319,14 @@ impl App {
     /// kills the process. Tells subscribers its tab closed.
     fn kill_session(&mut self, id: SessionId) {
         self.pending.remove(&id);
+        // A shell still starting is dropped (and killed) when `session_started` finds no entry.
+        if let Some(starting) = self.starting.remove(&id)
+            && let Some(tab) = starting.tab
+        {
+            self.restored.remove(&tab);
+        }
+        self.booting.remove(&id);
+        self.typeahead.remove(&id);
         self.tab_shells.remove(&id);
         self.ssh_tabs.remove(&id);
         self.disconnected.remove(&id);

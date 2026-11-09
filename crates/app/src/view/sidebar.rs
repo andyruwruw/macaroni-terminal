@@ -28,6 +28,7 @@ use crate::keymap::Action;
 use crate::pointer::{Halves, Pointer};
 use crate::right_click::RightClick;
 use crate::side_line::SideLine;
+use crate::state::KeyFocus;
 use crate::theme::{Chrome, workspace_color};
 use crate::{
     App, Dragged, DropTarget, GroupAction, MenuTarget, Message, Renaming, SidebarHover, anim,
@@ -237,7 +238,7 @@ impl App {
     }
 
     /// Whether the sidebar shows its search field: wide enough, and `workspace_items.search`.
-    pub(super) fn sidebar_searching(&self) -> bool {
+    pub(crate) fn sidebar_searching(&self) -> bool {
         self.sidebar_size() == SidebarSize::Full
             && self.config.workspace_items.search(self.config.ui_theme)
     }
@@ -471,20 +472,24 @@ impl App {
         let c = self.chrome;
         line_above(
             c,
-            mouse_area(add_box(
-                c,
-                AddBox::Workspace,
-                Fill,
-                if self.sidebar_compact() {
-                    c.s.workspaces.tile_size
-                } else {
-                    workspace_item_height(c)
-                },
-                Message::Command(Command::NewWorkspace),
-            ))
-            .on_enter(Message::SidebarHover(SidebarHover::NewWorkspace, true))
-            .on_exit(Message::SidebarHover(SidebarHover::NewWorkspace, false))
-            .into(),
+            self.ringed(
+                KeyFocus::NewWorkspace,
+                c.s.workspaces.add_radius,
+                mouse_area(add_box(
+                    c,
+                    AddBox::Workspace,
+                    Fill,
+                    if self.sidebar_compact() {
+                        c.s.workspaces.tile_size
+                    } else {
+                        workspace_item_height(c)
+                    },
+                    Message::Command(Command::NewWorkspace),
+                ))
+                .on_enter(Message::SidebarHover(SidebarHover::NewWorkspace, true))
+                .on_exit(Message::SidebarHover(SidebarHover::NewWorkspace, false))
+                .into(),
+            ),
             line_inset(c, line, LineAbove::End),
             c.s.sidebar.new_workspace_gap,
             0.0,
@@ -531,7 +536,7 @@ impl App {
         let header = group_header_card(c, content, lit, drop_here, self.sidebar_compact());
         let hover = SidebarHover::Group(id);
         let focus = Renaming::Group(id);
-        RightClick::new(
+        let header = RightClick::new(
             Pointer::new(
                 mouse_area(header)
                     .on_press(Message::Group(id, GroupAction::Collapse(!group.collapsed)))
@@ -546,8 +551,8 @@ impl App {
                 (self.item_focus == Some(focus)).then_some(Message::ItemBlur(focus)),
             ),
             move |at| Message::MenuOpen(MenuTarget::Group(id), at),
-        )
-        .into()
+        );
+        self.ringed(KeyFocus::Group(id), c.s.controls.radius, header.into())
     }
 
     /// What a group's header shows: its icon (a folder unless it has its own) in its color,
@@ -628,7 +633,11 @@ impl App {
             ghost,
             drop_here,
         );
-        self.workspace_interactions(ws.id, item)
+        self.ringed(
+            KeyFocus::Workspace(ws.id),
+            c.s.workspaces.radius,
+            self.workspace_interactions(ws.id, item),
+        )
     }
 
     /// A workspace as just its icon, for a narrow sidebar: no card, a fill when it's open or
@@ -693,7 +702,11 @@ impl App {
             name_tip(c, ws.name.clone()),
             tooltip::Position::Right,
         );
-        self.workspace_interactions(ws.id, container(tile).center_x(Fill).into())
+        self.ringed(
+            KeyFocus::Workspace(ws.id),
+            c.s.workspaces.tile_radius,
+            self.workspace_interactions(ws.id, container(tile).center_x(Fill).into()),
+        )
     }
 
     /// A workspace `item` with what makes it one: press to select and drag, hover to light it

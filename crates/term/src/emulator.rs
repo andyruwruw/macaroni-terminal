@@ -84,6 +84,17 @@ pub trait Emulator: Send {
     /// The output of the last command the shell marked: from its output mark to the next prompt
     /// (or the cursor), trailing blank lines dropped. `None` without one.
     fn last_output(&self) -> Option<String>;
+    /// The command typed at the last prompt the shell marked: the text from the prompt's end
+    /// (OSC 133 `B`) to the cursor, for reading when the shell says its output starts (`C`),
+    /// before any output moves the cursor. `None` when nothing was typed, or no prompt is in the
+    /// `MAX_COMMAND_ROWS` (50) rows above without a command's output in between.
+    fn typed_command(&self) -> Option<String>;
+    /// How many characters the cursor moves right (negative: left) to reach the screen cell
+    /// `at`, when `at` and the cursor are both in the command being typed at the last marked
+    /// prompt: from the prompt's end (OSC 133 `B`) through the rows it soft-wraps onto. A cell
+    /// before the command counts as its start, one past its text as its end. `None` when
+    /// either is outside it or no prompt is marked (see [`Emulator::typed_command`]).
+    fn cursor_moves(&self, at: GridPoint) -> Option<i32>;
     /// Selects and scrolls to the next match of `query` (plain text, case-insensitive unless it
     /// has capitals), continuing from the previous match. After [`Emulator::reset_search`],
     /// [`SearchDirection::Older`] starts from the bottom of the screen and
@@ -303,11 +314,62 @@ impl AlacrittyEmulator {
             Column(at.col.min(cols)),
         )
     }
+
+    /// Whether the cell at `point` carries a prompt mark link of `kind` (`"prompt"` or
+    /// `"output"`).
+    fn marked(&self, point: Point, kind: &str) -> bool {
+        self.term.grid()[point].hyperlink().is_some_and(|link| {
+            link.uri()
+                .strip_prefix(MARK_PREFIX)
+                .is_some_and(|k| k.starts_with(kind))
+        })
+    }
+
+    /// Where the command typed at the last marked prompt starts: the cell after the prompt's
+    /// end (OSC 133 `B`), looking up from the cursor at most [`MAX_COMMAND_ROWS`] rows. `None`
+    /// without a marked prompt, or with a command's output in between.
+    fn command_start(&self) -> Option<Point> {
+        let grid = self.term.grid();
+        let cursor = grid.cursor.point;
+        let columns = self.term.columns();
+        let top = Line(cursor.line.0 - MAX_COMMAND_ROWS).max(grid.topmost_line());
+        let mut line = cursor.line;
+        let prompt_end = loop {
+            // Output in the way means the prompt above belongs to an older command, and this
+            // one's prompt wasn't marked.
+            if (0..columns).any(|c| self.marked(Point::new(line, Column(c)), "output")) {
+                return None;
+            }
+            if let Some(column) = (0..columns)
+                .rev()
+                .find(|&c| self.marked(Point::new(line, Column(c)), "prompt"))
+            {
+                break Point::new(line, Column(column));
+            }
+            if line <= top {
+                return None;
+            }
+            line = Line(line.0 - 1);
+        };
+        Some(self.next_cell(prompt_end))
+    }
+
+    /// The cell after `point`, wrapping to the next row's first.
+    fn next_cell(&self, point: Point) -> Point {
+        if point.column.0 + 1 < self.term.columns() {
+            Point::new(point.line, point.column + 1)
+        } else {
+            Point::new(point.line + 1, Column(0))
+        }
+    }
 }
 
 /// The URI prefix of the links the session's reader puts on OSC 133 marks (see `Marks` in
 /// `session.rs`); [`Emulator::hyperlink_at`] hides them.
 pub const MARK_PREFIX: &str = "macaroni-mark:";
+
+/// How many rows above the cursor [`Emulator::typed_command`] looks for the prompt.
+pub const MAX_COMMAND_ROWS: i32 = 50;
 
 /// Where a mark starts: its first row, whether it's a prompt (else command output), and for a
 /// prompt the exit code of the command before it.
@@ -617,6 +679,79 @@ impl Emulator for AlacrittyEmulator {
             Point::new(end - 1, last_column),
         );
         Some(text.trim_end().to_owned())
+    }
+
+    fn typed_command(&self) -> Option<String> {
+        let start = self.command_start()?;
+        let cursor = self.term.grid().cursor.point;
+        let columns = self.term.columns();
+        // The cursor sits after the command, on its last row or (once Enter's newline is out)
+        // at the start of the next.
+        let end = if cursor.column.0 > 0 {
+            Point::new(cursor.line, cursor.column - 1)
+        } else {
+            Point::new(Line(cursor.line.0 - 1), Column(columns.saturating_sub(1)))
+        };
+        if end < start {
+            return None;
+        }
+        let command = self
+            .term
+            .bounds_to_string(start, end)
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_owned();
+        (!command.is_empty()).then_some(command)
+    }
+
+    fn cursor_moves(&self, at: GridPoint) -> Option<i32> {
+        let start = self.command_start()?;
+        let grid = self.term.grid();
+        let cursor = grid.cursor.point;
+        let columns = self.term.columns();
+        let last_column = Column(columns.saturating_sub(1));
+        let bottom = Line(self.term.screen_lines() as i32 - 1);
+        // The command runs on through soft wraps; a hard newline (a continuation prompt) ends
+        // what arrow keys can reach on this line.
+        let mut last = start.line;
+        while last < bottom
+            && grid[Point::new(last, last_column)]
+                .flags
+                .contains(Flags::WRAPLINE)
+        {
+            last += 1;
+        }
+        let target = self.point(at);
+        let inside = |p: Point| p.line >= start.line && p.line <= last;
+        if !inside(cursor) || !inside(target) {
+            return None;
+        }
+        // One past the last character typed: a click beyond it lands there, not in blank cells
+        // the shell would refuse to move into.
+        let mut end = start;
+        let mut p = start;
+        while p.line <= last {
+            if grid[p].c != ' ' {
+                end = self.next_cell(p);
+            }
+            p = self.next_cell(p);
+        }
+        let target = target.max(start).min(end.max(cursor));
+        // Arrows move by character: a wide character's spacer cell isn't one.
+        let (from, to) = (cursor.min(target), cursor.max(target));
+        let mut moves = 0;
+        let mut p = from;
+        while p < to {
+            let flags = grid[p].flags;
+            if !flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                moves += 1;
+            }
+            p = self.next_cell(p);
+        }
+        Some(if target < cursor { -moves } else { moves })
     }
 
     fn search(&mut self, query: &str, direction: SearchDirection) -> bool {
@@ -1005,6 +1140,55 @@ mod tests {
         emu.reset_search();
         assert!(!emu.search("", SearchDirection::Older));
         assert!(!emu.snapshot().has_selection);
+    }
+
+    #[test]
+    fn the_typed_command_is_read_from_after_the_prompt() {
+        let (mut emu, _) = emulator();
+        let prompt = "\x1b]8;id=p1;macaroni-mark:prompt\x07$ \x1b]8;;\x07";
+        emu.feed(format!("{prompt}cargo  test -p x").as_bytes());
+        assert_eq!(emu.typed_command().as_deref(), Some("cargo  test -p x"));
+        // Enter's newline is out: the cursor is on the next row.
+        emu.feed(b"\r\n");
+        assert_eq!(emu.typed_command().as_deref(), Some("cargo  test -p x"));
+        emu.feed(b"\x1b]8;id=o1;macaroni-mark:output\x07done\r\n\x1b]8;;\x07");
+        assert_eq!(
+            emu.typed_command(),
+            None,
+            "output stands between it and the prompt"
+        );
+        let next = "\x1b]8;id=p2;macaroni-mark:prompt:0\x07$ \x1b]8;;\x07";
+        emu.feed(next.as_bytes());
+        assert_eq!(emu.typed_command(), None, "nothing typed");
+    }
+
+    #[test]
+    fn clicks_in_the_typed_command_count_cursor_moves() {
+        let (mut emu, _) = emulator();
+        let prompt = "\x1b]8;id=p1;macaroni-mark:prompt\x07$ \x1b]8;;\x07";
+        // 22 cells on a 20-column grid: the command wraps onto the second row.
+        emu.feed(format!("{prompt}echo hello world abc").as_bytes());
+        let at = |row, col| GridPoint { row, col };
+        assert_eq!(emu.cursor_moves(at(0, 5)), Some(-17));
+        assert_eq!(
+            emu.cursor_moves(at(0, 0)),
+            Some(-20),
+            "the prompt counts as the start"
+        );
+        assert_eq!(
+            emu.cursor_moves(at(1, 10)),
+            Some(0),
+            "past the text is its end"
+        );
+        assert_eq!(emu.cursor_moves(at(2, 0)), None, "below the command");
+
+        let (mut emu, _) = emulator();
+        emu.feed(format!("{prompt}漢x").as_bytes());
+        assert_eq!(
+            emu.cursor_moves(at(0, 2)),
+            Some(-2),
+            "a wide character is one move"
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
-use macaroni_ipc::{AgentState, Call, TAB_ENV};
+use macaroni_ipc::{AgentKind, AgentState, Call, TAB_ENV};
 use serde_json::{Map, Value, json};
 
 use crate::client::Client;
@@ -30,7 +30,7 @@ const MARKER: &str = "macaroni-cli";
 
 /// The JSON object Claude Code passes on stdin; `None` if stdin isn't readable or isn't JSON.
 /// Reads at most 4 MiB so a runaway input can't stall the hook.
-fn stdin_json() -> Option<Value> {
+pub(crate) fn stdin_json() -> Option<Value> {
     let mut input = String::new();
     std::io::stdin()
         .take(4 * 1024 * 1024)
@@ -53,7 +53,7 @@ fn string(value: &Value, key: &str) -> Option<String> {
 
 /// The first line of `text`, trimmed, cut to `max` characters with an ellipsis if longer.
 /// `max` must be at least 1.
-fn shorten(text: &str, max: usize) -> String {
+pub(crate) fn shorten(text: &str, max: usize) -> String {
     let line = text.lines().next().unwrap_or("").trim();
     if line.chars().count() <= max {
         line.to_owned()
@@ -101,16 +101,22 @@ pub fn hook_calls(input: &Value, tab: u64) -> Vec<Call> {
     // Claude Code saves a session only once it has a message, and `claude --resume` can't find
     // one it never saved. Until the transcript exists the id isn't passed on, so the tab keeps
     // the last one that can be resumed. Input without `transcript_path` passes it on.
-    let session_id = string(input, "session_id").filter(|_| {
-        string(input, "transcript_path").is_none_or(|path| std::path::Path::new(&path).is_file())
-    });
+    // The transcript goes with it, for plugins that read it.
+    let transcript = string(input, "transcript_path");
+    let saved = transcript
+        .as_deref()
+        .is_none_or(|path| std::path::Path::new(path).is_file());
+    let session_id = string(input, "session_id").filter(|_| saved);
+    let transcript = transcript.filter(|_| saved);
     let cwd = string(input, "cwd");
     let agent = |state, detail: Option<String>| Call::Agent {
         tab: Some(tab),
+        kind: AgentKind::Claude,
         state,
         detail,
         session_id: session_id.clone(),
         cwd: cwd.clone(),
+        transcript_path: transcript.clone(),
     };
     let notify = |body: String| Call::Notify {
         tab: Some(tab),
@@ -302,14 +308,14 @@ pub fn configure(
 
 /// This executable's absolute path, with forward slashes: Windows accepts them, and they need
 /// no escaping in the JSON or in the shell Claude Code runs hooks through (Git Bash on Windows).
-fn exe_path() -> Result<String, String> {
+pub(crate) fn exe_path() -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     Ok(exe.to_string_lossy().replace('\\', "/"))
 }
 
 /// Asks a yes/no question on stdout and reads the answer from stdin; anything but `y`/`yes`
 /// (including a closed stdin) is no.
-fn confirm(question: &str) -> bool {
+pub(crate) fn confirm(question: &str) -> bool {
     print!("{question} [y/N] ");
     let _ = std::io::Write::flush(&mut std::io::stdout());
     let mut answer = String::new();
@@ -396,7 +402,7 @@ pub fn setup(remove: bool, yes: bool, path: Option<PathBuf>) -> Result<(), Strin
 }
 
 /// `<path>.macaroni-backup`, next to the settings file.
-fn backup_path(path: &Path) -> PathBuf {
+pub(crate) fn backup_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".macaroni-backup");
     path.with_file_name(name)

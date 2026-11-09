@@ -27,9 +27,7 @@ const WATCHED_EXTENSIONS: [&str; 6] = ["rs", "toml", "lock", "svg", "ttf", "mani
 /// Watches `crates/`, `Cargo.toml` and `Cargo.lock` under `root`. Honors `CARGO_TARGET_DIR`.
 /// Spawns and stops `macaroni` processes, and copies build output into `target/dev/run`.
 pub fn run(root: &Path) -> Result<(), String> {
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(|dir| root.join(dir))
-        .unwrap_or_else(|| root.join("target"));
+    let target = crate::target(root);
     let build_dir = target.join("debug");
     let dev = target.join("dev");
     let run_dir = dev.join("run");
@@ -77,9 +75,19 @@ fn watched(path: &Path) -> bool {
 }
 
 /// Debug-builds `macaroni` and `macaroni-cli`, output going to the terminal; `true` on
-/// success.
+/// success. Trims `target/debug` first when it's grown too big ([`crate::trim`]).
 fn build(root: &Path) -> bool {
-    crate::cargo()
+    if let Err(err) = crate::trim(root, "dev") {
+        eprintln!("xtask: {err}");
+    }
+    let mut cargo = match crate::cargo() {
+        Ok(cargo) => cargo,
+        Err(err) => {
+            eprintln!("xtask: {err}");
+            return false;
+        }
+    };
+    cargo
         .current_dir(root)
         .args([
             "build",

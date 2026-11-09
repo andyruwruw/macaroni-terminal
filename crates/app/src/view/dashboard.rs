@@ -7,12 +7,12 @@
 //! new state (an agent restored after a restart has none until then). While the dashboard is
 //! open a one-second tick redraws it, so the times count up.
 
-use iced::widget::{button, column, container, mouse_area, opaque, row, scrollable, text};
+use iced::widget::{button, column, container, mouse_area, opaque, row, text};
 use iced::{Border, Color, Element, Fill, Task, alignment};
 use macaroni_core::{AgentState, Command, TabId};
 
 use super::sidebar::agent_line;
-use super::widgets::{flat_button, one_line, shadow};
+use super::widgets::{flat_button, one_line, shadow, thin_scroll};
 use crate::icons::{Icon, icon};
 use crate::{App, Message, glass, label};
 
@@ -122,7 +122,7 @@ impl App {
             .into()
         } else {
             let cards = agents.into_iter().filter_map(|tab| self.agent_card(tab));
-            scrollable(row(cards).spacing(10).wrap().vertical_spacing(10))
+            thin_scroll(c, row(cards).spacing(10).wrap().vertical_spacing(10))
                 .height(iced::Length::Shrink)
                 .into()
         };

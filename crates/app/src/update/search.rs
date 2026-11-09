@@ -20,10 +20,17 @@ impl App {
     pub(crate) fn open_search(&mut self) -> Task<Message> {
         let target = match self.model.focused_tab().kind {
             TabKind::Terminal(session) => SearchTarget::Terminal(session),
+            TabKind::Tmux => match self.focused_session() {
+                Some(session) => SearchTarget::Terminal(session),
+                None => return Task::none(),
+            },
             TabKind::Browser(id) => {
                 self.blur_page();
                 SearchTarget::Page(id)
             }
+            // Nothing to search: a Git tab's lists are short and its diffs scroll, an agent setup
+            // tab's list is short too, and a file tab's file is better searched in an editor.
+            TabKind::Git | TabKind::AgentSetup | TabKind::File => return Task::none(),
         };
         // A bar open on another terminal or page closes first, clearing its match there.
         let closed = match &self.search {

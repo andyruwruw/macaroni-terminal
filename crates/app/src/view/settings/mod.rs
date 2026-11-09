@@ -12,9 +12,13 @@
 
 mod color_picker;
 mod dialog;
+mod keys;
+
 pub(crate) use dialog::toggle;
+pub(crate) use keys::{AccessKind, AccessRow};
 mod list;
 mod preview;
+mod sound_menu;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -31,6 +35,7 @@ use crate::theme::{BORDER_FOLLOWERS, Chrome, from_rgba};
 use crate::{App, Message, home_dir};
 use color_picker::{ColorPicker, PickerStart};
 use list::{number, number_setting};
+use sound_menu::SoundMenu;
 
 /// The widget id of the dialog's search field, focused when the dialog opens.
 pub const SEARCH_INPUT: &str = "settings-search";
@@ -52,12 +57,17 @@ pub enum Section {
     Notifications,
     /// "Keyboard Shortcuts": the bindings in effect, read-only.
     Shortcuts,
-    /// Claude Code's hooks and `[agents]`.
+    /// `[accessibility]`: scaling, contrast, motion and screen readers.
+    Accessibility,
+    /// Claude Code's hooks, Codex's notify program and `[agents]`.
     Agents,
     /// `[browser]`: where links open and the home page.
     Browser,
     /// "VS Code": downloading VS Code for the web, and its server.
     VsCode,
+    /// "Files": where files clicked in a terminal open, and downloading the file tabs' viewer
+    /// extensions.
+    Viewers,
     /// The interface and terminal themes, the theme colors, text and accents.
     Theme,
     /// The window's background and lines, and the title bar.
@@ -79,14 +89,16 @@ pub enum Section {
 
 impl Section {
     /// Every section, in the order the dialog lists them.
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 17] = [
         Self::General,
         Self::Terminal,
         Self::Notifications,
         Self::Shortcuts,
+        Self::Accessibility,
         Self::Agents,
         Self::Browser,
         Self::VsCode,
+        Self::Viewers,
         Self::Theme,
         Self::Window,
         Self::Sidebar,
@@ -131,7 +143,9 @@ impl Section {
             Self::Agents => "Agents",
             Self::Browser => "Browser",
             Self::VsCode => "VS Code",
+            Self::Viewers => "Files",
             Self::Shortcuts => "Keyboard Shortcuts",
+            Self::Accessibility => "Accessibility",
             Self::Theme => "Theme",
             Self::Window => "Window",
             Self::Sidebar => "Sidebar",
@@ -151,10 +165,16 @@ impl Section {
                 "The shell, SSH profiles, the font and cursor, scrollback and the mouse."
             }
             Self::Notifications => "When a tab asks for attention, and the bell.",
-            Self::Agents => "Claude Code's hooks, and how agents show up in tabs.",
+            Self::Agents => "Connecting Claude Code and Codex, and how agents show up in tabs.",
             Self::Browser => "Browser tabs: where terminal links open and the home page.",
             Self::VsCode => "VS Code for the web in browser tabs, downloaded when you opt in.",
+            Self::Viewers => {
+                "Where files you Ctrl+click in a terminal open, and what file tabs can draw."
+            }
             Self::Shortcuts => "The key bindings in effect. Change them in config.toml.",
+            Self::Accessibility => {
+                "Size, contrast, motion, and what screen readers hear. \"System\" follows your                  operating system's settings."
+            }
             Self::Theme => "The interface and terminal themes, and the colors the rest follow.",
             Self::Window => "The window's background and lines, and the title bar.",
             Self::Sidebar => "The workspace list: what each row shows, its colors and sizes.",
@@ -175,7 +195,9 @@ impl Section {
             Self::Agents => Icon::Bot,
             Self::Browser => Icon::Globe,
             Self::VsCode => Icon::Code,
+            Self::Viewers => Icon::FileText,
             Self::Shortcuts => Icon::Keyboard,
+            Self::Accessibility => Icon::Accessibility,
             Self::Theme => Icon::SwatchBook,
             Self::Window => Icon::AppWindow,
             Self::Sidebar => Icon::PanelLeft,
@@ -206,20 +228,31 @@ pub struct Settings {
     quick: bool,
     /// The color picker popup, while one is open.
     picker: Option<ColorPicker>,
+    /// The sound menu popup, while one is open.
+    sounds: Option<SoundMenu>,
     /// Whether Claude Code's settings have macaroni's hooks, read when the dialog opens and after
     /// installing or removing them; `None` when there's no Claude Code settings file to read.
     hooks: Option<bool>,
     /// What the last install or removal of the hooks reported, shown under its row.
     hooks_result: Option<String>,
+    /// Whether Codex's config runs `macaroni-cli codex-notify`, read like `hooks`; `None` when
+    /// there's no Codex config to read.
+    codex: Option<bool>,
+    /// What the last install or removal of Codex's notify program reported.
+    codex_result: Option<String>,
     /// The shells found on this machine, looked up when the dialog opens (it searches `PATH`).
     shells: Vec<ShellOption>,
     /// What new terminals run while `shell.program` isn't set, by name.
     default_shell: String,
+    /// The row the keyboard's ring is on, once an arrow key has put it somewhere.
+    row: Option<keys::RowKey>,
 }
 
 /// What the dialog's controls send, wrapped in [`Message::Settings`].
 #[derive(Debug, Clone)]
 pub enum SettingsMessage {
+    /// A key nothing captured: moves the ring along the rows or changes the ringed one.
+    Key(iced::keyboard::Key, iced::keyboard::Modifiers),
     /// Show this section, clearing any search.
     Section(Section),
     /// The search field changed.
@@ -253,12 +286,19 @@ pub enum SettingsMessage {
     FocusSearch,
     /// Install (`true`) or remove macaroni's Claude Code hooks with `macaroni-cli setup claude`.
     Hooks(bool),
+    /// Install (`true`) or remove macaroni's Codex notify program with
+    /// `macaroni-cli setup codex`.
+    CodexNotify(bool),
     /// Download (`true`) or remove VS Code for the web.
     VsCode(bool),
     /// Stop VS Code's server; the next VS Code tab starts it again.
     VsCodeStop,
     /// Download (`true`) or remove Chromium for browser tabs.
     Chromium(bool),
+    /// Download (`true`) or remove a viewer extension for file tabs.
+    Viewer(crate::viewers::Extension, bool),
+    /// Pick `[files] app` with the system's file dialog.
+    PickApp,
     /// Enter in the new SSH profile's fields: add it from their drafts.
     AddSsh,
     /// Remove the `[[ssh]]` profile at this index.
@@ -281,6 +321,12 @@ pub enum SettingsMessage {
     PickerHex(String),
     /// Close the picker.
     PickerClose,
+    /// A sound row's button was clicked: open the sound menu for it.
+    SoundMenu(SoundMenu),
+    /// A play button in the sound menu: play this sound without picking it.
+    SoundPlay(String),
+    /// Close the sound menu.
+    SoundMenuClose,
 }
 
 /// How a row's setting is shown and changed. Each holds the dotted config key it writes and
@@ -314,7 +360,7 @@ enum Control {
     /// A read-only binding, its chord as shown (e.g. "Ctrl+Shift+T").
     Shortcut(String),
     /// Presets as labels and values, or a custom value typed in: `[workspace_items]` and
-    /// `[tab_items]` templates and the bell sound.
+    /// `[tab_items]` templates.
     Template {
         /// The dotted config key.
         key: &'static str,
@@ -324,6 +370,16 @@ enum Control {
         presets: Vec<(String, String)>,
         /// The custom field's placeholder.
         placeholder: &'static str,
+    },
+    /// A sound: Off, the system's, a built-in one, or a file typed in, picked from the sound
+    /// menu (`sound_menu`), where each can be played first.
+    Sound {
+        /// The dotted config key.
+        key: &'static str,
+        /// The value in effect.
+        value: String,
+        /// Each choice's label and value (see [`SoundMenu::presets`]).
+        presets: Vec<(String, String)>,
     },
     /// `[shell] program` and `args`: a shell found on this machine, the default, or one typed in.
     Shell {
@@ -380,6 +436,7 @@ impl Control {
             | Self::Text { key, .. }
             | Self::List { key, .. }
             | Self::Template { key, .. }
+            | Self::Sound { key, .. }
             | Self::Color { key, .. } => Some(key),
             Self::Shell { .. } => Some("shell.program"),
             Self::NewSsh => Some(SSH_HOST),
@@ -526,9 +583,24 @@ fn hooks_installed() -> Option<bool> {
     Some(text.contains("macaroni-cli") && text.contains(" hook"))
 }
 
-/// Runs `macaroni-cli setup claude --yes` (with `--remove` unless `install`) from next to this
+/// Codex's `config.toml`: in `CODEX_HOME`, else `~/.codex`.
+fn codex_config() -> Option<PathBuf> {
+    let home = std::env::var_os("CODEX_HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| Some(home_dir()?.join(".codex")))?;
+    Some(home.join("config.toml"))
+}
+
+/// Whether Codex's config runs `macaroni-cli codex-notify`; `None` when there's no config.
+fn codex_installed() -> Option<bool> {
+    let text = std::fs::read_to_string(codex_config()?).ok()?;
+    Some(text.contains("macaroni-cli") && text.contains("codex-notify"))
+}
+
+/// Runs `macaroni-cli setup <agent> --yes` (with `--remove` unless `install`) from next to this
 /// executable, and returns what it printed, or why it couldn't run.
-fn run_setup(install: bool) -> String {
+fn run_setup(agent: &str, install: bool) -> String {
     let cli = std::env::current_exe()
         .ok()
         .map(|exe| exe.with_file_name(format!("macaroni-cli{}", std::env::consts::EXE_SUFFIX)));
@@ -536,7 +608,7 @@ fn run_setup(install: bool) -> String {
         return "macaroni-cli wasn't found next to macaroni.".to_owned();
     };
     let mut command = std::process::Command::new(cli);
-    command.args(["setup", "claude", "--yes"]);
+    command.args(["setup", agent, "--yes"]);
     if !install {
         command.arg("--remove");
     }
@@ -579,9 +651,9 @@ fn parse_hex(text: &str) -> Option<Rgba> {
 }
 
 impl Settings {
-    /// Closes the color picker; whether one was open.
+    /// Closes the color picker or the sound menu; whether one was open.
     pub fn close_picker(&mut self) -> bool {
-        self.picker.take().is_some()
+        self.picker.take().is_some() | self.sounds.take().is_some()
     }
 }
 
@@ -590,6 +662,7 @@ impl App {
     pub fn open_settings(&mut self) -> Task<Message> {
         self.settings = Some(Settings {
             hooks: hooks_installed(),
+            codex: codex_installed(),
             shells: macaroni_term::shell::available(),
             default_shell: default_shell(),
             ..Settings::default()
@@ -602,9 +675,31 @@ impl App {
     /// new value. Ignored while the dialog is closed.
     pub fn settings_update(&mut self, message: SettingsMessage) -> Task<Message> {
         match message {
+            SettingsMessage::Key(key, mods) => return self.settings_key(&key, mods),
             SettingsMessage::Reveal(section, group) => return self.reveal_card(section, group),
             SettingsMessage::VsCode(install) => return self.vscode_install(install),
             SettingsMessage::Chromium(install) => return self.chromium_install(install),
+            SettingsMessage::Viewer(extension, install) => {
+                return self.viewer_install(extension, install);
+            }
+            SettingsMessage::PickApp => {
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Open files with")
+                            .pick_file()
+                            .await
+                            .map(|f| f.path().to_string_lossy().into_owned())
+                    },
+                    |program| match program {
+                        Some(program) => Message::Settings(SettingsMessage::Set(
+                            "files.app",
+                            Some(Value::Str(program)),
+                        )),
+                        None => Message::Frame,
+                    },
+                );
+            }
             SettingsMessage::VsCodeStop => {
                 self.vscode_web.stop();
                 return Task::none();
@@ -662,6 +757,7 @@ impl App {
             }
             SettingsMessage::Custom(key) => {
                 settings.custom.insert(key);
+                settings.sounds = None;
             }
             SettingsMessage::SubmitTemplate(key) => {
                 if let Some(draft) = settings.drafts.remove(key) {
@@ -686,9 +782,16 @@ impl App {
                 }
             }
             SettingsMessage::Set(key, value) => {
-                // Picking an option leaves Custom.
+                // Picking an option leaves Custom, and closes the sound menu it was picked in.
                 settings.custom.remove(key);
                 settings.drafts.remove(key);
+                settings.sounds = None;
+                // Picking a sound plays it.
+                if let ("notifications.sound" | "notifications.bell_sound", Some(Value::Str(s))) =
+                    (key, &value)
+                {
+                    crate::bell::play(s);
+                }
                 self.write_setting(key, value);
             }
             SettingsMessage::SetMany(writes) => {
@@ -789,10 +892,16 @@ impl App {
                 }
             }
             SettingsMessage::PickerClose => settings.picker = None,
-            SettingsMessage::Reveal(..)
+            SettingsMessage::SoundMenu(menu) => settings.sounds = Some(menu),
+            SettingsMessage::SoundPlay(sound) => crate::bell::play(&sound),
+            SettingsMessage::SoundMenuClose => settings.sounds = None,
+            SettingsMessage::Key(..)
+            | SettingsMessage::Reveal(..)
             | SettingsMessage::VsCode(_)
             | SettingsMessage::VsCodeStop
-            | SettingsMessage::Chromium(_) => {}
+            | SettingsMessage::Chromium(_)
+            | SettingsMessage::Viewer(..)
+            | SettingsMessage::PickApp => {}
             SettingsMessage::AddSsh => {
                 let host = settings.drafts.get(SSH_HOST).map_or("", |h| h.trim());
                 if host.is_empty() {
@@ -819,8 +928,12 @@ impl App {
             }
             SettingsMessage::Hooks(install) => {
                 // Quick (it edits one JSON file), so it runs here rather than on a thread.
-                settings.hooks_result = Some(run_setup(install));
+                settings.hooks_result = Some(run_setup("claude", install));
                 settings.hooks = hooks_installed();
+            }
+            SettingsMessage::CodexNotify(install) => {
+                settings.codex_result = Some(run_setup("codex", install));
+                settings.codex = codex_installed();
             }
         }
         Task::none()

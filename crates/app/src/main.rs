@@ -52,17 +52,22 @@
 // Release builds are GUI apps on Windows, so launching one doesn't also open a console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod accessibility;
+mod agent_setup;
 mod anim;
 mod backdrop;
 mod bell;
 mod browser;
 mod chromium;
+mod crash;
 mod drag_area;
+mod file_view;
 mod fonts;
 mod gap_line;
 mod git;
 mod glass;
 mod hair_line;
+mod history;
 mod icons;
 mod inert;
 mod input;
@@ -71,19 +76,23 @@ mod keymap;
 mod label;
 mod message;
 #[cfg(windows)]
-mod move_dpi;
+mod move_loop;
 mod notifications;
+mod plugins;
 mod pointer;
+mod preview;
 mod restore;
 mod right_click;
 mod session;
 mod side_line;
+mod sounds;
 mod state;
 mod terminal;
 mod theme;
 mod triggers;
 mod update;
 mod view;
+mod viewers;
 mod vscode;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -136,7 +145,7 @@ const CLOSED_TABS_KEPT: usize = 20;
 /// keep it), and where.
 #[derive(Debug, Clone)]
 struct ClosedTab {
-    /// Its directory, Claude Code session, address, name and look.
+    /// Its directory, agent session, address, name and look.
     saved: session::SavedTab,
     /// The pane it was in.
     pane: PaneId,
@@ -158,11 +167,14 @@ fn main() -> iced::Result {
     if let Some(code) = macaroni_browser::helper_process(&chromium::dir()) {
         std::process::exit(code);
     }
+    // After the helper check, so a Chromium process never replaces the app's crash log.
+    crash::log_panics();
     notifications::register();
     fonts::load();
     // A daemon, which can have any number of windows; it only exits through `App::exit`.
     let result = iced::daemon(App::new, App::update, App::view)
         .title(App::title)
+        .scale_factor(|app: &App, _| app.config.accessibility.ui_scale)
         .subscription(App::subscription)
         .theme(|app: &App, _| app.iced_theme.clone())
         .run();
@@ -174,10 +186,13 @@ fn main() -> iced::Result {
 /// A window's settings, where and how big `saved` says (else the default size, where the system
 /// puts it). On Windows macaroni draws its own title bar (`view::title_bar`), so the window has
 /// no system frame, only the shadow and rounded corners.
-fn window_settings(saved: Option<&session::SavedWindow>) -> window::Settings {
+fn window_settings(saved: Option<&session::SavedWindow>, ui_scale: f32) -> window::Settings {
+    // Saved sizes are the system's logical pixels; iced scales a new window's size by
+    // `ui_scale`, so it comes out the size it was.
     let size = saved
         .and_then(|s| s.size)
-        .map_or(DEFAULT_WINDOW_SIZE, |(w, h)| Size::new(w, h));
+        .map_or(DEFAULT_WINDOW_SIZE, |(w, h)| Size::new(w, h))
+        * (1.0 / ui_scale);
     let position = saved
         .and_then(|s| s.position)
         .map_or(window::Position::Default, |(x, y)| {
@@ -211,15 +226,18 @@ fn window_settings(saved: Option<&session::SavedWindow>) -> window::Settings {
 struct Win {
     /// The model's window it shows.
     model: WindowId,
-    /// Its size in logical pixels, for laying out menus and drop targets.
+    /// Its size in logical pixels (iced's, so `[accessibility] ui_scale` included), for laying
+    /// out menus and drop targets.
     size: Size,
-    /// Its top-left corner on screen, in logical pixels, once it has moved, for the session.
+    /// Its top-left corner on screen, in the same logical pixels as `size`, once it has moved,
+    /// for the session.
     position: Option<Point>,
     /// Whether it's maximized, refreshed on every resize (no resize borders then).
     maximized: bool,
     /// Its native handle (`HWND`, or the `NSView` on macOS), the parent of its browser windows.
     parent: Option<isize>,
-    /// Its scale factor, for placing browser windows in physical pixels.
+    /// The display's scale factor (without `ui_scale`), for placing browser windows in physical
+    /// pixels.
     scale: f32,
     /// Whether it has keyboard focus.
     focused: bool,
@@ -235,6 +253,17 @@ struct App {
     /// Sessions the model asked for that haven't started yet. Each starts once its view has
     /// reported a size (and the event channel exists), so shells start at their real size.
     pending: BTreeMap<SessionId, Option<GridSize>>,
+    /// Terminals whose shells are being started off the UI thread, until
+    /// [`Message::SessionStarted`] moves them to `running`.
+    starting: BTreeMap<SessionId, state::Starting>,
+    /// Terminals started that haven't shown their first prompt (or not for long), by when they
+    /// started. Hidden tabs' terminals wait while there are too many.
+    booting: BTreeMap<SessionId, Instant>,
+    /// Input typed into terminals that haven't started yet, sent once they have.
+    typeahead: BTreeMap<SessionId, Vec<u8>>,
+    /// The grid size the hidden tabs' terminals start at: the last one a starting terminal's
+    /// view reported. `None` until a terminal is shown.
+    hidden_size: Option<GridSize>,
     /// Where sessions send their events; `None` until the subscription reports
     /// [`Message::EventsReady`]. Each session's callback holds a clone.
     events: Option<UnboundedSender<(SessionId, SessionEvent)>>,
@@ -254,6 +283,8 @@ struct App {
     keymap: Keymap,
     /// `[[trigger]]`, compiled; set by `apply_config`.
     triggers: triggers::Triggers,
+    /// The commands run in each workspace, for the command history picker.
+    history: history::History,
     /// The terminal colors from the theme.
     palette: Palette,
     /// The interface's colors and sizes, derived from the palette and the config.
@@ -292,6 +323,20 @@ struct App {
     closed_tabs: Vec<ClosedTab>,
     /// The agent dashboard is open.
     dashboard: bool,
+    /// What each Git tab shows, by tab; made on first use, dropped when the tab closes.
+    git_tabs: HashMap<TabId, view::git_tab::GitTab>,
+    /// Each agent setup tab's state, made on first use and dropped with the tab.
+    agent_tabs: HashMap<TabId, view::agent_tab::AgentTab>,
+    /// What each file tab read, by tab.
+    file_tabs: HashMap<TabId, view::file_tab::FileTab>,
+    /// File tabs show the folder tree at their left (saved with the session).
+    file_tree: bool,
+    /// What plugins show in each panel.
+    plugin_rows: plugins::PluginRows,
+    /// tmux control mode, by the terminal carrying it (`update/tmux.rs`).
+    tmux: HashMap<SessionId, update::tmux::Tmux>,
+    /// How many tmux pane sessions were ever started, for their ids.
+    tmux_ids: u64,
     /// Letters show over the panes, waiting for the key that picks one (`jump_to_pane`).
     pane_letters: bool,
     /// Tabs whose agent's permission prompt was answered from a notification or the dashboard,
@@ -352,6 +397,8 @@ struct App {
     shells: Vec<ShellOption>,
     /// VS Code's `code` command, for the new-tab menu, if installed.
     vscode: Option<PathBuf>,
+    /// What the link menu (`MenuTarget::Link`) was opened on.
+    clicked: Option<message::Clicked>,
     /// Shells picked for tabs whose terminals haven't started yet.
     tab_shells: BTreeMap<SessionId, ShellOption>,
     /// Terminals running an `[[ssh]]` profile, by its name, so the session saves them as SSH
@@ -368,6 +415,8 @@ struct App {
     vscode_web: vscode::WebVsCode,
     /// Chromium for browser tabs: whether it's downloaded, and a download in progress.
     chromium: chromium::Chromium,
+    /// The file tabs' viewer extensions: which are downloaded, and downloads in progress.
+    viewers: viewers::Viewers,
     /// Where browsers send their events; `None` until [`Message::BrowserEventsReady`].
     browser_events: Option<UnboundedSender<(BrowserId, BrowserMessage)>>,
     /// Every open window, by its iced id. Added when it's asked to open, so effects can find it
@@ -381,6 +430,16 @@ struct App {
     next_window_at: Option<Point>,
     /// Points added to the configured font size by zooming, for this run only.
     zoom: f32,
+    /// The system's accessibility settings, as last read, for `"system"` options.
+    system_prefs: accessibility::SystemPrefs,
+    /// What `[accessibility]` turns on, with `"system"` options resolved; set by
+    /// `apply_config`.
+    access: accessibility::Effective,
+    /// Screen reader support: the windows being read and what they were sent.
+    reader: accessibility::tree::Reader,
+    /// What the keyboard has focused in the sidebar or a tab strip (F6), `None` while a
+    /// terminal or page has it (`update/keyboard.rs`).
+    key_focus: Option<state::KeyFocus>,
     /// The browser holding keyboard focus, when a page rather than macaroni has it.
     page_focus: Option<BrowserId>,
     /// The focused tab as of the last update, to notice focus moving to or from a browser.
@@ -412,12 +471,22 @@ impl App {
             .then(|| session::load(&session::path(&config_dir)))
             .flatten();
         let sidebar = saved.as_ref().and_then(|s| s.sidebar);
+        let file_tree = saved.as_ref().is_some_and(|s| s.file_tree);
         let saved_windows = saved
             .as_ref()
             .map(|s| s.windows.clone())
             .unwrap_or_default();
+        let saved_commands: Vec<Vec<session::SavedCommand>> = saved
+            .as_ref()
+            .map(|s| s.workspaces.iter().map(|w| w.commands.clone()).collect())
+            .unwrap_or_default();
         let (model, effects, restored) = restore::startup(saved);
         let mut app = Self::with_defaults(model, restored, first_command, config_dir);
+        app.file_tree = file_tree;
+        // `Model::restore` keeps the saved order of workspaces and of each one's panes.
+        for (ws, commands) in app.model.all_workspaces().iter().zip(&saved_commands) {
+            app.history.restore(ws.id, &ws.layout.leaves(), commands);
+        }
         // Read from the loaded config, since `app.config` is still the default until `apply_config`.
         app.offer_git_bash =
             cfg!(windows) && config.shell.program.is_none() && shell::git_bash().is_none();
@@ -464,6 +533,10 @@ impl App {
             model,
             running: BTreeMap::new(),
             pending: BTreeMap::new(),
+            starting: BTreeMap::new(),
+            booting: BTreeMap::new(),
+            typeahead: BTreeMap::new(),
+            hidden_size: None,
             events: None,
             ran_program: first_command.is_some(),
             first_command,
@@ -473,6 +546,7 @@ impl App {
             config_errors: Vec::new(),
             keymap: Keymap::new(&[]).0,
             triggers: triggers::Triggers::default(),
+            history: history::History::default(),
             palette,
             chrome,
             metrics: Metrics::measure(
@@ -496,6 +570,13 @@ impl App {
             scrollback_files: BTreeMap::new(),
             closed_tabs: Vec::new(),
             dashboard: false,
+            git_tabs: HashMap::new(),
+            agent_tabs: HashMap::new(),
+            file_tabs: HashMap::new(),
+            plugin_rows: plugins::PluginRows::default(),
+            file_tree: false,
+            tmux: HashMap::new(),
+            tmux_ids: 0,
             pane_letters: false,
             answered: BTreeSet::new(),
             agent_since: HashMap::new(),
@@ -521,6 +602,7 @@ impl App {
             git_busy: false,
             shells: shell::available(),
             vscode: shell::vscode(),
+            clicked: None,
             tab_shells: BTreeMap::new(),
             ssh_tabs: BTreeMap::new(),
             disconnected: BTreeSet::new(),
@@ -528,11 +610,16 @@ impl App {
             browsers: BTreeMap::new(),
             vscode_web: vscode::WebVsCode::new(),
             chromium: chromium::Chromium::new(),
+            viewers: viewers::Viewers::new(),
             browser_events: None,
             wins: BTreeMap::new(),
             viewing: std::cell::Cell::new(None),
             next_window_at: None,
             zoom: 0.0,
+            system_prefs: accessibility::system::read(),
+            access: accessibility::Effective::default(),
+            key_focus: None,
+            reader: accessibility::tree::Reader::default(),
             page_focus: None,
             last_focused_tab: None,
             shared_keymap: Arc::new(Mutex::new(Keymap::new(&[]).0)),
@@ -567,13 +654,16 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         // Outside the view, "the window" is the focused one.
         self.viewing.set(None);
+        crash::note_message(&message);
         let task = self.handle(message);
         // Both run after every message, whichever handler ran: browser windows aren't drawn by
         // iced, so any change to the model, a menu, a drag or the settings dialog may have to
         // move, hide or focus one, and the fades need the selection and hover as they are now.
         self.sync_browsers();
         self.sync_fades();
-        task
+        // Screen readers hear about whatever changed, whichever handler changed it.
+        let reader = self.sync_reader();
+        Task::batch([task, reader])
     }
 
     /// Sets each workspace's and tab's fade targets (selected, hovered) from the current state.
@@ -629,6 +719,8 @@ impl App {
 
             Message::EventsReady(events) => self.events_ready(events),
             Message::Session(id, event) => self.session_event(id, event),
+            Message::SessionStarted(id, started) => self.session_started(id, &started),
+            Message::StartHidden => self.start_hidden(),
             Message::View(id, event) => self.view_event(id, event),
             Message::Paste(id, Some(text)) => self.paste(id, text),
             Message::Paste(_, None) => Task::none(),
@@ -693,6 +785,7 @@ impl App {
             Message::DragEnd => {
                 self.drag = None;
                 self.sidebar_drag = false;
+                self.end_git_resize();
                 Task::none()
             }
             Message::SidebarDragStart => self.sidebar_drag_start(),
@@ -706,6 +799,9 @@ impl App {
                 Task::none()
             }
             Message::SidebarSearchCheck => {
+                // Any press means the mouse is in use: the keyboard's ring goes, and the
+                // terminal takes keys again.
+                self.key_focus = None;
                 iced::widget::operation::is_focused(view::SIDEBAR_SEARCH)
                     .map(Message::SidebarSearchFocused)
             }
@@ -727,7 +823,52 @@ impl App {
             Message::TabScroll(pane, delta) => self.tab_scroll(pane, delta),
             Message::TabViewport(pane, viewport) => self.tab_viewport(pane, viewport),
             Message::Frame => Task::none(),
-            Message::GitTick => self.git_tick(),
+            Message::SystemPrefs(prefs) => self.system_prefs_changed(prefs),
+            Message::FocusKey(key, physical, mods) => self.focus_key(key, physical, mods),
+            Message::Reader(event) => self.reader_event(event),
+            Message::ReaderTick => self.reader_tick(),
+            Message::ReaderBounds(found) => self.reader_bounds(found),
+            Message::KeyMenu(target, at) => self.key_menu(target, at),
+            Message::GitTick => {
+                let tabs = self.shown_git_tabs();
+                let mut tasks = vec![self.git_tick()];
+                for tab in tabs {
+                    tasks.push(self.git_update(tab, view::git_tab::GitMessage::Refresh));
+                }
+                Task::batch(tasks)
+            }
+            Message::Git(tab, message) => self.git_update(tab, message),
+            Message::GitTab(pane) => self.open_git_tab(pane),
+            Message::AgentSetup(tab, message) => self.agent_update(tab, message),
+            Message::AgentSetupTab(pane) => self.open_agent_setup_tab(pane),
+            Message::AgentTick => {
+                let tabs = self.shown_agent_tabs();
+                Task::batch(
+                    tabs.into_iter()
+                        .map(|tab| self.agent_update(tab, view::agent_tab::AgentMessage::Refresh)),
+                )
+            }
+            Message::File(tab, message) => self.file_update(tab, message),
+            Message::PickFile(pane) => self.pick_file(pane),
+            Message::OpenFile(pane, path) => self.open_file_tab(pane, path),
+            Message::OpenClicked(clicked, how) => self.open_clicked(clicked, how),
+            Message::PluginTick => self.plugin_tick(),
+            Message::TabPlugin(tab, plugin, on) => {
+                self.menu = None;
+                let set = self.apply(macaroni_core::Command::SetTabPlugin(tab, plugin, Some(on)));
+                Task::batch([set, self.plugin_tick()])
+            }
+            Message::PluginRan(tab, plugin, result) => self.plugin_ran(tab, plugin, result),
+            Message::FileTick => {
+                let tabs = self.shown_file_tabs();
+                let restyle = self.restyle_pages(&tabs);
+                let reads = Task::batch(tabs.into_iter().map(|tab| {
+                    self.file_update(tab, view::file_tab::FileMessage::Refresh { force: false })
+                }));
+                Task::batch([restyle, reads])
+            }
+            Message::ViewerInstalled(extension, result) => self.viewer_installed(extension, result),
+            Message::TmuxBounds(tab, bounds) => self.tmux_bounds(tab, bounds),
             Message::NotificationClicked(tab) => self.notification_clicked(tab),
             Message::PermissionAnswer(tab, allow) => self.answer_permission(tab, allow),
             Message::GitInfo(repos) => {
@@ -791,11 +932,14 @@ impl App {
         }
     }
 
-    /// The focused tab's session, or `None` when a browser tab is focused.
+    /// The focused tab's session (a tmux tab's focused pane's), or `None` when a browser or Git
+    /// tab is focused.
     fn focused_session(&self) -> Option<SessionId> {
-        match self.model.focused_tab().kind {
+        let tab = self.model.focused_tab();
+        match tab.kind {
             TabKind::Terminal(session) => Some(session),
-            TabKind::Browser(_) => None,
+            TabKind::Tmux => self.tmux_focused_pane(tab.id),
+            TabKind::Browser(_) | TabKind::Git | TabKind::AgentSetup | TabKind::File => None,
         }
     }
 
@@ -803,7 +947,7 @@ impl App {
     /// browsers, window events) always run; the rest only while they're needed. iced rebuilds
     /// the set after every update, so a listener is added or dropped as the state changes.
     fn subscription(&self) -> Subscription<Message> {
-        let drag = if self.drag.is_some() || self.sidebar_drag {
+        let drag = if self.drag.is_some() || self.sidebar_drag || self.git_resizing() {
             event::listen_with(drag_events)
         } else {
             Subscription::none()
@@ -837,13 +981,44 @@ impl App {
         } else {
             Subscription::none()
         };
-        let git = if self.sidebar_shows_git() {
+        let git = if self.sidebar_shows_git() || !self.shown_git_tabs().is_empty() {
             Subscription::run(git_ticks)
+        } else {
+            Subscription::none()
+        };
+        let agent_setup = if self.shown_agent_tabs().is_empty() {
+            Subscription::none()
+        } else {
+            Subscription::run(agent_ticks)
+        };
+        let files = if self.shown_file_tabs().is_empty() {
+            Subscription::none()
+        } else {
+            Subscription::run(file_ticks)
+        };
+        let plugins = if self.plugins_shown() {
+            Subscription::run(plugin_ticks)
+        } else {
+            Subscription::none()
+        };
+        let system_prefs = if accessibility::follows_system(&self.config.accessibility) {
+            Subscription::run(system_prefs)
         } else {
             Subscription::none()
         };
         let frames = if self.fades.animating() {
             window::frames().map(|_| Message::Frame)
+        } else {
+            Subscription::none()
+        };
+        // The sidebar and strips, while the keyboard is on them, and open menus.
+        let reader = if self.reader.active() {
+            Subscription::run(reader_ticks)
+        } else {
+            Subscription::none()
+        };
+        let focus_keys = if self.key_focus.is_some() || self.menu.is_some() {
+            event::listen_with(focus_keys)
         } else {
             Subscription::none()
         };
@@ -886,7 +1061,11 @@ impl App {
         // Terminals look up shortcuts themselves; a browser tab's pane has nothing that does.
         // Only `Ignored` events count (see `unhandled_keys`), so typing in a text field isn't
         // taken for a shortcut.
-        let shortcuts = if self.focused_session().is_none() {
+        // While the keyboard is on the sidebar, a strip or a menu, `focus_keys` has the keys.
+        let shortcuts = if self.focused_session().is_none()
+            && self.key_focus.is_none()
+            && self.menu.is_none()
+        {
             event::listen_with(unhandled_keys)
         } else {
             Subscription::none()
@@ -902,6 +1081,9 @@ impl App {
             dashboard,
             notifications::clicks(),
             git,
+            agent_setup,
+            files,
+            plugins,
             vscode,
             search,
             dismiss,
@@ -921,12 +1103,17 @@ impl App {
             item_drag,
             tick,
             frames,
+            focus_keys,
+            reader,
+            Subscription::run(reader_events),
+            system_prefs,
             save,
         ])
     }
 }
 
-/// Cursor moves and the left button's release, while a divider is dragged.
+/// Cursor moves and the left button's release, while a divider, the sidebar's edge or a Git tab's
+/// column edge is dragged.
 fn drag_events(event: Event, _: event::Status, id: window::Id) -> Option<Message> {
     match event {
         Event::Mouse(mouse::Event::CursorMoved { position }) => {
@@ -980,7 +1167,7 @@ fn pane_letter_keys(event: Event, _: event::Status, _: window::Id) -> Option<Mes
 /// Up and Down, while the command palette is open: move its highlight.
 fn palette_keys(event: Event, _: event::Status, _: window::Id) -> Option<Message> {
     use iced::keyboard::{Event::KeyPressed, Key::Named, key::Named as N};
-    use view::palette::PaletteMessage::Move;
+    use view::palette::PaletteMessage::{self, Move};
     match event {
         Event::Keyboard(KeyPressed {
             key: Named(N::ArrowUp),
@@ -990,19 +1177,33 @@ fn palette_keys(event: Event, _: event::Status, _: window::Id) -> Option<Message
             key: Named(N::ArrowDown),
             ..
         }) => Some(Message::Palette(Move(1))),
+        Event::Keyboard(KeyPressed {
+            key: Named(N::Delete),
+            modifiers,
+            ..
+        }) if modifiers.shift() => Some(Message::Palette(PaletteMessage::Forget)),
+        // Held while Enter is pressed, they make the command history run its pick.
+        Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)) => {
+            Some(Message::Palette(PaletteMessage::Modifiers(modifiers)))
+        }
         _ => None,
     }
 }
 
-/// Ctrl+F (Cmd+F on macOS), while the settings dialog is open: focuses its search field.
-fn settings_keys(event: Event, _: event::Status, _: window::Id) -> Option<Message> {
+/// While the settings dialog is open: Ctrl+F (Cmd+F on macOS) focuses its search field, and
+/// other keys no field captured move and work its keyboard ring.
+fn settings_keys(event: Event, status: event::Status, _: window::Id) -> Option<Message> {
+    use view::settings::SettingsMessage;
     match event {
         Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
             if modifiers.command() && key.as_ref() == iced::keyboard::Key::Character("f") =>
         {
-            Some(Message::Settings(
-                view::settings::SettingsMessage::FocusSearch,
-            ))
+            Some(Message::Settings(SettingsMessage::FocusSearch))
+        }
+        Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
+            if status == event::Status::Ignored =>
+        {
+            Some(Message::Settings(SettingsMessage::Key(key, modifiers)))
         }
         _ => None,
     }
@@ -1015,6 +1216,22 @@ fn escape_keys(event: Event, _: event::Status, _: window::Id) -> Option<Message>
             key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
             ..
         }) => Some(Message::Dismiss),
+        _ => None,
+    }
+}
+
+/// Key presses no widget captured, while the keyboard is on the sidebar or a tab strip, or a
+/// menu is open (`update/keyboard.rs`). Captured ones were typed into a field.
+fn focus_keys(event: Event, status: event::Status, _: window::Id) -> Option<Message> {
+    match event {
+        Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key,
+            physical_key,
+            modifiers,
+            ..
+        }) if status == event::Status::Ignored => {
+            Some(Message::FocusKey(key, physical_key, modifiers))
+        }
         _ => None,
     }
 }
@@ -1072,6 +1289,33 @@ fn session_events() -> impl Stream<Item = Message> {
     })
 }
 
+/// [`Message::Reader`] for whatever a window's screen reader adapter reports.
+fn reader_events() -> impl Stream<Item = Message> {
+    iced::stream::channel(EVENT_BUFFER, async |mut output| {
+        let (sender, mut receiver) = unbounded();
+        accessibility::adapter::set_events(sender);
+        while let Some(event) = receiver.next().await {
+            let _ = output.send(Message::Reader(event)).await;
+        }
+    })
+}
+
+/// [`Message::ReaderTick`] every [`accessibility::tree::READER_TICK`], while a screen reader
+/// reads a window, from a thread that stops once the subscription is dropped.
+fn reader_ticks() -> impl Stream<Item = Message> {
+    iced::stream::channel(1, async |mut output| {
+        let (sender, mut receiver) = unbounded();
+        std::thread::spawn(move || {
+            while sender.unbounded_send(()).is_ok() {
+                std::thread::sleep(accessibility::tree::READER_TICK);
+            }
+        });
+        while receiver.next().await.is_some() {
+            let _ = output.send(Message::ReaderTick).await;
+        }
+    })
+}
+
 /// [`Message::Frame`] every second, for the agent dashboard's times, from a thread that stops
 /// once the subscription is dropped.
 fn dashboard_ticks() -> impl Stream<Item = Message> {
@@ -1100,6 +1344,83 @@ fn git_ticks() -> impl Stream<Item = Message> {
         });
         while receiver.next().await.is_some() {
             let _ = output.send(Message::GitTick).await;
+        }
+    })
+}
+
+/// [`Message::AgentTick`] every [`view::agent_tab::AGENT_TICK`], from a thread that stops once
+/// the subscription is dropped. Opening a tab reads it, so the first tick waits.
+fn agent_ticks() -> impl Stream<Item = Message> {
+    iced::stream::channel(1, async |mut output| {
+        let (sender, mut receiver) = unbounded();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(view::agent_tab::AGENT_TICK);
+                if sender.unbounded_send(()).is_err() {
+                    break;
+                }
+            }
+        });
+        while receiver.next().await.is_some() {
+            let _ = output.send(Message::AgentTick).await;
+        }
+    })
+}
+
+/// [`Message::PluginTick`] at once, then every [`plugins::TICK`], from a thread that stops once
+/// the subscription is dropped.
+fn plugin_ticks() -> impl Stream<Item = Message> {
+    iced::stream::channel(1, async |mut output| {
+        let (sender, mut receiver) = unbounded();
+        std::thread::spawn(move || {
+            while sender.unbounded_send(()).is_ok() {
+                std::thread::sleep(plugins::TICK);
+            }
+        });
+        while receiver.next().await.is_some() {
+            let _ = output.send(Message::PluginTick).await;
+        }
+    })
+}
+
+/// [`Message::FileTick`] at once (which reads restored file tabs), then every
+/// [`view::file_tab::FILE_TICK`], from a thread that stops once the subscription is dropped.
+fn file_ticks() -> impl Stream<Item = Message> {
+    iced::stream::channel(1, async |mut output| {
+        let (sender, mut receiver) = unbounded();
+        std::thread::spawn(move || {
+            while sender.unbounded_send(()).is_ok() {
+                std::thread::sleep(view::file_tab::FILE_TICK);
+            }
+        });
+        while receiver.next().await.is_some() {
+            let _ = output.send(Message::FileTick).await;
+        }
+    })
+}
+
+/// [`Message::SystemPrefs`] at once and whenever the system's accessibility settings change,
+/// read every [`accessibility::POLL`] from a thread that stops once the subscription is dropped.
+fn system_prefs() -> impl Stream<Item = Message> {
+    iced::stream::channel(1, async |mut output| {
+        let (sender, mut receiver) = unbounded();
+        std::thread::spawn(move || {
+            // The first read is sent too: the settings may have changed since startup read
+            // them. The app ignores a read that changes nothing.
+            let mut last = None;
+            loop {
+                let now = accessibility::system::read();
+                if last != Some(now) {
+                    last = Some(now);
+                    if sender.unbounded_send(now).is_err() {
+                        break;
+                    }
+                }
+                std::thread::sleep(accessibility::POLL);
+            }
+        });
+        while let Some(prefs) = receiver.next().await {
+            let _ = output.send(Message::SystemPrefs(prefs)).await;
         }
     })
 }

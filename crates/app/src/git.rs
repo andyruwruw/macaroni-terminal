@@ -7,8 +7,12 @@
 //! `HEAD`. The rest takes one `git status`, so [`look`] runs off the UI thread, every
 //! [`crate::GIT_TICK`] while a `[workspace_items]` template shows either placeholder.
 //!
+//! [`repo`] is what Git tabs show and do.
+//!
 //! [`add_worktree`] makes a worktree for a new workspace (the worktree dialog); it runs `git`
 //! and blocks, so it's run off the UI thread too.
+
+pub mod repo;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -79,6 +83,14 @@ pub fn branch(dir: &Path) -> Option<String> {
         }
         None => Some(head.chars().take(7).collect()).filter(|s: &String| !s.is_empty()),
     }
+}
+
+/// The top folder of the repository holding `dir`: the nearest one with a `.git` (a folder, or
+/// a worktree's file). Reads the file system only, so it's cheap enough for menus.
+pub fn top(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .find(|folder| folder.join(".git").exists())
+        .map(Path::to_path_buf)
 }
 
 /// The git directory of the repository holding `dir`: the nearest `.git` folder, or for a

@@ -20,12 +20,12 @@ use iced::Task;
 use iced::futures::channel::mpsc::{UnboundedSender, unbounded};
 use iced::futures::{SinkExt, Stream, StreamExt};
 use macaroni_core::{
-    Agent, AgentState, BrowserId, Command, Direction, Pane, PaneId, SessionId, Tab, TabId, TabKind,
-    WorkspaceId,
+    Agent, AgentKind, AgentState, BrowserId, Command, Direction, Pane, PaneId, SessionId, Tab,
+    TabId, TabKind, WorkspaceId,
 };
 use macaroni_ipc::{
-    AgentInfo, BrowseAction, Call, Event, Listener, PaneInfo, Request, Response, Screen, TabInfo,
-    Tree, WorkspaceInfo,
+    AgentInfo, BrowseAction, Call, Event, GroupInfo, Listener, PaneInfo, Request, Response, Screen,
+    TabInfo, Tree, WorkspaceInfo,
 };
 use macaroni_term::Snapshot;
 use serde_json::{Value, json};
@@ -299,7 +299,11 @@ impl App {
             .collect();
         let browser_of = |t: &TabId| match self.model.tab(*t)?.kind {
             TabKind::Browser(id) => Some(id),
-            TabKind::Terminal(_) => None,
+            TabKind::Terminal(_)
+            | TabKind::Git
+            | TabKind::Tmux
+            | TabKind::AgentSetup
+            | TabKind::File => None,
         };
         panes
             .iter()
@@ -354,11 +358,21 @@ impl App {
         }
     }
 
-    /// A terminal tab's session; errs for a browser tab.
+    /// A terminal tab's session; errs for a browser or Git tab.
     fn session(&self, tab: TabId) -> Result<SessionId, String> {
         match self.model.tab(tab).ok_or("no such tab")?.kind {
             TabKind::Terminal(session) => Ok(session),
             TabKind::Browser(_) => Err(format!("tab {} is a browser, not a terminal", tab.0)),
+            TabKind::Git => Err(format!("tab {} is a Git tab, not a terminal", tab.0)),
+            TabKind::AgentSetup => Err(format!(
+                "tab {} is an agent setup tab, not a terminal",
+                tab.0
+            )),
+            TabKind::File => Err(format!("tab {} is a file tab, not a terminal", tab.0)),
+            TabKind::Tmux => Err(format!(
+                "tab {} is a tmux window; its panes aren't addressable yet",
+                tab.0
+            )),
         }
     }
 
@@ -405,6 +419,14 @@ impl App {
                 active: ws.id == window.active,
                 window: number,
                 focused_window: window.id == focused,
+                group: ws
+                    .group
+                    .and_then(|g| self.model.group(g))
+                    .map(|g| GroupInfo {
+                        id: g.id.0,
+                        name: g.name.clone(),
+                        collapsed: g.collapsed,
+                    }),
                 panes: ws
                     .layout
                     .leaves()
@@ -461,15 +483,18 @@ impl App {
             Call::ClearAttention { tab } => self.tab_command(tab, Command::ClearAttention),
             Call::Agent {
                 tab,
+                kind,
                 state,
                 detail,
                 session_id,
                 cwd,
-            } => self.agent(tab, state, detail, session_id, cwd),
+                transcript_path,
+            } => self.agent(tab, kind, state, detail, [session_id, cwd, transcript_path]),
             Call::AgentSummary { tab, summary } => {
                 self.tab_command(tab, |tab| Command::SetAgentSummary { tab, summary })
             }
             Call::OpenBrowser { tab, url, split } => self.open_browser(tab, url, split),
+            Call::OpenFile { tab, path, split } => self.open_file(tab, &path, split),
             Call::Navigate { tab, url } => self.navigate(tab, &url),
             Call::Browse { tab, action } => self.browse(tab, action),
             Call::ReadPage { .. } => Err("read_page is answered asynchronously".into()),
@@ -581,16 +606,20 @@ impl App {
     fn agent(
         &mut self,
         tab: Option<u64>,
+        kind: macaroni_ipc::AgentKind,
         state: macaroni_ipc::AgentState,
         detail: Option<String>,
-        session_id: Option<String>,
-        cwd: Option<String>,
+        [session_id, cwd, transcript]: [Option<String>; 3],
     ) -> Result<Value, String> {
         let tab = self.tab(tab)?;
         let command = match state {
             macaroni_ipc::AgentState::Ended => Command::ClearAgent(tab),
             other => Command::SetAgent {
                 tab,
+                kind: match kind {
+                    macaroni_ipc::AgentKind::Claude => AgentKind::Claude,
+                    macaroni_ipc::AgentKind::Codex => AgentKind::Codex,
+                },
                 state: match other {
                     macaroni_ipc::AgentState::Working => AgentState::Working,
                     macaroni_ipc::AgentState::NeedsInput => AgentState::NeedsInput,
@@ -599,6 +628,7 @@ impl App {
                 detail: detail.clone(),
                 session_id,
                 cwd,
+                transcript,
             },
         };
         self.run(command);
@@ -651,6 +681,36 @@ impl App {
                 self.ipc.tasks.push(task);
             }
         }
+        Ok(self.focused_ids())
+    }
+
+    /// Opens a file tab for `path` (absolute) beside `tab`, or in a new split on that side of
+    /// its pane. Errs when there's no file there.
+    fn open_file(
+        &mut self,
+        tab: Option<u64>,
+        path: &str,
+        split: Option<macaroni_ipc::Direction>,
+    ) -> Result<Value, String> {
+        let tab = self.tab(tab)?;
+        let file = std::path::Path::new(path);
+        if !file.is_absolute() {
+            return Err(format!("{path} isn't an absolute path"));
+        }
+        if !file.is_file() {
+            return Err(format!("no file at {path}"));
+        }
+        self.run(Command::SelectTab(tab));
+        self.run(Command::OpenFile {
+            path: path.to_owned(),
+            split: split.map(direction),
+        });
+        let opened = self.model.focused_tab().id;
+        let task = self.file_update(
+            opened,
+            crate::view::file_tab::FileMessage::Refresh { force: true },
+        );
+        self.ipc.tasks.push(task);
         Ok(self.focused_ids())
     }
 
@@ -722,9 +782,19 @@ fn tab_info(tab: &Tab, pane: &Pane) -> TabInfo {
         kind: match tab.kind {
             TabKind::Terminal(_) => macaroni_ipc::TabKind::Terminal,
             TabKind::Browser(_) => macaroni_ipc::TabKind::Browser,
+            TabKind::Git => macaroni_ipc::TabKind::Git,
+            TabKind::Tmux => macaroni_ipc::TabKind::Tmux,
+            TabKind::AgentSetup => macaroni_ipc::TabKind::AgentSetup,
+            TabKind::File => macaroni_ipc::TabKind::File,
         },
         url: tab.url.clone(),
-        title: tab.label().map(str::to_owned),
+        // A Git tab has no title of its own; its folder says which it is, and a file tab's
+        // file.
+        title: tab.label().map(str::to_owned).or_else(|| match tab.kind {
+            TabKind::Git => tab.cwd.clone(),
+            TabKind::File => tab.file.clone(),
+            _ => None,
+        }),
         active: tab.id == pane.active,
         attention: tab.attention.as_ref().map(|n| n.body.clone()),
         agent: tab.agent.as_ref().map(agent_info),
@@ -734,6 +804,10 @@ fn tab_info(tab: &Tab, pane: &Pane) -> TabInfo {
 /// A tab's coding agent as `list` reports it.
 fn agent_info(agent: &Agent) -> AgentInfo {
     AgentInfo {
+        kind: match agent.kind {
+            AgentKind::Claude => macaroni_ipc::AgentKind::Claude,
+            AgentKind::Codex => macaroni_ipc::AgentKind::Codex,
+        },
         state: match agent.state {
             AgentState::Working => macaroni_ipc::AgentState::Working,
             AgentState::NeedsInput => macaroni_ipc::AgentState::NeedsInput,
@@ -743,5 +817,6 @@ fn agent_info(agent: &Agent) -> AgentInfo {
         summary: agent.summary.clone(),
         session_id: agent.session_id.clone(),
         cwd: agent.cwd.clone(),
+        transcript_path: agent.transcript.clone(),
     }
 }

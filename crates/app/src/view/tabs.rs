@@ -28,6 +28,7 @@ use super::{RENAME_INPUT, SEARCH_INPUT};
 use crate::icons::{Glyph, Icon, glyph as draw_glyph, icon, named_glyph};
 use crate::pointer::{Halves, Pointer};
 use crate::right_click::RightClick;
+use crate::state::KeyFocus;
 use crate::theme::{Chrome, workspace_color};
 use crate::{App, Dragged, DropTarget, MenuTarget, Message, Renaming, anim, glass, label};
 
@@ -147,7 +148,15 @@ impl App {
             .spacing(tab_spacing(c))
             .align_y(alignment::Vertical::Top);
         // Outside the scrolling part, so it stays at the end of the strip.
-        let add = insertion_line(c, new_tab_button(c, pane.id), gap == Some(pane.tabs.len()));
+        let add = insertion_line(
+            c,
+            self.ringed(
+                KeyFocus::Add(pane.id),
+                c.s.tabs.add_radius,
+                new_tab_button(c, pane.id),
+            ),
+            gap == Some(pane.tabs.len()),
+        );
         // Top-aligned: the scroller is `strip_scrollbar_room` taller than everything else, and
         // that room hangs below the tabs.
         let mut strip = row![tab_scroller(c, pane.id, tabs.into(), overflow), add]
@@ -173,42 +182,38 @@ impl App {
         strip.into()
     }
 
-    /// Icon buttons that open a terminal (the default shell), a browser, and VS Code at the
-    /// active tab's folder (a VS Code tab once downloaded, else the desktop app if installed),
+    /// Icon buttons that open a terminal (the default shell), a browser, a Git tab, and VS Code
+    /// at the active tab's folder (a VS Code tab once downloaded, else the desktop app if installed),
     /// each in `pane` and named on hover.
     fn new_tab_buttons(&self, pane: PaneId) -> Element<'_, Message> {
         let c = self.chrome;
-        let button = |glyph, name: &str, message| -> Element<'_, Message> {
-            tooltip(
-                icon_button(c, glyph, message),
-                name_tip(c, name.to_owned()),
-                tooltip::Position::Bottom,
-            )
-            .into()
-        };
-        let mut buttons = row![
-            button(
-                Icon::Terminal,
-                "New terminal",
-                Message::Commands(vec![Command::FocusPane(pane), Command::NewTab]),
-            ),
-            button(Icon::Globe, "New browser", Message::NewBrowserIn(pane)),
-        ];
-        // A tab when VS Code for the web is downloaded, else the desktop app.
-        if self.vscode_web.installed {
-            buttons = buttons.push(button(
-                Icon::Code,
-                "New VS Code tab",
-                Message::VsCodeTab(pane),
-            ));
-        } else if self.vscode.is_some() {
-            buttons = buttons.push(button(
-                Icon::Code,
-                "Open in VS Code",
-                Message::OpenVsCode(pane),
-            ));
-        }
-        container(buttons.spacing(NEW_BUTTON_SPACING))
+        let buttons = self
+            .strip_buttons(pane)
+            .into_iter()
+            .enumerate()
+            .map(|(n, b)| {
+                let button: Element<'_, Message> = match b.message {
+                    Some(message) => icon_button(c, b.icon, message),
+                    // Grayed out, and named so on hover (Git outside a repository).
+                    None => container(
+                        icon(b.icon, c.s.controls.icon_button_size, c.faint)
+                            .opacity(c.s.effects.dim),
+                    )
+                    .padding(super::widgets::ICON_BUTTON_PADDING)
+                    .into(),
+                };
+                let button = tooltip(
+                    button,
+                    name_tip(c, b.name.to_owned()),
+                    tooltip::Position::Bottom,
+                );
+                self.ringed(
+                    KeyFocus::Button(pane, n),
+                    c.s.controls.radius,
+                    button.into(),
+                )
+            });
+        container(row(buttons).spacing(NEW_BUTTON_SPACING))
             .height(c.s.tabs.height)
             .align_y(alignment::Vertical::Center)
             .into()
@@ -221,7 +226,7 @@ impl App {
         }
         let c = self.chrome;
         let code = self.vscode_web.installed || self.vscode.is_some();
-        let count = if code { 3.0 } else { 2.0 };
+        let count = if code { 4.0 } else { 3.0 };
         count * tab_row(c) + (count - 1.0) * NEW_BUTTON_SPACING + tab_spacing(c)
     }
 
@@ -343,12 +348,17 @@ impl App {
                 .delay(TIP_DELAY)
                 .into()
         };
+        let radius = c.s.tabs.radius;
         insertion_line(
             c,
-            RightClick::new(tab_area, move |at| {
-                Message::MenuOpen(MenuTarget::Tab(id), at)
-            })
-            .into(),
+            self.ringed(
+                KeyFocus::Tab(id),
+                radius,
+                RightClick::new(tab_area, move |at| {
+                    Message::MenuOpen(MenuTarget::Tab(id), at)
+                })
+                .into(),
+            ),
             line,
         )
     }
@@ -746,10 +756,15 @@ pub(super) fn tab_icon(tab: &Tab) -> Glyph {
     named_glyph(tab.icon.as_deref()).unwrap_or_else(|| tab_kind_icon(tab).into())
 }
 
-/// The default icon for a tab's kind: a globe for a browser, a terminal prompt otherwise.
+/// The default icon for a tab's kind: a globe for a browser, arrows between branches for a Git
+/// tab, a robot for an agent setup tab, a page for a file tab, a terminal prompt otherwise.
 pub(super) fn tab_kind_icon(tab: &Tab) -> Icon {
     match tab.kind {
         TabKind::Browser(_) => Icon::Globe,
+        TabKind::Git => Icon::GitCompare,
+        TabKind::Tmux => Icon::Columns,
+        TabKind::AgentSetup => Icon::Bot,
+        TabKind::File => Icon::FileText,
         TabKind::Terminal(_) => Icon::Terminal,
     }
 }
@@ -764,6 +779,10 @@ fn tab_value(c: Chrome, tab: &Tab, index: usize, key: &str) -> Option<String> {
         "kind" => match tab.kind {
             TabKind::Terminal(_) => "Terminal".to_owned(),
             TabKind::Browser(_) => "Browser".to_owned(),
+            TabKind::Git => "Git".to_owned(),
+            TabKind::Tmux => "tmux".to_owned(),
+            TabKind::AgentSetup => "Agent setup".to_owned(),
+            TabKind::File => "File".to_owned(),
         },
         "dir" => tab_dir(tab),
         "path" => tab.cwd.clone().unwrap_or_default(),
@@ -811,6 +830,26 @@ pub fn tab_title(tab: &Tab) -> String {
             .and_then(host)
             .unwrap_or("New tab")
             .to_owned(),
+        TabKind::Tmux => "tmux".to_owned(),
+        TabKind::Git => match tab_dir(tab) {
+            dir if dir.is_empty() => "Git".to_owned(),
+            dir => format!("Git: {dir}"),
+        },
+        TabKind::AgentSetup => match tab_dir(tab) {
+            dir if dir.is_empty() => "Agent setup".to_owned(),
+            dir => format!("Agent setup: {dir}"),
+        },
+        TabKind::File => tab
+            .file
+            .as_deref()
+            .map(|file| {
+                file.rsplit(['/', '\\'])
+                    .next()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(file)
+                    .to_owned()
+            })
+            .unwrap_or_else(|| "File".to_owned()),
     }
 }
 
@@ -828,7 +867,7 @@ impl App {
     /// Whether the find bar shows in `pane`'s strip: its active tab is the terminal being
     /// searched. Switching tabs hides the bar without closing it. A page's search has its own
     /// card in the browser pane instead (`App::page_find`).
-    fn search_shown(&self, pane: &Pane) -> bool {
+    pub(crate) fn search_shown(&self, pane: &Pane) -> bool {
         use crate::state::SearchTarget;
         let (Some(search), Some(tab)) = (self.search.as_ref(), self.model.tab(pane.active)) else {
             return false;

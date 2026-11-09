@@ -45,8 +45,10 @@ const DENY: &str = "Deny";
 
 /// Shows an OS notification for `tab` on a background thread; delivery can block, and on macOS
 /// the thread waits for a click. `ask` adds Allow and Deny buttons (a permission request).
-pub fn show(title: String, body: String, tab: TabId, ask: bool) {
-    std::thread::spawn(move || deliver(&title, &body, tab, ask));
+/// `sound` lets the system play its notification sound; otherwise the notification is silent
+/// (the app plays its own, see [`crate::bell::play`]).
+pub fn show(title: String, body: String, tab: TabId, ask: bool, sound: bool) {
+    std::thread::spawn(move || deliver(&title, &body, tab, ask, sound));
 }
 
 /// Hands `tab` and what was clicked to the app.
@@ -67,10 +69,11 @@ fn answer(argument: Option<&str>) -> Clicked {
 
 /// A Windows toast; a click while it's showing calls [`clicked`].
 #[cfg(windows)]
-fn deliver(title: &str, body: &str, tab: TabId, ask: bool) {
+fn deliver(title: &str, body: &str, tab: TabId, ask: bool, sound: bool) {
     let mut toast = tauri_winrt_notification::Toast::new(APP_ID)
         .title(title)
-        .text1(body);
+        .text1(body)
+        .sound(sound.then_some(tauri_winrt_notification::Sound::Default));
     if ask {
         toast = toast.add_button(ALLOW, ALLOW).add_button(DENY, DENY);
     }
@@ -85,11 +88,14 @@ fn deliver(title: &str, body: &str, tab: TabId, ask: bool) {
 /// A macOS notification, waited on so a click (or, for a permission request, its Allow or Deny
 /// action) can be reported.
 #[cfg(target_os = "macos")]
-fn deliver(title: &str, body: &str, tab: TabId, ask: bool) {
+fn deliver(title: &str, body: &str, tab: TabId, ask: bool, sound: bool) {
     use mac_notification_sys::{MainButton, NotificationResponse};
     let _ = mac_notification_sys::set_application(APP_ID);
     let mut notification = mac_notification_sys::Notification::new();
     notification.title(title).message(body).wait_for_click(true);
+    if sound {
+        notification.default_sound();
+    }
     if ask {
         notification.main_button(MainButton::DropdownActions("Answer", &[ALLOW, DENY]));
     }
@@ -102,7 +108,7 @@ fn deliver(title: &str, body: &str, tab: TabId, ask: bool) {
 
 /// A notification through `notify-rust`; clicks aren't reported.
 #[cfg(not(any(windows, target_os = "macos")))]
-fn deliver(title: &str, body: &str, _tab: TabId, _ask: bool) {
+fn deliver(title: &str, body: &str, _tab: TabId, _ask: bool, _sound: bool) {
     let _ = notify_rust::Notification::new()
         .summary(title)
         .body(body)

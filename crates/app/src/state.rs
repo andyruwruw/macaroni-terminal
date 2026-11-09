@@ -1,5 +1,5 @@
 //! The app's transient UI state: open menus, drags, renames, the find bar and hover, plus
-//! [`Running`], a started terminal.
+//! [`Running`], a started terminal, and [`Starting`], one whose shell is on its way.
 //!
 //! These are plain data held in `App` fields. The handlers in `update/` change them and the
 //! view in `view/` reads them; `view/drag.rs` turns [`ItemDrag`] and the hover state into a
@@ -19,6 +19,18 @@ pub(crate) struct Running {
     /// The grid size last sent to the PTY, so a view reporting the same size doesn't resize
     /// (and reflow) the shell again.
     pub(crate) size: GridSize,
+}
+
+/// A terminal whose shell is being started off the UI thread ([`crate::message::Started`]).
+pub(crate) struct Starting {
+    /// Its tab, so a tab closed meanwhile can still drop its restored entry.
+    pub(crate) tab: Option<TabId>,
+    /// The size the shell is started at.
+    pub(crate) spawned: GridSize,
+    /// The size its view last reported, which the PTY is resized to if it changed meanwhile.
+    pub(crate) size: GridSize,
+    /// What the tab was before a restart: its saved scrollback and the agent to resume.
+    pub(crate) restored: crate::session::SavedTab,
 }
 
 /// The search bar, attached to one session (the focused pane's active tab when opened).
@@ -61,6 +73,18 @@ pub(crate) struct Menu {
     pub(crate) at: Point,
     /// The list flown out beside the main one, if any.
     pub(crate) sub: Option<Submenu>,
+    /// The item the keyboard has highlighted, once a key has moved it (or the menu was opened
+    /// from the keyboard).
+    pub(crate) cursor: Option<MenuCursor>,
+}
+
+/// The item the keyboard highlights in an open menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MenuCursor {
+    /// In the open submenu rather than the main list.
+    pub(crate) sub: bool,
+    /// The entry's index in its list (always an item, never a separator or header).
+    pub(crate) index: usize,
 }
 
 /// A submenu opened by hovering its item (closed again by hovering a plain item) or by
@@ -71,6 +95,48 @@ pub(crate) struct Submenu {
     pub(crate) page: MenuPage,
     /// Opened by a click, so hovering a plain item doesn't close it.
     pub(crate) pinned: bool,
+}
+
+/// What the keyboard has focused outside the terminals (F6, `update/keyboard.rs`): a sidebar
+/// row or a tab strip's stop. Each has a focus ring and a widget id
+/// ([`KeyFocus::widget_id`]) on its outermost container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum KeyFocus {
+    /// A workspace in the sidebar.
+    Workspace(WorkspaceId),
+    /// A group header in the sidebar.
+    Group(GroupId),
+    /// The sidebar's New workspace button.
+    NewWorkspace,
+    /// A tab in a pane's strip.
+    Tab(TabId),
+    /// A pane's `+` button.
+    Add(PaneId),
+    /// One of a pane's new tab buttons, by its place in `App::strip_buttons`.
+    Button(PaneId, usize),
+}
+
+impl KeyFocus {
+    /// The widget id of the item's outermost container, to find where it is on screen.
+    pub(crate) fn widget_id(self) -> iced::widget::Id {
+        // Model ids never share a value across kinds, so the raw value is enough for those.
+        iced::widget::Id::from(match self {
+            Self::Workspace(WorkspaceId(id)) | Self::Group(GroupId(id)) | Self::Tab(TabId(id)) => {
+                format!("item-{id}")
+            }
+            Self::NewWorkspace => "new-workspace".to_owned(),
+            Self::Add(PaneId(pane)) => format!("add-{pane}"),
+            Self::Button(PaneId(pane), n) => format!("button-{pane}-{n}"),
+        })
+    }
+
+    /// Whether it's in the sidebar rather than a tab strip.
+    pub(crate) fn in_sidebar(self) -> bool {
+        matches!(
+            self,
+            Self::Workspace(_) | Self::Group(_) | Self::NewWorkspace
+        )
+    }
 }
 
 /// What a right-click menu was opened on.
@@ -84,6 +150,8 @@ pub(crate) enum MenuTarget {
     Workspace(WorkspaceId),
     /// A group header in the sidebar.
     Group(GroupId),
+    /// A link or file Ctrl+right-clicked in a terminal: where to open it (`App.clicked`).
+    Link,
 }
 
 /// Which list a menu shows: its main one, or a submenu beside it.
@@ -107,6 +175,8 @@ pub(crate) enum MenuPage {
     Merge,
     /// Whether to delete a group and close its workspaces.
     Delete,
+    /// Which plugins are on in a tab.
+    Plugins,
 }
 
 /// A tab or workspace being dragged: armed when pressed, dragging once the cursor has moved far

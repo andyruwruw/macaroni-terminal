@@ -2,7 +2,8 @@
 # rewritten for every new terminal). macaroni starts zsh with ZDOTDIR pointing here, so zsh reads
 # this file first. It puts your own ZDOTDIR back, so everything after this (.zprofile, .zshrc,
 # .zlogin) is read from where it always is, reads your .zshenv, then adds prompt marks
-# (OSC 133) and the working directory (OSC 7) for the prompt jumps and long-command alerts.
+# (OSC 133) and the working directory (OSC 7) for the prompt jumps, long-command alerts and
+# command history.
 
 if [[ -n ${MACARONI_ZDOTDIR+x} ]]; then
   if [[ -n $MACARONI_ZDOTDIR ]]; then
@@ -24,9 +25,17 @@ if [[ -o interactive ]]; then
     local code=$?
     print -rn -- $'\e]133;D;'"$code"$'\a\e]7;file://'"${HOST}${PWD}"$'\a\e]133;A\a'
   }
+  # Where the command line starts (B), at the end of the prompt, unless it's there already.
+  # Prompt themes rebuild PS1 in their own precmd hooks, so this one moves itself to the end of
+  # the list each time, to run after them from the next prompt on.
+  __macaroni_command_mark() {
+    [[ $PS1 == *133\;B* ]] || PS1+=$'%{\e]133;B\a%}'
+    precmd_functions=(${precmd_functions:#__macaroni_command_mark} __macaroni_command_mark)
+  }
   __macaroni_preexec() {
     print -rn -- $'\e]133;C\a'
   }
   add-zsh-hook precmd __macaroni_precmd
+  add-zsh-hook precmd __macaroni_command_mark
   add-zsh-hook preexec __macaroni_preexec
 fi

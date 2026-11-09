@@ -1,8 +1,9 @@
 //! Terminal sessions for macaroni: a program running in a PTY, turned into a grid the app can
 //! copy and draw.
 //!
-//! [`Session`] owns the PTY, the child process and the reader, waiter and sync threads, and
-//! reports [`SessionEvent`]s through a callback. Output goes through [`OscSniffer`] (agent
+//! [`Session`] owns its [`Source`] (a local PTY and child process, or a shell over macaroni's own
+//! SSH client, `ssh`) and the reader, waiter and sync threads, and reports [`SessionEvent`]s
+//! through a callback. Output goes through [`OscSniffer`] (agent
 //! notifications and OSC 7 directories) and then the [`Emulator`] ([`AlacrittyEmulator`], the
 //! only implementation). When the app gives it triggers, [`Lines`] also turns it back into plain
 //! lines for them to match. Inline images (OSC 1337) are kept by the emulator and listed in the
@@ -23,8 +24,12 @@ mod lines;
 mod links;
 mod mouse;
 mod osc;
+mod pipe;
 mod session;
 pub mod shell;
+mod source;
+mod ssh;
+pub mod tmux;
 
 pub use emulator::{AlacrittyEmulator, Emulator, EmulatorEvent};
 pub use grid::{
@@ -38,3 +43,6 @@ pub use links::{FileRef, Link, file_at, is_openable, url_at};
 pub use mouse::{MouseButton, MouseEvent, encode_mouse};
 pub use osc::{Notification, OscEvent, OscSniffer};
 pub use session::{Session, SessionConfig, SessionEvent};
+pub use source::Source;
+pub use ssh::SshTarget;
+pub use tmux::{Layout, LayoutKind, TmuxClient, TmuxEvent, TmuxPane, TmuxWindow};

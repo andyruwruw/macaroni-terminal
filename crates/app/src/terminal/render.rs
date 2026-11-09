@@ -25,6 +25,7 @@ use iced::{Border, Color, Font, Pixels, Point, Rectangle, Size, font};
 use macaroni_term::{Cell, CellFlags, Color as TermColor, CursorShape, Rgb, Snapshot};
 
 use super::box_drawing;
+use crate::accessibility::contrast;
 use crate::fonts;
 use crate::theme::{Palette, to_iced};
 
@@ -39,7 +40,8 @@ const FONT_SIZE_PER_LINE_PX: f32 = 14.0;
 const DIM_ALPHA: f32 = 0.66;
 /// The ANSI palette entry (blue) that underlines the link under the pointer.
 const LINK_COLOR: usize = 4;
-/// Thickness of the underline and beam cursors.
+/// Thickness of the underline and beam cursors unless `[accessibility] cursor_thickness` says
+/// otherwise.
 const CURSOR_BAR: f32 = 2.0;
 /// How far above the cell's bottom the IME preedit's underline sits.
 const PREEDIT_UNDERLINE_INSET: f32 = 2.0;
@@ -63,6 +65,11 @@ pub struct Metrics {
     /// Which `[font] fallback` list was in effect ([`fonts::fallback_generation`]), so a new
     /// list clears the row cache like any other font change.
     pub fallback: u32,
+    /// The least contrast text keeps against its background (`[accessibility]
+    /// minimum_contrast`); 1 leaves colors alone. Here so a change clears the row cache.
+    pub minimum_contrast: f32,
+    /// How thick bar and underline cursors are (`[accessibility] cursor_thickness`).
+    pub cursor_thickness: f32,
 }
 
 impl Metrics {
@@ -80,6 +87,8 @@ impl Metrics {
             ligatures,
             line_height,
             fallback: fonts::fallback_generation(),
+            minimum_contrast: 1.0,
+            cursor_thickness: CURSOR_BAR,
         }
     }
 
@@ -524,7 +533,7 @@ fn layout_row(
         if cell.flags.contains(CellFlags::WIDE_SPACER) {
             continue;
         }
-        let (fg, bg) = cell_colors(cell, palette, overrides);
+        let (fg, bg) = cell_colors(cell, palette, overrides, metrics.minimum_contrast);
         let span = if cell.flags.contains(CellFlags::WIDE) {
             2
         } else {
@@ -643,8 +652,14 @@ fn extend_or_push(runs: &mut Vec<(usize, usize, Color)>, start: usize, end: usiz
 
 /// Foreground, plus a background only when it differs from the default (the cleared screen).
 /// Inverse swaps them before that test, dim lowers the foreground's alpha, and selected cells
-/// always get the palette's selection background.
-fn cell_colors(cell: &Cell, palette: &Palette, overrides: &[(u16, Rgb)]) -> (Color, Option<Color>) {
+/// always get the palette's selection background. The foreground is then kept at
+/// `min_contrast` against whatever is behind it.
+fn cell_colors(
+    cell: &Cell,
+    palette: &Palette,
+    overrides: &[(u16, Rgb)],
+    min_contrast: f32,
+) -> (Color, Option<Color>) {
     let mut fg = palette.resolve(cell.fg, overrides);
     let mut bg = palette.resolve(cell.bg, overrides);
     if cell.flags.contains(CellFlags::INVERSE) {
@@ -656,12 +671,17 @@ fn cell_colors(cell: &Cell, palette: &Palette, overrides: &[(u16, Rgb)]) -> (Col
         1.0
     };
     if cell.flags.contains(CellFlags::SELECTED) {
-        return (to_iced(fg, alpha), Some(to_iced(palette.selection, 1.0)));
+        let behind = to_iced(palette.selection, 1.0);
+        return (
+            contrast::ensure(to_iced(fg, alpha), behind, min_contrast),
+            Some(behind),
+        );
     }
     let default_bg = palette.resolve(TermColor::Background, overrides);
+    let behind = to_iced(bg, 1.0);
     (
-        to_iced(fg, alpha),
-        (bg != default_bg).then(|| to_iced(bg, 1.0)),
+        contrast::ensure(to_iced(fg, alpha), behind, min_contrast),
+        (bg != default_bg).then_some(behind),
     )
 }
 
@@ -727,14 +747,14 @@ fn draw_cursor(renderer: &mut iced::Renderer, frame: &Frame<'_>, clip: Rectangle
             CursorShape::Underline => fill(
                 renderer,
                 Rectangle::new(
-                    Point::new(x, y + ch - CURSOR_BAR),
-                    Size::new(width, CURSOR_BAR),
+                    Point::new(x, y + ch - metrics.cursor_thickness),
+                    Size::new(width, metrics.cursor_thickness),
                 ),
                 cursor_color,
             ),
             CursorShape::Beam => fill(
                 renderer,
-                Rectangle::new(Point::new(x, y), Size::new(CURSOR_BAR, ch)),
+                Rectangle::new(Point::new(x, y), Size::new(metrics.cursor_thickness, ch)),
                 cursor_color,
             ),
         }

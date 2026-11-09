@@ -9,8 +9,8 @@ mod protocol;
 mod transport;
 
 pub use protocol::{
-    AgentInfo, AgentState, BrowseAction, Call, Direction, Event, Page, PaneInfo, Request, Response,
-    Screen, TabInfo, TabKind, Tree, WorkspaceInfo,
+    AgentInfo, AgentKind, AgentState, BrowseAction, Call, Direction, Event, GroupInfo, Page,
+    PaneInfo, Request, Response, Screen, TabInfo, TabKind, Tree, WorkspaceInfo,
 };
 pub use transport::{
     Listener, SOCKET_ENV, Stream, TAB_ENV, accept, connect, endpoint, listen, read_line, write_line,

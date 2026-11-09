@@ -16,7 +16,7 @@ use macaroni_core::{Command, WindowId, WindowView, Workspace};
 
 use crate::message::{Message, WindowOp};
 #[cfg(windows)]
-use crate::move_dpi;
+use crate::move_loop;
 use crate::session::SavedWindow;
 use crate::{App, DEFAULT_WINDOW_SIZE, Win, native_handle, window_settings};
 
@@ -36,13 +36,15 @@ impl App {
         w: WindowId,
         saved: Option<&SavedWindow>,
     ) -> Task<Message> {
-        let mut settings = window_settings(saved);
+        let ui = self.ui_scale();
+        let mut settings = window_settings(saved, ui);
         if saved.is_none()
             && let Some(at) = self.next_window_at.take()
         {
+            // A window's position is in the system's logical pixels, without `ui_scale`.
             settings.position = window::Position::Specific(iced::Point::new(
-                (at.x - DROP_GRAB.x).max(0.0),
-                (at.y - DROP_GRAB.y).max(0.0),
+                (at.x - DROP_GRAB.x).max(0.0) * ui,
+                (at.y - DROP_GRAB.y).max(0.0) * ui,
             ));
         }
         let (id, opened) = window::open(settings.clone());
@@ -53,7 +55,7 @@ impl App {
                 size: settings.size,
                 position: saved
                     .and_then(|s| s.position)
-                    .map(|(x, y)| iced::Point::new(x, y)),
+                    .map(|(x, y)| iced::Point::new(x / ui, y / ui)),
                 maximized: false,
                 parent: None,
                 scale: 1.0,
@@ -74,7 +76,10 @@ impl App {
             return Task::none();
         };
         self.wins.remove(&id);
-        window::close(id)
+        self.reader.forget(id);
+        window::run(id, move |_| crate::accessibility::adapter::detach(id))
+            .discard()
+            .chain(window::close(id))
     }
 
     /// Brings the OS window showing the model's window `w` to the front.
@@ -114,9 +119,17 @@ impl App {
         self.win().is_some_and(|w| w.maximized)
     }
 
-    /// That window's scale factor.
+    /// That window's scale factor: the display's times `[accessibility] ui_scale`, how many
+    /// physical pixels a logical one covers.
     pub(crate) fn scale(&self) -> f32 {
-        self.win().map_or(1.0, |w| w.scale)
+        self.win().map_or(1.0, |w| w.scale) * self.ui_scale()
+    }
+
+    /// `[accessibility] ui_scale`: how much bigger than the display's own scaling macaroni
+    /// draws. iced's logical pixels include it; the system's (window positions, saved sizes)
+    /// don't.
+    pub(crate) fn ui_scale(&self) -> f32 {
+        self.config.accessibility.ui_scale
     }
 
     /// That window's sidebar.
@@ -158,23 +171,32 @@ impl App {
     }
 
     /// Asks a newly opened window for its native handle and scale factor. On Windows, also
-    /// hooks it to hold DPI changes back during a move (`move_dpi`); that has to happen in
-    /// `window::run`, on the event loop's thread, which owns the window.
+    /// hooks it to start drags safely and hold DPI changes back during a move (`move_loop`);
+    /// that has to happen in `window::run`, on the event loop's thread, which owns the window.
     pub(crate) fn window_opened(&mut self, id: window::Id) -> Task<Message> {
+        let ui = self.ui_scale();
         Task::batch([
-            window::run(id, |w| {
+            window::run(id, move |w| {
                 let handle = native_handle(w);
                 #[cfg(windows)]
                 if let Some(handle) = handle {
-                    move_dpi::install(handle);
+                    move_loop::install(handle);
+                }
+                // As soon as it's open, so screen readers find it from the start.
+                if let Some(handle) = handle {
+                    crate::accessibility::adapter::attach(id, handle);
                 }
                 handle
             })
             .map(move |handle| Message::WindowHandle(id, handle)),
             window::scale_factor(id).map(move |scale| Message::Rescaled(id, scale)),
-            // Where it is, for dragging between windows; `Moved` keeps it current.
+            // Where it is, for dragging between windows; `Moved` keeps it current. This answers
+            // in the system's logical pixels, `Moved` in iced's.
             window::position(id).then(move |at| match at {
-                Some(at) => Task::done(Message::WindowMoved(id, at)),
+                Some(at) => Task::done(Message::WindowMoved(
+                    id,
+                    iced::Point::new(at.x / ui, at.y / ui),
+                )),
                 None => Task::none(),
             }),
         ])
@@ -188,10 +210,10 @@ impl App {
         };
         match op {
             WindowOp::Close => self.close_requested(id),
-            WindowOp::Drag => window::drag(id),
+            WindowOp::Drag => drag(id, None),
             WindowOp::ToggleMaximize => window::toggle_maximize(id),
             WindowOp::Minimize => window::minimize(id, true),
-            WindowOp::Resize(direction) => window::drag_resize(id, direction),
+            WindowOp::Resize(direction) => drag(id, Some(direction)),
         }
     }
 
@@ -216,12 +238,21 @@ impl App {
         // Focus moving into a page looks like the window losing it, since the page is another
         // native window; the user is still looking at macaroni, so notifications stay quiet.
         self.window_focused = self.wins.values().any(|w| w.focused) || self.page_focus.is_some();
+        // macOS's adapter needs telling; Windows' follows the window's own messages.
+        let reader = if cfg!(target_os = "macos") && self.reader.active() {
+            window::run(id, move |_| {
+                crate::accessibility::adapter::focus(id, focused);
+            })
+            .discard()
+        } else {
+            Task::none()
+        };
         if !focused || w == self.model.focused_window() {
-            return Task::none();
+            return reader;
         }
         let dismissed = self.dismiss();
         let applied = self.apply(Command::FocusWindow(w));
-        Task::batch([dismissed, applied])
+        Task::batch([reader, dismissed, applied])
     }
 
     /// A click in macaroni's own UI takes keyboard focus back from the page that had it, by
@@ -253,10 +284,13 @@ impl App {
             .into_iter()
             .map(|w| {
                 let win = self.os_window(w).and_then(|id| self.wins.get(&id));
+                // Saved in the system's logical pixels, so a new `ui_scale` keeps the window
+                // where and how big it was.
+                let ui = self.ui_scale();
                 SavedWindow {
                     active: 0,
-                    position: win.and_then(|w| w.position).map(|p| (p.x, p.y)),
-                    size: win.map(|w| (w.size.width, w.size.height)),
+                    position: win.and_then(|w| w.position).map(|p| (p.x * ui, p.y * ui)),
+                    size: win.map(|w| (w.size.width * ui, w.size.height * ui)),
                     maximized: win.is_some_and(|w| w.maximized),
                 }
             })
@@ -315,5 +349,22 @@ impl App {
         }
         self.scrollback_files = files;
         self.session_dirty = true;
+    }
+}
+
+/// Moves window `id` (with `edge` `None`) or resizes it from `edge`, for a press on the title
+/// bar or an edge. On Windows `move_loop` starts it, only if the button is still down.
+fn drag(id: window::Id, edge: Option<window::Direction>) -> Task<Message> {
+    #[cfg(windows)]
+    return window::run(id, move |w| {
+        if let Some(handle) = native_handle(w) {
+            move_loop::drag(handle, edge);
+        }
+    })
+    .discard();
+    #[cfg(not(windows))]
+    match edge {
+        None => window::drag(id),
+        Some(direction) => window::drag_resize(id, direction),
     }
 }
