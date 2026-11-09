@@ -3509,7 +3509,7 @@ dependencies = [
 
 [[package]]
 name = "macaroni"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -3542,7 +3542,7 @@ dependencies = [
 
 [[package]]
 name = "macaroni-browser"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "cef",
  "cef-dll-sys",
@@ -3554,7 +3554,7 @@ dependencies = [
 
 [[package]]
 name = "macaroni-cli"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "clap",
  "macaroni-ipc",
@@ -3564,7 +3564,7 @@ dependencies = [
 
 [[package]]
 name = "macaroni-config"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "notify",
  "regex",
@@ -3575,11 +3575,11 @@ dependencies = [
 
 [[package]]
 name = "macaroni-core"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 
 [[package]]
 name = "macaroni-ipc"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "interprocess",
  "serde",
@@ -3589,7 +3589,7 @@ dependencies = [
 
 [[package]]
 name = "macaroni-term"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",
@@ -8184,7 +8184,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "notify",
  "sha2 0.10.9",

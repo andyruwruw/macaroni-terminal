@@ -4,6 +4,10 @@ All notable changes to macaroni are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] - 2026-11-09
+
+Git, file, agent setup and command history tabs, tmux control mode, panel plugins, Codex support, screen readers and keyboard navigation, accessibility settings, macaroni's own SSH client, and sounds you can try before picking.
+
 ### Added
 
 - A crash leaves `crash.log` in macaroni's local data folder: what failed and where, and the last few hundred things the app did before it, without anything typed, pasted or shown. It holds the most recent crash.

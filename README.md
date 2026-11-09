@@ -8,7 +8,7 @@ I work on many projects at once, and want them split into workspaces, and to all
 
 This terminal seeks to provide that. Run your agent, dev server, code and browser all in one spot.
 
-> macaroni is an early alpha (0.1.0-alpha.3): expect rough edges, and settings and the control API may still change.
+> macaroni is an early alpha (0.1.0-alpha.4): expect rough edges, and settings and the control API may still change.
 
 - **Native and fast.** Rust on the GPU, not a web view, so it keeps up with whatever your agents print.
 - **Made for agents.** Claude Code's live state shows in every pane and in the sidebar, and you get a ping the moment one needs you.
